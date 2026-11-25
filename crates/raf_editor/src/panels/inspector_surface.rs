@@ -16,10 +16,11 @@ use raf_render::api_graphic_basic::ui_surface::{
 };
 use raf_ui::components::select_trigger;
 use raf_ui::{
-    UiAlign, UiColorPicker, UiEventBinding, UiEventKind, UiFlow, UiIconSize, UiJustify, UiLayout,
-    UiNode, UiNodeKind, UiOverflow, UiRange, UiRect, UiScrollAxis, UiSelect, UiSelectOption,
-    UiSizeMode, UiSpacing, UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector,
-    UiStyleSheet, UiSurfaceMaterial, UiTextInput, UiTextOverflow, UiTextStyle, UiToggle,
+    UiAlign, UiColorPicker, UiCompactMode, UiEventBinding, UiEventKind, UiFlow, UiIconSize,
+    UiJustify, UiLayout, UiNode, UiNodeKind, UiOverflow, UiRange, UiRect, UiScrollAxis, UiSelect,
+    UiSelectOption, UiSizeMode, UiSpacing, UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState,
+    UiStyleSelector, UiStyleSheet, UiSurfaceMaterial, UiTextInput, UiTextOverflow, UiTextStyle,
+    UiToggle,
 };
 
 use crate::color_math::rgb_to_hsv;
@@ -38,8 +39,8 @@ mod transform;
 
 pub(crate) use behavior::variable_value_text;
 pub(crate) use components::{action_button, sessions_content};
-pub(crate) use fields::{dropdown_field, section_label};
 use components::{header, tabs};
+pub(crate) use fields::{dropdown_field, section_label};
 use sections::content;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -191,12 +192,25 @@ pub fn build_inspector_surface_with_assets(
     display_unit: DisplayUnit,
     project_assets: &[String],
 ) -> UiSurface {
-    let body=content(palette,scene,selected,sessions,view,display_unit,project_assets);
-    build_inspector_with_content(palette,transition,view,body)
+    let body = content(
+        palette,
+        scene,
+        selected,
+        sessions,
+        view,
+        display_unit,
+        project_assets,
+    );
+    build_inspector_with_content(palette, transition, view, body)
 }
 
 /// Shared inspector shell for scene properties and contextual document properties.
-pub fn build_inspector_with_content(palette:StudioUiPalette,transition:f32,view:InspectorViewState,body:UiNode)->UiSurface {
+pub fn build_inspector_with_content(
+    palette: StudioUiPalette,
+    transition: f32,
+    view: InspectorViewState,
+    body: UiNode,
+) -> UiSurface {
     let mut root_style = palette.panel_style();
     root_style.opacity = (0.55 + transition.clamp(0.0, 1.0) * 0.45).clamp(0.0, 1.0);
     let root = UiNode::new("inspector.root", UiNodeKind::Root)

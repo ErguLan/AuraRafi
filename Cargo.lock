@@ -2496,6 +2496,7 @@ name = "raf_editor"
 version = "0.12.0"
 dependencies = [
  "ab_glyph",
+ "arboard",
  "chrono",
  "dirs-next",
  "glam",
@@ -2508,6 +2509,7 @@ dependencies = [
  "raf_electronics",
  "raf_hardware",
  "raf_nodes",
+ "raf_particles",
  "raf_player",
  "raf_render",
  "raf_runtime",
@@ -2573,6 +2575,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "raf_particles"
+version = "0.12.0"
+dependencies = [
+ "glam",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "raf_player"
 version = "0.12.0"
 dependencies = [
@@ -2608,6 +2619,7 @@ dependencies = [
  "raf_assets",
  "raf_core",
  "raf_electronics",
+ "raf_particles",
  "raf_ui",
  "raw-window-handle",
  "ron",

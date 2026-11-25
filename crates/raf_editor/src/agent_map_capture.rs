@@ -19,8 +19,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 use uuid::Uuid;
 
-const MAP_FONT_BYTES: &[u8] =
-    include_bytes!("../../raf_render/assets/fonts/Ubuntu-Medium.ttf");
+const MAP_FONT_BYTES: &[u8] = include_bytes!("../../raf_render/assets/fonts/Ubuntu-Medium.ttf");
 const DEFAULT_WIDTH: u32 = 1_200;
 const DEFAULT_HEIGHT: u32 = 1_200;
 const MIN_EDGE: u32 = 256;
@@ -95,9 +94,9 @@ pub(crate) fn capture_top_down_map(
             "agent.viewport_capture.no_frame",
             "agent.viewport_capture.no_frame_detail",
         );
-        result.details.push(
-            "The requested map scope has no visible renderable entities.".to_string(),
-        );
+        result
+            .details
+            .push("The requested map scope has no visible renderable entities.".to_string());
         return result;
     };
     let mut size = max - min;
@@ -156,12 +155,7 @@ pub(crate) fn capture_top_down_map(
         let fill = if is_collider && show("colliders") {
             [210, 116, 58, 46]
         } else {
-            [
-                node.color.r,
-                node.color.g,
-                node.color.b,
-                56,
-            ]
+            [node.color.r, node.color.g, node.color.b, 56]
         };
         fill_rect_alpha(&mut image, rect, fill);
         if show("bounds") {
@@ -200,7 +194,10 @@ pub(crate) fn capture_top_down_map(
                 "offset": [node.collider.offset.x, node.collider.offset.y, node.collider.offset.z],
             }));
         }
-        if show("labels") && labels.len() < MAX_LABELS && should_label(node, *bounds, aggregate, selected) {
+        if show("labels")
+            && labels.len() < MAX_LABELS
+            && should_label(node, *bounds, aggregate, selected)
+        {
             let text = label_text(node);
             let (x, y) = (rect.0 + 3, rect.1 + 3);
             let label_color = if selected {
@@ -231,18 +228,20 @@ pub(crate) fn capture_top_down_map(
             renderable.len(),
             colliders.len()
         ),
-        format!(
-            "Grid: {:.2} m  Scale: {:.2} px/m",
-            grid_spacing, scale
-        ),
-        format!(
-            "Extents: {:.1} x {:.1} m",
-            size.x, size.z
-        ),
+        format!("Grid: {:.2} m  Scale: {:.2} px/m", grid_spacing, scale),
+        format!("Extents: {:.1} x {:.1} m", size.x, size.z),
     ];
     draw_legend(&mut image, &font, &legend_lines);
     if requested_overlays.is_none() || show("grid") {
-        draw_scale_bar(&mut image, &font, scale, padding, width, height, grid_spacing);
+        draw_scale_bar(
+            &mut image,
+            &font,
+            scale,
+            padding,
+            width,
+            height,
+            grid_spacing,
+        );
     }
     let artifact_id = Uuid::new_v4().to_string();
     let relative_path = format!(".aura_rafi/agent_artifacts/top-down-{artifact_id}.png");
@@ -422,7 +421,11 @@ fn label_text(node: &SceneNode) -> String {
     if text.is_empty() {
         text = "Entity".to_string();
     }
-    if let Some(role) = node.semantic_role.as_deref().filter(|role| !role.is_empty()) {
+    if let Some(role) = node
+        .semantic_role
+        .as_deref()
+        .filter(|role| !role.is_empty())
+    {
         text = format!("{text} [{role}]");
     }
     text.chars().take(42).collect()
@@ -443,7 +446,10 @@ fn should_label(
     let text = format!(
         "{} {} {}",
         node.name.to_ascii_lowercase(),
-        node.semantic_role.as_deref().unwrap_or("").to_ascii_lowercase(),
+        node.semantic_role
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase(),
         node.tags.join(" ").to_ascii_lowercase()
     );
     if ["spawn", "goal", "entrance", "checkpoint", "exit", "door"]
@@ -460,14 +466,7 @@ fn should_label(
     false
 }
 
-fn draw_grid(
-    image: &mut RgbaImage,
-    min: Vec3,
-    size: Vec3,
-    scale: f32,
-    padding: f32,
-    spacing: f32,
-) {
+fn draw_grid(image: &mut RgbaImage, min: Vec3, size: Vec3, scale: f32, padding: f32, spacing: f32) {
     let color = [44, 47, 54, 255];
     let major = [66, 70, 80, 255];
     let start_x = (min.x / spacing).ceil() * spacing;
@@ -582,11 +581,7 @@ fn draw_scale_bar(
 fn draw_label(image: &mut RgbaImage, font: &FontArc, text: &str, x: i32, y: i32, color: [u8; 4]) {
     let width = text_width(font, text, 12.0).ceil() as i32 + 8;
     let height = 17;
-    fill_rect_alpha(
-        image,
-        (x, y, x + width, y + height),
-        [12, 14, 18, 210],
-    );
+    fill_rect_alpha(image, (x, y, x + width, y + height), [12, 14, 18, 210]);
     draw_text(image, font, text, x + 4, y + 2, 12.0, color);
 }
 
@@ -611,9 +606,9 @@ fn draw_text(
     let baseline = y as f32 + scaled.ascent();
     for character in text.chars() {
         let glyph_id = scaled.glyph_id(character);
-        if let Some(glyph) = font.outline_glyph(
-            glyph_id.with_scale_and_position(size, point(caret, baseline)),
-        ) {
+        if let Some(glyph) =
+            font.outline_glyph(glyph_id.with_scale_and_position(size, point(caret, baseline)))
+        {
             let bounds = glyph.px_bounds();
             glyph.draw(|dx, dy, coverage| {
                 let px = bounds.min.x as i32 + dx as i32;
@@ -637,10 +632,38 @@ fn fill_rect_alpha(image: &mut RgbaImage, rect: (i32, i32, i32, i32), color: [u8
 fn stroke_rect(image: &mut RgbaImage, rect: (i32, i32, i32, i32), color: [u8; 4], width: i32) {
     let (x0, y0, x1, y1) = ordered_rect(rect);
     for offset in 0..width.max(1) {
-        draw_line(image, x0 - offset, y0 - offset, x1 + offset, y0 - offset, color);
-        draw_line(image, x0 - offset, y1 + offset, x1 + offset, y1 + offset, color);
-        draw_line(image, x0 - offset, y0 - offset, x0 - offset, y1 + offset, color);
-        draw_line(image, x1 + offset, y0 - offset, x1 + offset, y1 + offset, color);
+        draw_line(
+            image,
+            x0 - offset,
+            y0 - offset,
+            x1 + offset,
+            y0 - offset,
+            color,
+        );
+        draw_line(
+            image,
+            x0 - offset,
+            y1 + offset,
+            x1 + offset,
+            y1 + offset,
+            color,
+        );
+        draw_line(
+            image,
+            x0 - offset,
+            y0 - offset,
+            x0 - offset,
+            y1 + offset,
+            color,
+        );
+        draw_line(
+            image,
+            x1 + offset,
+            y0 - offset,
+            x1 + offset,
+            y1 + offset,
+            color,
+        );
     }
 }
 
@@ -687,22 +710,16 @@ fn blend_pixel(image: &mut RgbaImage, x: i32, y: i32, color: [u8; 4], alpha: u8)
     let pixel = image.get_pixel_mut(x as u32, y as u32);
     let inverse = 255 - alpha as u32;
     for channel in 0..3 {
-        pixel[channel] = ((color[channel] as u32 * alpha as u32
-            + pixel[channel] as u32 * inverse)
-            / 255) as u8;
+        pixel[channel] =
+            ((color[channel] as u32 * alpha as u32 + pixel[channel] as u32 * inverse) / 255) as u8;
     }
     pixel[3] = 255;
 }
 
 fn failure(language: Language, summary_key: &str, detail_key: &str) -> AgentToolResult {
-    let mut result = AgentToolResult::success(
-        raf_core::i18n::t(summary_key, language),
-        json!({}),
-    );
+    let mut result = AgentToolResult::success(raf_core::i18n::t(summary_key, language), json!({}));
     result.ok = false;
-    result
-        .details
-        .push(raf_core::i18n::t(detail_key, language));
+    result.details.push(raf_core::i18n::t(detail_key, language));
     result
 }
 
@@ -713,17 +730,10 @@ mod tests {
 
     #[test]
     fn top_down_map_draws_bounds_colliders_grid_and_labels() {
-        let root = std::env::temp_dir().join(format!(
-            "raf-top-down-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("raf-top-down-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&root).unwrap();
-        let project = Project::create(
-            "MapDemo",
-            ProjectType::Game,
-            &root,
-        )
-        .unwrap();
+        let project = Project::create("MapDemo", ProjectType::Game, &root).unwrap();
         let mut scene = SceneGraph::new();
         let floor = scene.add_root("Floor");
         if let Some(node) = scene.get_mut(floor) {
@@ -770,15 +780,16 @@ mod tests {
         assert!(!result.data["labels"].as_array().unwrap().is_empty());
         assert_eq!(result.data["canvas"]["width"], 512);
         assert_eq!(result.data["canvas"]["height"], 512);
-        let uri = result.data["artifact"]["uri"].as_str().expect("artifact uri");
+        let uri = result.data["artifact"]["uri"]
+            .as_str()
+            .expect("artifact uri");
         let absolute = project.path.join(uri);
         assert!(absolute.exists());
         let image = image::open(absolute).unwrap();
         assert_eq!(image.width(), 512);
         assert_eq!(image.height(), 512);
         assert!(!result.artifacts.is_empty());
-        assert!(result
-            .data["visual_evidence"]
+        assert!(result.data["visual_evidence"]
             .as_array()
             .is_some_and(|evidence| !evidence.is_empty()));
         let _ = std::fs::remove_dir_all(root);

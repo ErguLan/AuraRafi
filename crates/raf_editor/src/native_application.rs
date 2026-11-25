@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use raf_core::config::{
-    EngineSettings, RenderExecutionPolicy, RenderPreset, RenderQuality, ScriptExecutionMode,
-    ScriptLanguage, Theme,
+    EngineSettings, RenderExecutionPolicy, RenderQuality, ScriptExecutionMode, ScriptLanguage,
+    Theme,
 };
 use raf_core::project::{
     BuildingStyle, GeometryDetailMode, Project, ProjectSettings, ProjectType, TextureQualityMode,

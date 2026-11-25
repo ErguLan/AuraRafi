@@ -77,11 +77,77 @@ impl NativeEditorApplication {
                     window.inner_size().width as f32 / self.input.scale_factor() as f32,
                     window.inner_size().height as f32 / self.input.scale_factor() as f32,
                 ];
-                let edge = self
-                    .input
-                    .snapshot()
-                    .pointer_position
-                    .and_then(|position| native_resize_edge(position, logical_size));
+                let pointer = self.input.snapshot().pointer_position;
+                let eyedropper = self
+                    .workbench
+                    .as_ref()
+                    .and_then(NativeGameWorkbench::lighting_eyedropper_target);
+                if let (Some(path), Some(pointer)) = (eyedropper.map(str::to_string), pointer) {
+                    if let Some(runtime) = self.runtime.as_mut() {
+                        let canvas = runtime.layout().canvas;
+                        if canvas.contains(pointer) {
+                            match runtime.capture_last_viewport_rgba() {
+                                Ok(capture) if capture.width > 0 && capture.height > 0 => {
+                                    let u = ((pointer[0] - canvas.x) / canvas.width.max(1.0))
+                                        .clamp(0.0, 0.999);
+                                    let v = ((pointer[1] - canvas.y) / canvas.height.max(1.0))
+                                        .clamp(0.0, 0.999);
+                                    let x = (u * capture.width as f32) as usize;
+                                    let y = (v * capture.height as f32) as usize;
+                                    let index = (y * capture.width as usize + x) * 4;
+                                    if let Some(rgba) = capture.rgba8.get(index..index + 4) {
+                                        if let Some(workbench) = self.workbench.as_mut() {
+                                            workbench.apply_lighting_color_sample([
+                                                rgba[0], rgba[1], rgba[2],
+                                            ]);
+                                            let language = self.settings_state.language;
+                                            workbench.log_console_output(
+                                                crate::commands::CommandOutput::info(
+                                                    raf_core::i18n::t("lighting.title", language),
+                                                    vec![format!(
+                                                        "{} #{} · {}",
+                                                        raf_core::i18n::t(
+                                                            "lighting.sample_result",
+                                                            language
+                                                        ),
+                                                        rgba[..3]
+                                                            .iter()
+                                                            .map(|c| format!("{c:02X}"))
+                                                            .collect::<String>(),
+                                                        path
+                                                    )],
+                                                    serde_json::json!({
+                                                        "path": path,
+                                                        "color": [rgba[0], rgba[1], rgba[2]]
+                                                    }),
+                                                ),
+                                            );
+                                        }
+                                        runtime.request_ui_frame();
+                                        window.request_redraw();
+                                        return;
+                                    }
+                                }
+                                _ => {
+                                    if let Some(workbench) = self.workbench.as_mut() {
+                                        workbench.cancel_lighting_eyedropper();
+                                        let language = self.settings_state.language;
+                                        workbench.log_console_output(
+                                            crate::commands::CommandOutput::error(
+                                                raf_core::i18n::t("lighting.title", language),
+                                                raf_core::i18n::t(
+                                                    "lighting.sample_unavailable",
+                                                    language,
+                                                ),
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let edge = pointer.and_then(|position| native_resize_edge(position, logical_size));
                 if let Some(edge) = edge {
                     // An interactive retained control (window buttons, drag
                     // region, menus) owns the edge press; the 8px resize band
@@ -104,7 +170,11 @@ impl NativeEditorApplication {
                     // Preserve each button edge before Winit can coalesce the
                     // release and subsequent motion into one CAD snapshot.
                     window.request_redraw();
-                    if self.project.as_ref().is_some_and(|project| project.project_type == ProjectType::Electronics) {
+                    if self
+                        .project
+                        .as_ref()
+                        .is_some_and(|project| project.project_type == ProjectType::Electronics)
+                    {
                         self.redraw();
                     }
                 }
@@ -132,7 +202,14 @@ impl NativeEditorApplication {
                         }
                     }
                     window.request_redraw();
-                    if (flush_button_edge || flush_command_key) && self.project.as_ref().is_some_and(|project| project.project_type == ProjectType::Electronics) { self.redraw(); }
+                    if (flush_button_edge || flush_command_key)
+                        && self
+                            .project
+                            .as_ref()
+                            .is_some_and(|project| project.project_type == ProjectType::Electronics)
+                    {
+                        self.redraw();
+                    }
                 }
             }
         }
@@ -179,4 +256,3 @@ impl NativeEditorApplication {
         }
     }
 }
-

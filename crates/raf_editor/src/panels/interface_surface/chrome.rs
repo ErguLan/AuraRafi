@@ -62,8 +62,15 @@ pub fn button(
     active: bool,
     t: UiTokens,
 ) -> UiNode {
-    let mut node = components(t).button(id, key,
-        UiAction::Command { name: command.into() }, UiButtonVariant::Quiet)
+    let mut node = components(t)
+        .button(
+            id,
+            key,
+            UiAction::Command {
+                name: command.into(),
+            },
+            UiButtonVariant::Quiet,
+        )
         .with_class("interface.button")
         .with_accessibility_selected(active);
     if let Some(icon) = icon {
@@ -85,10 +92,16 @@ pub fn icon_button(
     node
 }
 pub fn row(id: impl Into<String>) -> UiNode {
-    UiNode::row(id, []).fit_content().with_gap(GAP).with_alignment(UiAlign::Center)
+    UiNode::row(id, [])
+        .fit_content()
+        .with_gap(GAP)
+        .with_alignment(UiAlign::Center)
 }
 pub fn column(id: impl Into<String>) -> UiNode {
-    UiNode::column(id, []).fill_width().fill_height().with_gap(GAP)
+    UiNode::column(id, [])
+        .fill_width()
+        .fill_height()
+        .with_gap(GAP)
 }
 pub fn surface(id: &str, palette: StudioUiPalette, root: UiNode) -> UiSurface {
     let t = tokens(palette);

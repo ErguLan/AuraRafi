@@ -4,7 +4,10 @@ use super::query::*;
 use super::transform::parse_transform_patch;
 use super::*;
 
-pub(super) fn generate_prefab(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn generate_prefab(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let kind = command
         .arg("kind")
         .unwrap_or("platform")
@@ -91,6 +94,8 @@ pub(super) fn generate_prefab(command: &ParsedCommand, ctx: &mut GameCommandCont
             node.position = base_position + axis * spacing * index as f32;
             node.rotation = transform.rotation_or(node.rotation);
             node.scale = transform.scale_or(node.scale);
+            node.source_asset = Some(format!("builtin://model/{kind}"));
+            node.source_schema_version = Some(manifest.schema_version);
         }
         roots.push(root);
         created_ids.extend(created);

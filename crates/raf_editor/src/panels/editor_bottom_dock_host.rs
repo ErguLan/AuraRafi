@@ -585,7 +585,14 @@ fn default_groups_for_type(project_type: ProjectType) -> Vec<DockTabGroup> {
         return vec![DockTabGroup::new("native.console", tabs)];
     }
     let left_ids = if project_type == ProjectType::Game {
-        ["console", "agent", "nodes", "project-settings", "animations"].as_slice()
+        [
+            "console",
+            "agent",
+            "nodes",
+            "project-settings",
+            "animations",
+        ]
+        .as_slice()
     } else {
         ["console", "agent", "drc", "simulation"].as_slice()
     };

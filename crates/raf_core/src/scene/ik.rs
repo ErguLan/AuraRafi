@@ -272,7 +272,9 @@ mod tests {
         let mut limb = chain(&[[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 2.0, 0.0]]);
         let target = Vec3::new(1.2, 0.8, 0.0);
 
-        let solution = limb.solve_two_bone(target, Vec3::new(0.0, 0.0, 1.0)).unwrap();
+        let solution = limb
+            .solve_two_bone(target, Vec3::new(0.0, 0.0, 1.0))
+            .unwrap();
 
         assert!(solution.reached, "error {}", solution.error);
         assert!(limb.tip().distance(target) < 1.0e-3);
@@ -365,7 +367,12 @@ mod tests {
 
     #[test]
     fn the_two_bone_solver_rejects_longer_chains() {
-        let mut chain = chain(&[[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 2.0, 0.0], [0.0, 3.0, 0.0]]);
+        let mut chain = chain(&[
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 3.0, 0.0],
+        ]);
         assert_eq!(
             chain.solve_two_bone(Vec3::new(1.0, 0.0, 0.0), Vec3::Z),
             Err(IkError::NotTwoBone)

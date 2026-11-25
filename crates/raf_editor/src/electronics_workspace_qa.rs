@@ -370,6 +370,7 @@ mod tests {
                     group,
                     layout.bottom_dock.height <= 34.0,
                     None,
+                    0,
                     column.width,
                 ),
                 EditorRect::new(

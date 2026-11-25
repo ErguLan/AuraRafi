@@ -5,9 +5,7 @@
 //! actions and the tool islands keep their own rules here so the surface
 //! builders only declare structure.
 
-use raf_render::api_graphic_basic::ui_surface::{
-    UiStylePatch, UiStyleRuleState, UiStyleSheet,
-};
+use raf_render::api_graphic_basic::ui_surface::{UiStylePatch, UiStyleRuleState, UiStyleSheet};
 use raf_ui::UiTokens;
 
 use crate::panels::electronics_surface::{

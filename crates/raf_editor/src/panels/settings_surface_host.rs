@@ -12,7 +12,7 @@ use raf_render::api_graphic_basic::EditorUiLayer;
 use crate::editor_layout::EditorRect;
 use crate::settings_surface::{
     account_controls, account_welcome, build_settings_surface_with_state_and_api_keys, provider_id,
-    SettingsSection,
+    SettingsSection, PERFORMANCE_FILTER_COMMAND,
 };
 use raf_ui::numeric::{UiNumericDraftIssue, UiNumericEditAction, UiNumericEditBank, UiNumericUnit};
 
@@ -35,6 +35,7 @@ pub struct SettingsSurfaceHost {
     drag_anchor: Option<[f32; 2]>,
     resize_anchor: Option<([f32; 2], raf_ui::UiRect)>,
     search_query: String,
+    performance_only: bool,
     open_select: Option<String>,
     revealed_api_keys: Vec<AiProvider>,
     ai_model_filter: String,
@@ -132,6 +133,7 @@ impl SettingsSurfaceHost {
                     &[],
                     "",
                     false,
+                    false,
                 ),
                 [0, 0, 0, 0],
             ),
@@ -144,6 +146,7 @@ impl SettingsSurfaceHost {
             drag_anchor: None,
             resize_anchor: None,
             search_query: String::new(),
+            performance_only: false,
             open_select: None,
             revealed_api_keys: Vec::new(),
             ai_model_filter: String::new(),
@@ -185,6 +188,7 @@ impl SettingsSurfaceHost {
         self.drag_anchor = None;
         self.resize_anchor = None;
         self.search_query.clear();
+        self.performance_only = false;
         self.open_select = None;
         self.revealed_api_keys.clear();
         self.ai_model_filter.clear();
@@ -209,6 +213,7 @@ impl SettingsSurfaceHost {
         self.drag_anchor = None;
         self.resize_anchor = None;
         self.search_query.clear();
+        self.performance_only = false;
         self.open_select = None;
         self.revealed_api_keys.clear();
         self.ai_model_filter.clear();
@@ -439,6 +444,7 @@ impl SettingsSurfaceHost {
                 &self.revealed_api_keys,
                 &self.ai_model_filter,
                 false,
+                false,
             );
             self.numeric_edits.merge_tree(&surface.root);
         }
@@ -656,11 +662,13 @@ impl SettingsSurfaceHost {
                 &self.revealed_api_keys,
                 &self.ai_model_filter,
                 self.draft_dirty,
+                self.performance_only,
             );
-            if self.section == SettingsSection::Ai {
+            if self.section == SettingsSection::Ai && !self.performance_only {
                 // The ChatGPT account block is reachable as soon as the AI
                 // section opens: the auth button must not depend on which
-                // provider card is currently selected.
+                // provider card is currently selected. It is not a performance
+                // setting, so the performance filter keeps it out of view.
                 let account = account_controls(
                     palette,
                     &self.draft,
@@ -921,6 +929,11 @@ impl SettingsSurfaceHost {
                             });
                         }
                     }
+                }
+                UiAction::Command { name } if name.as_str() == PERFORMANCE_FILTER_COMMAND => {
+                    self.performance_only = !self.performance_only;
+                    self.open_select = None;
+                    self.surface_dirty = true;
                 }
                 UiAction::Command { name }
                     if matches!(name.as_str(), "settings.apply" | "settings.save") =>

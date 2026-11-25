@@ -11,7 +11,7 @@ use glam::Mat4;
 
 use crate::{Batch, DrawMode, Error, Instance, Result, Texture, Vertex, Workload};
 
-use super::{Command, Feature, Material, Mesh, MeshSpan, Pipeline, ProductPacket};
+use super::{Command, Cull, Depth, Feature, Material, Mesh, MeshSpan, Pipeline, ProductPacket};
 
 pub(super) struct Encoded {
     pub workload: Workload,
@@ -97,7 +97,16 @@ impl Encoder<'_> {
                 self.clear = clear;
             }
             Command::SetPipeline(pipeline) => {
-                if ![Pipeline::SCENE, Pipeline::LIT, Pipeline::OVERLAY].contains(&pipeline) {
+                if ![
+                    Pipeline::SCENE,
+                    Pipeline::SCENE_TWO_SIDED,
+                    Pipeline::LIT,
+                    Pipeline::LIT_TWO_SIDED,
+                    Pipeline::OVERLAY,
+                    Pipeline::PARTICLE,
+                ]
+                .contains(&pipeline)
+                {
                     return unsupported(Feature::Pipeline);
                 }
                 self.pipeline = pipeline;
@@ -203,6 +212,23 @@ impl Encoder<'_> {
             return Err(Error::Invalid("empty instance batch"));
         }
         let (texture, tint) = self.material(material)?;
+        // The batch mode is a pipeline state, so it must be decided from the
+        // final per-instance tint before any range is merged. A mixed-alpha
+        // batch keeps depth writes off for every instance; writing depth for
+        // the opaque subset would let translucent neighbours occlude it.
+        // Particle pipelines also test depth without writing it, even when a
+        // particular sprite tint is fully opaque.
+        let transparent = self.pipeline.depth == Depth::ReadOnly
+            || instances
+                .iter()
+                .any(|instance| instance.tint[3] * tint[3] < 1.);
+        let two_sided = self.pipeline.cull == Cull::None;
+        let mode = match (transparent, two_sided) {
+            (false, false) => DrawMode::Scene,
+            (false, true) => DrawMode::SceneTwoSided,
+            (true, false) => DrawMode::SceneTransparent,
+            (true, true) => DrawMode::SceneTransparentTwoSided,
+        };
         let key = (mesh, caster || self.pipeline.lit);
         let ranges = if let Some(range) = self.mesh_cache.get(&key) {
             range.clone()
@@ -274,12 +300,19 @@ impl Encoder<'_> {
             .extend(instances.iter().map(|instance| {
                 let mut instance = *instance;
                 instance.raster_kind = if self.shadow_receiver { 256 } else { 0 };
+                if self.pipeline.cull == Cull::None {
+                    // Bit 9 tells the scene shader that both windings are
+                    // visible and lighting must use abs(N dot L).
+                    instance.raster_kind |= 512;
+                }
                 multiply(&mut instance.tint, tint);
                 instance
             }));
         self.instance_ranges.insert(command, instance_range.clone());
         let batch = Batch {
-            mode: DrawMode::Scene,
+            // Shadow casting stays on the validated `Scene` mode even when the
+            // visible batch is two-sided or translucent.
+            mode: if caster { DrawMode::Scene } else { mode },
             vertices: ranges.vertices,
             indices: ranges.indices,
             instances: instance_range,

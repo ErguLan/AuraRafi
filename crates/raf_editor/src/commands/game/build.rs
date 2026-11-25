@@ -8,7 +8,10 @@ use super::*;
 /// the same stable key. Existing nodes are updated in place; missing nodes are
 /// created; unmentioned nodes are intentionally preserved unless a future
 /// explicit cleanup operation is requested.
-pub(super) fn reconcile_scene(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn reconcile_scene(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let groups = match structured_or_json_array(command, "groups", "groups") {
         Ok(Some(groups)) => groups,
         Ok(None) => Vec::new(),
@@ -225,7 +228,10 @@ pub(super) fn reconcile_scene(command: &ParsedCommand, ctx: &mut GameCommandCont
 /// not guess geometry from a prose audit: the Agent supplies the concrete
 /// operations after inspecting the reported targets and the repair remains
 /// reversible through the normal command transaction.
-pub(super) fn repair_scene(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn repair_scene(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let operations = match structured_or_json_array(command, "operations", "operations") {
         Ok(Some(operations)) => operations,
         Ok(None) => {
@@ -572,7 +578,10 @@ fn parent_requires_reparent(scene: &SceneGraph, id: SceneNodeId, parent: &Value)
     desired_parent != current_parent
 }
 
-pub(super) fn build_scene(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn build_scene(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let groups = match structured_or_json_array(command, "groups", "groups") {
         Ok(Some(groups)) => groups,
         Ok(None) => Vec::new(),

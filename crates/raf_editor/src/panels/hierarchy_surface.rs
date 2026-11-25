@@ -2,6 +2,11 @@
 //!
 //! The surface only describes presentation and semantic events. Scene
 //! mutations stay in `hierarchy_surface_host.rs` and the editor application.
+//!
+//! Tooltip presentation is owned by the retained Game workbench host: this
+//! module only emits stable `tooltip_key`/`tooltip_value` pairs. If the host
+//! disables retained tooltips, re-enable them in the workbench host pipeline;
+//! the keys here must stay unchanged so localization keeps working.
 
 mod badges;
 mod context;
@@ -16,8 +21,8 @@ use raf_render::api_graphic_basic::ui_surface::{
 };
 use raf_ui::{
     UiAlign, UiEventBinding, UiEventKind, UiFlow, UiJustify, UiLayout, UiNode, UiNodeKind,
-    UiOverflow, UiScrollAxis, UiSizeMode, UiSpacing, UiStyle, UiStylePatch, UiStyleRule,
-    UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiTextStyle,
+    UiOverflow, UiPointerButton, UiScrollAxis, UiSizeMode, UiSpacing, UiStyle, UiStylePatch,
+    UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiTextStyle,
 };
 
 use super::hierarchy_model::HierarchyView;
@@ -25,15 +30,9 @@ use crate::project_catalog::ProjectCatalogResults;
 
 use self::context::{context_menu, empty_context_menu, empty_primitive_menu};
 use self::dnd::{box_selection_node, drag_ghost_node};
-use self::filters::{
-    assets_tab, bookmarks_tab, search_tab, summary, tab_context_toolbar, tab_summary, toolbar,
-    world_tab,
-};
+use self::filters::{summary, toolbar};
 use self::rows::row_node;
 
-pub(crate) use self::context::{
-    context_menu_rect, empty_context_menu_rect, empty_primitive_menu_rect,
-};
 pub(crate) use self::filters::{header, tabs};
 
 const HIERARCHY_ROOT_PADDING: f32 = 4.0;
@@ -61,8 +60,9 @@ pub fn build_hierarchy_surface(
     can_paste: bool,
     compact_tabs: bool,
     active_tab: &str,
-    bookmark_filled: [bool; 3],
-    search_results: Option<&ProjectCatalogResults>,
+    _bookmark_filled: [bool; 3],
+    _search_results: Option<&ProjectCatalogResults>,
+    show_script_indicators: bool,
 ) -> UiSurface {
     let tokens = palette.tokens();
     let _ = (
@@ -101,6 +101,10 @@ pub fn build_hierarchy_surface(
             "hierarchy.box-select.end",
         ))
         .with_event(UiEventBinding::command(
+            UiEventKind::PointerDown(UiPointerButton::Primary),
+            "hierarchy.box-select.press",
+        ))
+        .with_event(UiEventBinding::command(
             UiEventKind::Click,
             "hierarchy.clear-selection",
         ))
@@ -123,6 +127,7 @@ pub fn build_hierarchy_surface(
             show_icons,
             show_visibility,
             show_locked,
+            show_script_indicators,
             drop_target,
         ));
     }
@@ -150,13 +155,9 @@ pub fn build_hierarchy_surface(
 
     let mut root_style = palette.panel_style();
     root_style.opacity = (0.55 + transition.clamp(0.0, 1.0) * 0.45).clamp(0.0, 1.0);
-    let content = match active_tab {
-        "assets" => assets_tab(palette),
-        "world" => world_tab(palette),
-        "bookmarks" => bookmarks_tab(palette, bookmark_filled),
-        "search" => search_tab(palette, search_results),
-        _ => tree,
-    };
+    // Placeholder tabs were removed: the tree is the only Scene body, while
+    // Lighting renders its own retained navigation surface.
+    let content = tree;
     let root = UiNode::new("hierarchy.root", UiNodeKind::Root)
         .with_class("hierarchy-root")
         .with_layout(UiLayout {
@@ -168,16 +169,8 @@ pub fn build_hierarchy_surface(
         .with_style(root_style)
         .with_child(header(palette))
         .with_child(tabs(palette, compact_tabs, active_tab))
-        .with_child(if active_tab == "hierarchy" {
-            toolbar(palette)
-        } else {
-            tab_context_toolbar(palette, active_tab)
-        })
-        .with_child(if active_tab == "hierarchy" {
-            summary(palette, view.entity_rows, selected.len())
-        } else {
-            tab_summary(palette, active_tab)
-        })
+        .with_child(toolbar(palette))
+        .with_child(summary(palette, view.entity_rows, selected.len()))
         .with_child(content);
 
     let root = if let Some((label, pointer)) = drag_ghost {
@@ -185,6 +178,7 @@ pub fn build_hierarchy_surface(
     } else {
         root
     };
+    let box_selection = box_selection.or(view.box_selection);
     let root = if let Some(selection) = box_selection {
         root.with_child(box_selection_node(palette, selection))
     } else {
@@ -265,10 +259,7 @@ fn icon_button(
 
 pub(crate) fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
     let tokens = palette.tokens();
-    let selection_fill = match palette {
-        StudioUiPalette::IndustrialDark => [116, 67, 24, 62],
-        StudioUiPalette::PaperLight => [224, 116, 24, 42],
-    };
+    let radius = raf_ui::UiTheme::raf_ui().metrics.corner_radius;
     let mut rules = vec![
         class_rule(
             "hierarchy-root",
@@ -289,17 +280,17 @@ pub(crate) fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 border: Some(tokens.border),
                 text: Some(tokens.text),
                 border_width: Some(1.0),
-                radius: Some(4.0),
+                radius: Some(radius),
                 ..UiStylePatch::default()
             },
         )
         .when(UiStyleRuleState::Always),
         flat_class_rule("hierarchy-toolbar", tokens.surface, tokens.text),
         flat_class_rule("hierarchy-row", [0, 0, 0, 0], tokens.text),
-        flat_class_rule("hierarchy-row-selected", selection_fill, tokens.text),
+        flat_class_rule("hierarchy-row-selected", tokens.selection, tokens.text),
         class_rule(
             "hierarchy-row-drop-target",
-            [116, 67, 24, 90],
+            tokens.selection,
             tokens.accent_hot,
             tokens.text,
         ),
@@ -330,11 +321,7 @@ pub(crate) fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             tokens.text_muted,
         ),
         flat_class_rule("hierarchy-row-action", [0, 0, 0, 0], tokens.text_muted),
-        flat_class_rule(
-            "hierarchy-row-action-selected",
-            [0, 0, 0, 0],
-            [255, 247, 232, 255],
-        ),
+        flat_class_rule("hierarchy-row-action-selected", [0, 0, 0, 0], tokens.text),
         flat_class_rule("hierarchy-expand", [0, 0, 0, 0], tokens.text_muted),
         flat_class_rule("hierarchy-row-label", [0, 0, 0, 0], tokens.text),
         flat_class_rule("hierarchy-tab", [0, 0, 0, 0], tokens.text_muted),
@@ -345,59 +332,11 @@ pub(crate) fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 border: Some(tokens.border),
                 text: Some(tokens.text),
                 border_width: Some(1.0),
-                radius: Some(3.0),
+                radius: Some(radius),
                 ..UiStylePatch::default()
             },
         )
         .when(UiStyleRuleState::Always),
-        class_rule(
-            "hierarchy-tab-context",
-            tokens.surface,
-            tokens.border,
-            tokens.text,
-        ),
-        class_rule(
-            "hierarchy-tab-context-action",
-            tokens.surface_raised,
-            tokens.border,
-            tokens.text,
-        ),
-        class_rule(
-            "hierarchy-tab-card",
-            tokens.surface,
-            tokens.border,
-            tokens.text,
-        ),
-        class_rule(
-            "hierarchy-tab-card-wip",
-            tokens.surface_raised,
-            tokens.accent,
-            tokens.text,
-        ),
-        class_rule(
-            "hierarchy-wip-badge",
-            [0, 0, 0, 0],
-            tokens.accent,
-            tokens.accent,
-        ),
-        class_rule(
-            "hierarchy-bookmark-row",
-            tokens.surface_alt,
-            tokens.border,
-            tokens.text,
-        ),
-        class_rule(
-            "hierarchy-bookmark-action",
-            tokens.surface_raised,
-            tokens.border,
-            tokens.text_muted,
-        ),
-        class_rule(
-            "hierarchy-bookmark-save",
-            tokens.accent,
-            tokens.accent,
-            tokens.text,
-        ),
         class_rule(
             "hierarchy-context-menu",
             tokens.surface_raised,
@@ -424,10 +363,10 @@ pub(crate) fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             tokens.text,
         ),
         class_rule(
-            "hierarchy-search-result",
-            tokens.surface_alt,
-            tokens.border,
-            tokens.text,
+            "hierarchy-box-selection",
+            tokens.selection,
+            tokens.accent,
+            tokens.accent,
         ),
     ];
     rules.extend([
@@ -438,7 +377,7 @@ pub(crate) fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                     StudioUiPalette::IndustrialDark => [255, 255, 255, 12],
                     StudioUiPalette::PaperLight => [0, 0, 0, 10],
                 }),
-                radius: Some(3.0),
+                radius: Some(radius),
                 ..UiStylePatch::default()
             },
         )
@@ -450,7 +389,7 @@ pub(crate) fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                     StudioUiPalette::IndustrialDark => [255, 255, 255, 8],
                     StudioUiPalette::PaperLight => [0, 0, 0, 6],
                 }),
-                radius: Some(3.0),
+                radius: Some(radius),
                 ..UiStylePatch::default()
             },
         )
@@ -462,7 +401,7 @@ pub(crate) fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                     StudioUiPalette::IndustrialDark => [255, 255, 255, 8],
                     StudioUiPalette::PaperLight => [0, 0, 0, 6],
                 }),
-                radius: Some(3.0),
+                radius: Some(radius),
                 ..UiStylePatch::default()
             },
         )
@@ -493,7 +432,7 @@ pub(crate) fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 fill: Some(tokens.surface_raised),
                 border: Some([0, 0, 0, 0]),
                 text: Some(tokens.text),
-                radius: Some(3.0),
+                radius: Some(radius),
                 ..UiStylePatch::default()
             },
         )
@@ -504,7 +443,7 @@ pub(crate) fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 fill: Some(tokens.surface_raised),
                 border: Some([0, 0, 0, 0]),
                 text: Some(tokens.text),
-                radius: Some(3.0),
+                radius: Some(radius),
                 ..UiStylePatch::default()
             },
         )
@@ -518,7 +457,7 @@ pub(crate) fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 }),
                 border: Some([0, 0, 0, 0]),
                 text: Some(tokens.text),
-                radius: Some(3.0),
+                radius: Some(radius),
                 ..UiStylePatch::default()
             },
         )
@@ -529,7 +468,7 @@ pub(crate) fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 fill: Some(tokens.surface_raised),
                 border: Some([0, 0, 0, 0]),
                 text: Some(tokens.text),
-                radius: Some(3.0),
+                radius: Some(radius),
                 ..UiStylePatch::default()
             },
         )
@@ -548,10 +487,10 @@ pub(crate) fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
         UiStyleRule::new(
             UiStyleSelector::Class("hierarchy-menu-delete".to_string()),
             UiStylePatch {
-                fill: Some([180, 45, 45, 90]),
+                fill: Some(tokens.danger),
                 border: Some([0, 0, 0, 0]),
-                text: Some([255, 210, 210, 255]),
-                radius: Some(3.0),
+                text: Some(tokens.text),
+                radius: Some(radius),
                 ..UiStylePatch::default()
             },
         )
@@ -561,6 +500,7 @@ pub(crate) fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
 }
 
 fn flat_class_rule(class: &str, fill: [u8; 4], text: [u8; 4]) -> UiStyleRule {
+    let radius = raf_ui::UiTheme::raf_ui().metrics.corner_radius;
     UiStyleRule::new(
         UiStyleSelector::Class(class.to_string()),
         UiStylePatch {
@@ -568,7 +508,7 @@ fn flat_class_rule(class: &str, fill: [u8; 4], text: [u8; 4]) -> UiStyleRule {
             border: Some([0, 0, 0, 0]),
             text: Some(text),
             border_width: Some(0.0),
-            radius: Some(3.0),
+            radius: Some(radius),
             ..UiStylePatch::default()
         },
     )
@@ -576,6 +516,7 @@ fn flat_class_rule(class: &str, fill: [u8; 4], text: [u8; 4]) -> UiStyleRule {
 }
 
 fn class_rule(class: &str, fill: [u8; 4], border: [u8; 4], text: [u8; 4]) -> UiStyleRule {
+    let radius = raf_ui::UiTheme::raf_ui().metrics.corner_radius;
     UiStyleRule::new(
         UiStyleSelector::Class(class.to_string()),
         UiStylePatch {
@@ -583,7 +524,7 @@ fn class_rule(class: &str, fill: [u8; 4], border: [u8; 4], text: [u8; 4]) -> UiS
             border: Some(border),
             text: Some(text),
             border_width: Some(1.0),
-            radius: Some(3.0),
+            radius: Some(radius),
             ..UiStylePatch::default()
         },
     )

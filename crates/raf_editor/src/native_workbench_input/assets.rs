@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::native_editor_commands::{
-    asset_duplicate_row, asset_file_row, asset_rename_row, asset_script_row,
+    asset_duplicate_row, asset_file_row, asset_particle_row, asset_rename_row, asset_script_row,
 };
 use crate::panels::assets_surface::{
     asset_file_name, is_builtin_asset_row, AssetFilter, AssetSort, AssetViewMode,
@@ -86,6 +86,12 @@ impl NativeGameWorkbench {
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 return true;
             }
+            "assets.create-particle" => {
+                self.assets_surface.close_menus();
+                self.assets_surface.particle_menu_open = true;
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                return true;
+            }
             "assets.generate-local-icon" => {
                 self.assets_surface.close_menus();
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -99,6 +105,11 @@ impl NativeGameWorkbench {
             }
             "assets.file.cancel" => {
                 self.assets_surface.file_menu_open = false;
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                return true;
+            }
+            "assets.particle.cancel" => {
+                self.assets_surface.particle_menu_open = false;
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 return true;
             }
@@ -154,6 +165,16 @@ impl NativeGameWorkbench {
         native_input: &NativeUiInputBridge,
         intents: &mut Vec<NativeWorkbenchIntent>,
     ) -> bool {
+        if let Some(row) = name.strip_prefix("assets.place-rig:") {
+            let args = serde_json::json!({"asset": row, "parent": self.insertion_parent(scene).map(|id| id.0)});
+            intents.push(NativeWorkbenchIntent::Command(format!(
+                "animations.place-rig:{args}"
+            )));
+            self.assets_surface.close_menus();
+            self.bottom_dock.select("animations");
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            return true;
+        }
         if let Some(filter) = name.strip_prefix("assets.filter.") {
             self.assets_surface.filter = match filter {
                 "images" => AssetFilter::Images,
@@ -175,6 +196,70 @@ impl NativeGameWorkbench {
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             return true;
         }
+        if name == "assets.import-open" || name == "assets.import" {
+            self.open_assets_import(None);
+            return true;
+        }
+        if name == "assets.import.browse" || name == "assets.import.drop" {
+            intents.push(NativeWorkbenchIntent::ImportAssetFile);
+            return true;
+        }
+        if name == "assets.import.cancel" {
+            self.close_assets_import();
+            return true;
+        }
+        if name == "assets.import.confirm" {
+            if let Err(error) = self.confirm_assets_import() {
+                if let Some(state) = self.assets_import.as_mut() {
+                    state.error = Some(error);
+                }
+            }
+            return true;
+        }
+        if name == "assets.import.textures" {
+            if let Some(state) = self.assets_import.as_mut() {
+                state.options.import_textures = !state.options.import_textures;
+            }
+            return true;
+        }
+        if name == "assets.import.recenter" {
+            if let Some(state) = self.assets_import.as_mut() {
+                state.options.recenter = !state.options.recenter;
+            }
+            return true;
+        }
+        if name == "assets.import.collider" {
+            if let Some(state) = self.assets_import.as_mut() {
+                state.options.generate_collider = !state.options.generate_collider;
+            }
+            return true;
+        }
+        if let Some(row) = name.strip_prefix("assets.audio.preview:") {
+            let Some(root) = self.assets_project_root.as_ref() else {
+                self.assets_surface.status = Some(AssetsStatus::error("Project not found"));
+                return true;
+            };
+            let path = root.join("assets").join(row);
+            match self.audio_preview.preview_file(&path, 0.9, false) {
+                Ok(()) => {
+                    self.assets_surface.selected_asset = Some(row.to_string());
+                    self.assets_surface.status = Some(AssetsStatus::pending(raf_core::i18n::t(
+                        "app.audio_previewing",
+                        self.agent_settings.language,
+                    )));
+                }
+                Err(error) => {
+                    self.assets_surface.status = Some(AssetsStatus::error(error));
+                }
+            }
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            return true;
+        }
+        if name == "assets.audio.stop" {
+            self.audio_preview.stop_preview();
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            return true;
+        }
         if name == "assets.drag-move" || name == "assets.drag-end" {
             return true;
         }
@@ -183,12 +268,33 @@ impl NativeGameWorkbench {
             .or_else(|| name.strip_prefix("assets.drag-start:"))
         {
             let entry = raf_assets::authoring_catalog::AuthoringAsset::from_path(row);
-            if entry.class == raf_assets::authoring_catalog::AssetClass::Interface {
+            if entry.class == raf_assets::authoring_catalog::AssetClass::Light {
+                let kind = row
+                    .strip_prefix("builtin://light/")
+                    .unwrap_or("point")
+                    .to_string();
+                intents.push(NativeWorkbenchIntent::Command(format!(
+                    "hierarchy.create-light:{kind}"
+                )));
+            } else if entry.class == raf_assets::authoring_catalog::AssetClass::Interface {
                 self.interface.diagnostic = self
                     .interface
                     .insert_asset(row, self.agent_settings.language)
                     .err();
                 self.activate_interface_authoring();
+            } else if entry.class == raf_assets::authoring_catalog::AssetClass::Model {
+                let args = serde_json::json!({
+                    "path": row,
+                    "parent": self.insertion_parent(scene).map(|id| id.0),
+                    "drag": name.starts_with("assets.drag-start:")
+                });
+                intents.push(NativeWorkbenchIntent::Command(format!(
+                    "authoring.asset:{args}"
+                )));
+                self.assets_surface.status = Some(AssetsStatus::pending(raf_core::i18n::t(
+                    "assets.placement_hint",
+                    self.agent_settings.language,
+                )));
             } else if entry.class == raf_assets::authoring_catalog::AssetClass::Camera {
                 let parent = self
                     .insertion_parent(scene)
@@ -196,6 +302,14 @@ impl NativeGameWorkbench {
                     .unwrap_or_else(|| "root".into());
                 intents.push(NativeWorkbenchIntent::Command(format!(
                     "hierarchy.create-camera:{parent}"
+                )));
+            } else if entry.class == raf_assets::authoring_catalog::AssetClass::Particle {
+                let parent = self
+                    .insertion_parent(scene)
+                    .map(|id| id.0.to_string())
+                    .unwrap_or_else(|| "root".into());
+                intents.push(NativeWorkbenchIntent::Command(format!(
+                    "hierarchy.create-particle:{row}:{parent}"
                 )));
             } else if entry.insertable() {
                 let args = serde_json::json!({"path":row,"parent":self.insertion_parent(scene).map(|id|id.0),"drag":name.starts_with("assets.drag-start:")});
@@ -385,6 +499,21 @@ impl NativeGameWorkbench {
             );
             intents.push(NativeWorkbenchIntent::Command(format!(
                 "assets.create-file:{asset_name}"
+            )));
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            return true;
+        }
+        if let Some(template) = name.strip_prefix("assets.particle.create:") {
+            self.assets_surface.particle_menu_open = false;
+            let asset_name = self.assets_surface.particle_name.trim().to_string();
+            self.begin_assets_operation(
+                asset_particle_row(&asset_name),
+                true,
+                "app.assets_status_particle_created",
+                "app.assets_status_particle_create_failed",
+            );
+            intents.push(NativeWorkbenchIntent::Command(format!(
+                "assets.create-particle:{template}:{asset_name}"
             )));
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             return true;

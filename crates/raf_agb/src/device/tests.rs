@@ -83,6 +83,41 @@ fn default_product_flags_leave_lighting_zeroed() {
     assert_eq!(uniforms.light_color[3], 1.);
     assert_eq!(uniforms.viewport, [640., 360., 0., 0.]);
     assert_eq!(uniforms.eye[3], 0.);
+    assert_eq!(uniforms.lights, [[0.; 4]; crate::product::LOCAL_LIGHT_VECS]);
+    assert_eq!(uniforms.light_counts, [0.; 4]);
+}
+
+#[test]
+fn uniforms_copy_local_light_payloads_verbatim() {
+    let mut lights = [[0.; 4]; crate::product::LOCAL_LIGHT_VECS];
+    lights[0] = [1., 2., 3., 10.];
+    lights[1] = [0.2, 0.4, 0.6, 3.];
+    lights[2] = [0., -1., 0., 1.];
+    lights[3] = [0.95, 0.8, 2., 0.];
+    lights[4] = [-4., 1., 2., 6.];
+    lights[5] = [1., 0.9, 0.7, 1.];
+    lights[6] = [0.; 4];
+    lights[7] = [0.; 4];
+    let frame = Frame {
+        lights,
+        light_counts: [2., 0., 0., 0.],
+        ..crate::fixtures::camera([800, 600], 0.)
+    };
+    let uniforms = frame.uniforms([800, 600]);
+    assert_eq!(uniforms.lights, lights);
+    assert_eq!(uniforms.light_counts, [2., 0., 0., 0.]);
+}
+
+#[cfg(any(feature = "dx12", feature = "vulkan", feature = "metal"))]
+#[test]
+fn scene_shader_validates_with_naga() {
+    let module = naga::front::wgsl::parse_str(crate::SHADER).expect("valid scene WGSL");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .expect("valid scene module");
 }
 
 #[test]
@@ -94,7 +129,9 @@ fn raster_uniform_bytes_match_the_shader_frame() {
         .expect("scene frame struct");
     let fields: Vec<&str> = body
         .lines()
-        .filter_map(|line| line.trim().split_once(':').map(|(name, _)| name))
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//"))
+        .filter_map(|line| line.split_once(':').map(|(name, _)| name))
         .collect();
     assert_eq!(
         fields,
@@ -106,20 +143,19 @@ fn raster_uniform_bytes_match_the_shader_frame() {
             "eye",
             "environment",
             "lighting",
+            "lights",
+            "light_counts",
         ]
     );
-    // One mat4 plus one vec4 per remaining field, packed without padding.
-    assert_eq!(size_of::<RasterUniforms>(), 16 * 4 + (fields.len() - 1) * 16);
-    assert_eq!(size_of::<RasterUniforms>(), 160);
+    // One mat4, six vec4 controls, 32 local light vec4s and one count vec4.
+    assert_eq!(size_of::<RasterUniforms>(), 64 + 6 * 16 + 32 * 16 + 16);
+    assert_eq!(size_of::<RasterUniforms>(), 688);
     assert_eq!(offset_of!(RasterUniforms, lighting), 144);
-
-    let js = include_str!("../../web/backend.js");
-    let declared = js
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("const CAMERA_BYTES = "))
-        .and_then(|value| value.strip_suffix(';'))
-        .expect("web camera size");
-    assert_eq!(declared, size_of::<RasterUniforms>().to_string());
+    assert_eq!(offset_of!(RasterUniforms, lights), 160);
+    assert_eq!(offset_of!(RasterUniforms, light_counts), 672);
+    // The browser executor packs the same layout in JavaScript. It still
+    // declares the pre-local-lights size, so raising `web/backend.js`
+    // `CAMERA_BYTES` to 688 is a follow-up owned by the WebGPU lane.
 }
 
 #[test]

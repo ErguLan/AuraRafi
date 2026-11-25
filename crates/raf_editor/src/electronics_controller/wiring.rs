@@ -40,7 +40,6 @@ impl NativeElectronicsEditor {
             width = NET_NAME_DIGITS
         )
     }
-
 }
 
 /// Numeric suffix of an automatic net name, or `None` for user labels.

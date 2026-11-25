@@ -1,9 +1,7 @@
 //! Unit tests for the native editor application boundary.
 
-use raf_core::config::{RenderPreset, RenderQuality, ScriptLanguage};
-use raf_core::project::{
-    GeometryDetailMode, ProjectSettings, ProjectType, ViewportResolutionMode,
-};
+use raf_core::config::{RenderQuality, ScriptLanguage};
+use raf_core::project::{GeometryDetailMode, ProjectSettings, ProjectType, ViewportResolutionMode};
 use raf_ui::UiResizeEdge;
 
 use super::layout::should_queue_eager_hierarchy_refresh;
@@ -16,15 +14,23 @@ use super::window::native_resize_edge;
 #[test]
 fn gravity_presets_configure_character_values_and_preserve_basic_settings() {
     let mut settings = ProjectSettings::default();
-    assert!(apply_project_setting_command(&mut settings, "project-settings.gravity-preset.arcade").changed);
+    assert!(
+        apply_project_setting_command(&mut settings, "project-settings.gravity-preset.arcade")
+            .changed
+    );
     assert_eq!(settings.runtime.gravity, glam::Vec3::new(0.0, -20.0, 0.0));
     assert_eq!(settings.runtime.character_jump_height, 2.5);
     assert_eq!(settings.runtime.character_speed, 6.0);
     assert_eq!(settings.runtime.character_max_slope_degrees, 50.0);
     apply_project_setting_toggle(&mut settings, "project-settings.advanced-physics", false);
-    assert!(!apply_project_setting_command(&mut settings, "project-settings.gravity-preset.moon").changed);
+    assert!(
+        !apply_project_setting_command(&mut settings, "project-settings.gravity-preset.moon")
+            .changed
+    );
     assert_eq!(settings.runtime.gravity, glam::Vec3::new(0.0, -20.0, 0.0));
-    assert!(apply_project_setting_range(&mut settings, "project-settings.character-speed", 5.0).changed);
+    assert!(
+        apply_project_setting_range(&mut settings, "project-settings.character-speed", 5.0).changed
+    );
     assert_eq!(settings.runtime.character_speed, 5.0);
 }
 
@@ -34,30 +40,61 @@ fn electronics_save_chord_dispatches_while_control_is_still_held() {
     input.modifiers.control = true;
     input.keys_pressed.insert(raf_core::InputKey::S);
     input.keys_down.insert(raf_core::InputKey::S);
-    assert!(electronics_input_edge_pending(Some(ProjectType::Electronics), &input));
-    assert_eq!(electronics_shortcut_command(&input, true, false), Some(crate::application_menu::command::PROJECT_SAVE));
+    assert!(electronics_input_edge_pending(
+        Some(ProjectType::Electronics),
+        &input
+    ));
+    assert_eq!(
+        electronics_shortcut_command(&input, true, false),
+        Some(crate::application_menu::command::PROJECT_SAVE)
+    );
     // Holding the keys must not dispatch another save on a UI-only frame.
     input.clear_transient();
-    assert!(!electronics_input_edge_pending(Some(ProjectType::Electronics), &input));
+    assert!(!electronics_input_edge_pending(
+        Some(ProjectType::Electronics),
+        &input
+    ));
     assert_eq!(electronics_shortcut_command(&input, true, false), None);
     input.modifiers.control = false;
     input.keys_down.remove(raf_core::InputKey::S);
     input.keys_released.insert(raf_core::InputKey::S);
-    assert!(!electronics_input_edge_pending(Some(ProjectType::Electronics), &input));
+    assert!(!electronics_input_edge_pending(
+        Some(ProjectType::Electronics),
+        &input
+    ));
 }
 
 #[test]
 fn electronics_button_edges_dispatch_before_the_next_present_tick() {
     let mut input = raf_core::InputSnapshot::default();
-    assert!(!electronics_input_edge_pending(Some(ProjectType::Electronics), &input));
-    input.pointer_pressed_buttons.insert(raf_core::PointerButton::Primary);
-    assert!(electronics_input_edge_pending(Some(ProjectType::Electronics), &input));
-    assert!(!electronics_input_edge_pending(Some(ProjectType::Game), &input));
+    assert!(!electronics_input_edge_pending(
+        Some(ProjectType::Electronics),
+        &input
+    ));
+    input
+        .pointer_pressed_buttons
+        .insert(raf_core::PointerButton::Primary);
+    assert!(electronics_input_edge_pending(
+        Some(ProjectType::Electronics),
+        &input
+    ));
+    assert!(!electronics_input_edge_pending(
+        Some(ProjectType::Game),
+        &input
+    ));
     input.clear_transient();
-    input.pointer_released_buttons.insert(raf_core::PointerButton::Primary);
-    assert!(electronics_input_edge_pending(Some(ProjectType::Electronics), &input));
+    input
+        .pointer_released_buttons
+        .insert(raf_core::PointerButton::Primary);
+    assert!(electronics_input_edge_pending(
+        Some(ProjectType::Electronics),
+        &input
+    ));
     input.window_focused = false;
-    assert!(!electronics_input_edge_pending(Some(ProjectType::Electronics), &input));
+    assert!(!electronics_input_edge_pending(
+        Some(ProjectType::Electronics),
+        &input
+    ));
 }
 
 #[test]
@@ -83,12 +120,8 @@ fn project_setting_controls_mutate_persisted_values_and_runtime_policy() {
     let mut settings = ProjectSettings::default();
 
     assert!(
-        apply_project_setting_toggle(
-            &mut settings,
-            "project-settings.allow-gpu-features",
-            true,
-        )
-        .changed
+        apply_project_setting_toggle(&mut settings, "project-settings.allow-gpu-features", true,)
+            .changed
     );
     assert!(settings.allow_gpu_features);
 
@@ -103,16 +136,14 @@ fn project_setting_controls_mutate_persisted_values_and_runtime_policy() {
     assert_eq!(settings.depth_resolution_scale, 0.75);
 
     assert!(
-        apply_project_setting_command(&mut settings, "project-settings.preset.medium",).changed
+        apply_project_setting_range(&mut settings, "project-settings.runtime-fps-limit", 75.0)
+            .changed
     );
-    assert_eq!(settings.runtime_render_preset, RenderPreset::Medium);
+    assert_eq!(settings.runtime.fps_limit, 75);
 
     assert!(
-        apply_project_setting_command(
-            &mut settings,
-            "project-settings.viewport-resolution.full",
-        )
-        .changed
+        apply_project_setting_command(&mut settings, "project-settings.viewport-resolution.full",)
+            .changed
     );
     assert_eq!(
         settings.viewport_resolution,
@@ -120,17 +151,13 @@ fn project_setting_controls_mutate_persisted_values_and_runtime_policy() {
     );
 
     assert!(
-        apply_project_setting_command(
-            &mut settings,
-            "project-settings.geometry-detail.detailed",
-        )
-        .changed
+        apply_project_setting_command(&mut settings, "project-settings.geometry-detail.detailed",)
+            .changed
     );
     assert_eq!(settings.geometry_detail, GeometryDetailMode::Detailed);
 
     assert!(
-        apply_project_setting_toggle(&mut settings, "project-settings.language.cpp", true,)
-            .changed
+        apply_project_setting_toggle(&mut settings, "project-settings.language.cpp", true,).changed
     );
     assert!(settings.allowed_script_languages.has(ScriptLanguage::Cpp));
 

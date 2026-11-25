@@ -1,15 +1,16 @@
 //! Project world brief and reusable recipes.
 
+use super::super::query::{parsed_command_from_params, text_argument};
 use super::kits::slugify;
 use super::plan::{append_journal, brief_path, load_planned_world, world_directory};
-use super::super::query::{parsed_command_from_params, text_argument};
 use super::*;
 
 pub(crate) fn execute_world_brief(request: &ParsedCommand) -> CommandOutput {
     let result = (|| -> Result<CommandOutput, String> {
         let Some(root) = active_project_root() else {
             return Err(
-                "The world brief requires an active project root. Open the project first.".to_string(),
+                "The world brief requires an active project root. Open the project first."
+                    .to_string(),
             );
         };
         let path = brief_path(&root);
@@ -37,13 +38,18 @@ pub(crate) fn execute_world_brief(request: &ParsedCommand) -> CommandOutput {
                 let brief = if content.trim().is_empty() {
                     Value::Null
                 } else {
-                    serde_json::from_str(&content).unwrap_or_else(|_| Value::String(content.clone()))
+                    serde_json::from_str(&content)
+                        .unwrap_or_else(|_| Value::String(content.clone()))
                 };
                 Ok(CommandOutput::info(
                     "World brief",
                     vec![format!(
                         "brief: {}",
-                        if content.is_empty() { "not set" } else { "loaded" }
+                        if content.is_empty() {
+                            "not set"
+                        } else {
+                            "loaded"
+                        }
                     )],
                     serde_json::json!({
                         "ok": true,
@@ -63,14 +69,21 @@ pub(crate) fn execute_world_brief(request: &ParsedCommand) -> CommandOutput {
                             .arg("brief")
                             .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
                     })
-                    .or_else(|| request.arg("content").map(|raw| Value::String(raw.to_string())))
-                    .ok_or_else(|| "world.brief write requires a brief object or content string.".to_string())?;
+                    .or_else(|| {
+                        request
+                            .arg("content")
+                            .map(|raw| Value::String(raw.to_string()))
+                    })
+                    .ok_or_else(|| {
+                        "world.brief write requires a brief object or content string.".to_string()
+                    })?;
                 if brief.to_string().len() > 64 * 1024 {
                     return Err("World brief must be at most 64 KiB.".to_string());
                 }
                 if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|error| format!("Could not create the world directory: {error}"))?;
+                    std::fs::create_dir_all(parent).map_err(|error| {
+                        format!("Could not create the world directory: {error}")
+                    })?;
                 }
                 let encoded = serde_json::to_vec_pretty(&brief)
                     .map_err(|error| format!("Could not encode the world brief: {error}"))?;
@@ -84,7 +97,10 @@ pub(crate) fn execute_world_brief(request: &ParsedCommand) -> CommandOutput {
                     "World brief saved",
                     vec![format!(
                         "path: {}",
-                        path.strip_prefix(&root).unwrap_or(&path).to_string_lossy().replace('\\', "/")
+                        path.strip_prefix(&root)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .replace('\\', "/")
                     )],
                     serde_json::json!({
                         "ok": true,
@@ -124,9 +140,8 @@ fn recipe_slug(value: &str) -> Result<String, String> {
 fn load_recipe(root: &Path, name: &str) -> Result<(PathBuf, Value), String> {
     let slug = recipe_slug(name)?;
     let path = recipes_directory(root).join(format!("{slug}.json"));
-    let bytes = std::fs::read(&path).map_err(|error| {
-        format!("Recipe '{slug}' was not found in the project: {error}")
-    })?;
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("Recipe '{slug}' was not found in the project: {error}"))?;
     let recipe = serde_json::from_slice::<Value>(&bytes)
         .map_err(|error| format!("Recipe '{slug}' is not valid JSON: {error}"))?;
     if !recipe.is_object() {
@@ -218,7 +233,8 @@ pub(crate) fn execute_world_recipe(
                 if let Ok(entries) = std::fs::read_dir(&directory) {
                     for entry in entries.flatten() {
                         let path = entry.path();
-                        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                        if path.extension().and_then(|extension| extension.to_str()) != Some("json")
+                        {
                             continue;
                         }
                         let Some(slug) = path.file_stem().and_then(|stem| stem.to_str()) else {
@@ -315,10 +331,7 @@ pub(crate) fn execute_world_recipe(
                     serde_json::json!({"program": program}),
                 );
                 let mut output = execute_plan(&plan_request, ctx);
-                if matches!(
-                    output.level,
-                    crate::commands::output::CommandLevel::Error
-                ) {
+                if matches!(output.level, crate::commands::output::CommandLevel::Error) {
                     return Ok(output);
                 }
                 let plan_id = output.json.get("plan_id").cloned().unwrap_or(Value::Null);

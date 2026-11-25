@@ -15,13 +15,16 @@
 // === NEW RENDERER ARCHITECTURE ===
 pub mod bridge;
 mod engine_time;
+pub mod entity_lights_frame;
 pub mod environment_frame;
+pub mod model_mesh_cache;
 pub mod geometry;
 pub mod math;
 mod optimized_filter;
 pub mod optimized_lighting;
 #[cfg(test)]
 mod optimized_qa;
+pub mod particles;
 pub mod render_pipeline;
 pub mod scene_renderer;
 pub mod scene_visibility;

@@ -1,4 +1,4 @@
-# Use GNU toolchain - avoids needing Visual Studio Build Tools
+# Build for the host by default. Windows users on the GNU toolchain still need
+# MinGW (see SETUP.md); CI and release jobs select their target explicitly.
 [build]
-target = "x86_64-pc-windows-gnu"
 target-dir = "target_gnu"

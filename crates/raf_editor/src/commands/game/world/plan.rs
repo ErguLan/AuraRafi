@@ -32,7 +32,9 @@ pub(super) fn world_directory(root: &Path) -> PathBuf {
 }
 
 fn plan_path(root: &Path, id: &str) -> PathBuf {
-    world_directory(root).join("plans").join(format!("{id}.json"))
+    world_directory(root)
+        .join("plans")
+        .join(format!("{id}.json"))
 }
 
 pub(super) fn brief_path(root: &Path) -> PathBuf {
@@ -147,11 +149,17 @@ pub(super) fn load_planned_world(id: &str) -> Result<PlannedWorld, String> {
         }
     }
     let Some(root) = active_project_root() else {
-        return Err(format!("Unknown world plan '{id}'. Create it with game.plan first."));
+        return Err(format!(
+            "Unknown world plan '{id}'. Create it with game.plan first."
+        ));
     };
     let path = plan_path(&root, id);
-    let bytes = std::fs::read(&path)
-        .map_err(|error| format!("World plan '{id}' was not found ({}): {error}", path.display()))?;
+    let bytes = std::fs::read(&path).map_err(|error| {
+        format!(
+            "World plan '{id}' was not found ({}): {error}",
+            path.display()
+        )
+    })?;
     let value: Value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("World plan '{id}' is not valid JSON: {error}"))?;
     let plan = PlannedWorld {
@@ -171,7 +179,10 @@ pub(super) fn load_planned_world(id: &str) -> Result<PlannedWorld, String> {
             .and_then(Value::as_str)
             .unwrap_or("build")
             .to_string(),
-        parent: value.get("parent").cloned().filter(|value| !value.is_null()),
+        parent: value
+            .get("parent")
+            .cloned()
+            .filter(|value| !value.is_null()),
         design_profile: value
             .get("design_profile")
             .and_then(Value::as_str)
@@ -216,7 +227,10 @@ pub(super) fn load_planned_world(id: &str) -> Result<PlannedWorld, String> {
     Ok(plan)
 }
 
-fn stage_plan(scene: &SceneGraph, plan: &PlannedWorld) -> Result<(CommandOutput, SceneGraph), String> {
+fn stage_plan(
+    scene: &SceneGraph,
+    plan: &PlannedWorld,
+) -> Result<(CommandOutput, SceneGraph), String> {
     let mut staged = scene.clone();
     let mut selection = SceneSelectionState::default();
     let mut viewport = HeadlessGameViewportPort::default();
@@ -224,7 +238,11 @@ fn stage_plan(scene: &SceneGraph, plan: &PlannedWorld) -> Result<(CommandOutput,
     Ok((output, staged))
 }
 
-fn plan_command_output(request_id: u64, plan: &PlannedWorld, stage: &CommandOutput) -> CommandOutput {
+fn plan_command_output(
+    request_id: u64,
+    plan: &PlannedWorld,
+    stage: &CommandOutput,
+) -> CommandOutput {
     let mut output = CommandOutput::info(
         "World plan ready",
         vec![
@@ -262,7 +280,10 @@ fn plan_command_output(request_id: u64, plan: &PlannedWorld, stage: &CommandOutp
     output
 }
 
-pub(crate) fn execute_plan(request: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(crate) fn execute_plan(
+    request: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let result = (|| -> Result<CommandOutput, String> {
         let program = request
             .structured_arg("program")
@@ -273,13 +294,15 @@ pub(crate) fn execute_plan(request: &ParsedCommand, ctx: &mut GameCommandContext
                     .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
             })
             .or_else(|| {
-                request
-                    .structured_args
-                    .clone()
-                    .filter(|value| value.get("operations").is_some() || value.get("entities").is_some() || value.get("groups").is_some())
+                request.structured_args.clone().filter(|value| {
+                    value.get("operations").is_some()
+                        || value.get("entities").is_some()
+                        || value.get("groups").is_some()
+                })
             })
             .ok_or_else(|| {
-                "game.plan requires a program object with archetypes/groups/entities/operations.".to_string()
+                "game.plan requires a program object with archetypes/groups/entities/operations."
+                    .to_string()
             })?;
         let compiled = compile_world_program(&program)?;
         let mode = program
@@ -327,9 +350,8 @@ pub(crate) fn execute_plan(request: &ParsedCommand, ctx: &mut GameCommandContext
             deletions: compiled.deletions,
             fingerprint: raf_core::agent_context::scene_fingerprint(ctx.scene),
             persisted_path: None,
-            project_root: active_project_root().map(|root| {
-                root.to_string_lossy().replace('\\', "/")
-            }),
+            project_root: active_project_root()
+                .map(|root| root.to_string_lossy().replace('\\', "/")),
         };
         let (stage, staged_scene) = stage_plan(ctx.scene, &plan)?;
         let overlaps = raf_core::agent_context::scene_check_overlaps(
@@ -342,16 +364,13 @@ pub(crate) fn execute_plan(request: &ParsedCommand, ctx: &mut GameCommandContext
             .get("overlap_count")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let design_audit = plan
-            .design_profile
-            .as_deref()
-            .map(|profile| {
-                raf_core::agent_context::scene_design_audit(
-                    &staged_scene,
-                    &serde_json::json!({"design_profile": profile, "root": Value::Null}),
-                    &[],
-                )
-            });
+        let design_audit = plan.design_profile.as_deref().map(|profile| {
+            raf_core::agent_context::scene_design_audit(
+                &staged_scene,
+                &serde_json::json!({"design_profile": profile, "root": Value::Null}),
+                &[],
+            )
+        });
         let navigation = raf_core::agent_context::scene_navigation_audit(
             &staged_scene,
             program.get("navigation").unwrap_or(&Value::Null),
@@ -526,9 +545,8 @@ fn world_pipeline(
                     ));
                 }
             }
-            if let Some(min_reachable) = operation
-                .get("min_reachable_goals")
-                .and_then(Value::as_u64)
+            if let Some(min_reachable) =
+                operation.get("min_reachable_goals").and_then(Value::as_u64)
             {
                 assertions_declared = true;
                 if reachable_goals < min_reachable {

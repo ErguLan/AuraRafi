@@ -356,6 +356,242 @@ pub(crate) fn bottom_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             )
             .when(UiStyleRuleState::Always),
             UiStyleRule::new(
+                UiStyleSelector::Class("console-entry-success".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface),
+                    border: Some(tokens.positive),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-entry-verbose".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    opacity: Some(0.82),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-terminal-entry".to_string()),
+                UiStylePatch {
+                    fill: Some([2, 6, 3, 255]),
+                    radius: Some(0.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-terminal-entry".to_string()),
+                UiStylePatch {
+                    fill: Some([6, 14, 8, 255]),
+                    border: Some([32, 64, 36, 255]),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-terminal-input".to_string()),
+                UiStylePatch {
+                    fill: Some([2, 6, 3, 255]),
+                    border: Some([28, 54, 30, 255]),
+                    border_width: Some(1.0),
+                    radius: Some(0.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-search-hit".to_string()),
+                UiStylePatch {
+                    fill: Some([232, 160, 62, 42]),
+                    border: Some([232, 160, 62, 120]),
+                    border_width: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-source".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(2.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-source".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-source-active".to_string()),
+                UiStylePatch {
+                    fill: Some([116, 67, 24, 54]),
+                    border: Some(tokens.accent),
+                    border_width: Some(1.0),
+                    radius: Some(2.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-icon-button".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(2.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-icon-button".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-icon-button-active".to_string()),
+                UiStylePatch {
+                    fill: Some([116, 67, 24, 66]),
+                    border: Some(tokens.accent),
+                    border_width: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-column-resizer".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some(tokens.border),
+                    border_width: Some(0.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-column-resizer".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent),
+                    opacity: Some(0.7),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-column-resizer".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent_hot),
+                    opacity: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Active),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-copy".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(2.0),
+                    opacity: Some(0.45),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-copy".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent),
+                    border_width: Some(1.0),
+                    opacity: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-copy".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent),
+                    opacity: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Active),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-resume-pill".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent),
+                    border: Some(tokens.accent_hot),
+                    border_width: Some(1.0),
+                    radius: Some(9.0),
+                    text: Some([255, 255, 255, 255]),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-resume-pill".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent_hot),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-recent-chip".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(8.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-recent-chip".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("bottom-tab-badge".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.danger),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(7.0),
+                    text: Some([255, 255, 255, 255]),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
                 UiStyleSelector::Class("console-empty".to_string()),
                 UiStylePatch {
                     text: Some(tokens.text_muted),

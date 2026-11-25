@@ -17,6 +17,9 @@ pub enum BasicPipelineKind {
     /// Unlit, two-sided authored UI; transparent fragments do not write scene depth.
     UiSurface,
     UiSurfaceOverlay,
+    /// Camera-facing particle billboards: straight alpha, depth tested,
+    /// no depth writes and no back-face culling.
+    Particle,
 }
 
 impl Default for BasicPipelineKind {
@@ -31,6 +34,13 @@ impl BasicPipelineKind {
     }
 
     pub const fn is_two_sided(self) -> bool {
-        matches!(self, Self::FlatColorTwoSided | Self::PbrLitTwoSided | Self::UiSurface | Self::UiSurfaceOverlay)
+        matches!(
+            self,
+            Self::FlatColorTwoSided
+                | Self::PbrLitTwoSided
+                | Self::UiSurface
+                | Self::UiSurfaceOverlay
+                | Self::Particle
+        )
     }
 }

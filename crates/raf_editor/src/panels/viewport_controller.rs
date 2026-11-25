@@ -9,13 +9,15 @@ use raf_core::config::EngineSettings;
 use raf_core::project::{GeometryDetailMode, ProjectSettings, TextureQualityMode};
 use raf_core::scene::{SceneGraph, SceneNodeId};
 use raf_core::{InputKey, InputOwner, InputRouter, InputSnapshot, PointerButton};
+use raf_render::api_graphic_basic::command_list::BasicScreenTriangle;
 use raf_render::api_graphic_basic::device::SceneFrameOutput;
 use raf_render::bridge::{
     try_capture_camera, try_capture_gizmo, try_capture_viewport_tool, GizmoRenderSpec,
-    RenderRuntime, ViewportBridge, ViewportInputFrame, ViewportInputRect, ViewportNavigationConfig,
-    ViewportPointerInput,
+    MeshSelectMode, RenderRuntime, ViewportBridge, ViewportInputFrame, ViewportInputRect,
+    ViewportNavigationConfig, ViewportPointerInput,
 };
 use raf_render::gizmo::{GizmoAxis, GizmoMode};
+use raf_render::particles::ParticleRenderOptions;
 use raf_render::render_config::RenderConfig;
 use raf_render::scene_renderer::{RenderOptions, SceneRenderFrame, GRID_Y};
 use raf_render::WorldStreamConfig;
@@ -71,7 +73,9 @@ pub enum NativeViewportRenderStyle {
 pub enum NativeViewportEditMode {
     #[default]
     Object,
-    Vertex,
+    /// Focused Tab Mode topology editing. Everything outside the edited mesh
+    /// is dimmed and entity selection is locked to that node.
+    Mesh,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -84,6 +88,11 @@ pub struct NativeViewportUpdate {
     /// keys or a held orbit/pan button). The runtime uses this to keep frames
     /// flowing even when the OS emits no repeated key event.
     pub camera_motion: bool,
+    /// Tab Mode lifecycle edges, consumed by the presentation layer to show
+    /// the controls hint once instead of every frame.
+    pub mesh_session_started: bool,
+    pub mesh_session_finished: bool,
+    pub mesh_session_cancelled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +114,12 @@ pub struct NativeGameViewportController {
     pub render_style: NativeViewportRenderStyle,
     pub edit_mode: NativeViewportEditMode,
     pub edit_notice: bool,
+    /// Constrained axis while dragging mesh vertices (0=X, 1=Y, 2=Z).
+    pub mesh_axis: Option<usize>,
+    /// Short human-readable status for the Tab Mode toolbar.
+    pub mesh_status: Option<String>,
+    /// Entity camera used as the live viewport viewpoint.
+    pub look_through: Option<SceneNodeId>,
     pub(crate) placement_notice: Option<&'static str>,
     pub(crate) placement: Option<crate::authoring_placement::AssetPlacement>,
     pub selected: Vec<SceneNodeId>,
@@ -133,6 +148,14 @@ pub struct NativeGameViewportController {
     /// Percentage of distance-based gizmo growth. Zero keeps a fixed handle
     /// size; one hundred restores the full camera-distance response.
     pub gizmo_growth_scale: f32,
+    /// Global editor-only particle preview controls.
+    pub particle_preview: raf_core::scene::ParticlePreviewSettings,
+    /// Last accepted viewport delta used by particle simulation.
+    pub last_frame_seconds: f32,
+    /// True while the camera is being orbited, panned, zoomed or flown. Editor
+    /// overlays whose screen geometry depends on the camera are suppressed for
+    /// these frames so the retained AGB scene packet can be reused.
+    pub camera_navigation_active: bool,
     /// Project building style: quantized, collision-aware authoring.
     pub building_organized: bool,
     /// Fixed metric quantum used by the organized style (meters).
@@ -145,6 +168,11 @@ pub struct NativeGameViewportController {
     free_drag: Option<FreeDragGesture>,
     scene_edit_snapshot: Option<SceneGraph>,
     completed_scene_edit_snapshot: Option<SceneGraph>,
+    /// Scene state captured when Tab Mode opened. Escape restores it; Apply
+    /// keeps the live document and discards it.
+    mesh_entry_snapshot: Option<SceneGraph>,
+    mesh_last_exit_cancelled: bool,
+    mesh_last_secondary_click: Option<(f64, [f32; 2])>,
     viewport_active: bool,
     gesture_start: Option<GestureStart>,
     /// True when the latest organized-resolution frame had to back the
@@ -161,6 +189,9 @@ impl Default for NativeGameViewportController {
             render_style: NativeViewportRenderStyle::Solid,
             edit_mode: NativeViewportEditMode::Object,
             edit_notice: false,
+            mesh_axis: None,
+            mesh_status: None,
+            look_through: None,
             placement_notice: None,
             placement: None,
             selected: Vec::new(),
@@ -188,6 +219,9 @@ impl Default for NativeGameViewportController {
             building_organized: false,
             building_snap_step: 1.0,
             render_config: RenderConfig::editor_lightweight(),
+            particle_preview: Default::default(),
+            last_frame_seconds: 1.0 / 60.0,
+            camera_navigation_active: false,
             geometry_detail: GeometryDetailMode::Adaptive,
             texture_quality: TextureQualityMode::Adaptive,
             world_stream_config: WorldStreamConfig::default(),
@@ -195,6 +229,9 @@ impl Default for NativeGameViewportController {
             free_drag: None,
             scene_edit_snapshot: None,
             completed_scene_edit_snapshot: None,
+            mesh_entry_snapshot: None,
+            mesh_last_exit_cancelled: false,
+            mesh_last_secondary_click: None,
             viewport_active: true,
             gesture_start: None,
             collision_contact: false,
@@ -225,6 +262,50 @@ impl NativeGameViewportController {
         self.viewport_active = active;
     }
 
+    /// Render through an entity camera while keeping the editor orbit camera
+    /// untouched. Escape or a removed/invalid camera returns to editor view.
+    pub fn set_look_through(&mut self, scene: &SceneGraph, id: Option<SceneNodeId>) {
+        self.look_through = id.filter(|id| {
+            scene
+                .get(*id)
+                .is_some_and(|node| node.game_camera.is_some())
+        });
+        if self.look_through.is_none() && id.is_some() {
+            self.mesh_status = Some("Look-through requires an entity with a Game camera.".into());
+        }
+    }
+
+    pub fn look_through_active(&self) -> bool {
+        self.look_through.is_some()
+    }
+
+    fn look_through_camera(&self, scene: &SceneGraph) -> Option<raf_render::Camera> {
+        let id = self.look_through?;
+        let node = scene.get(id)?;
+        let game_camera = node.game_camera.as_ref()?;
+        let world = scene.world_matrix(id);
+        let position = world.transform_point3(Vec3::ZERO);
+        let forward = world.transform_vector3(-Vec3::Z);
+        let up = world.transform_vector3(Vec3::Y);
+        if !position.is_finite() || !forward.is_finite() || !up.is_finite() {
+            return None;
+        }
+        Some(raf_render::Camera {
+            position,
+            target: position + forward,
+            up,
+            mode: if game_camera.orthographic {
+                raf_render::camera::CameraMode::Orthographic
+            } else {
+                raf_render::camera::CameraMode::Perspective
+            },
+            fov: game_camera.fov_degrees,
+            near: game_camera.near,
+            far: game_camera.far,
+            ortho_scale: game_camera.ortho_scale,
+        })
+    }
+
     /// Applies engine-wide viewport preferences to the live native controller.
     /// The settings surface owns the draft, while this controller owns the
     /// values consumed by camera and gizmo input, so they must be synchronized
@@ -251,6 +332,7 @@ impl NativeGameViewportController {
         self.uniform_scale_by_default = settings.uniform_scale_by_default;
         self.multi_select_gizmo_enabled = settings.multi_select_gizmo_enabled;
         self.gizmo_growth_scale = settings.gizmo_growth_scale.clamp(0.0, 100.0);
+        self.particle_preview = settings.particle_preview.clone();
     }
 
     /// Applies project-local runtime/render policy after the global engine
@@ -282,15 +364,26 @@ impl NativeGameViewportController {
             return self.update_asset_placement(input, rect, scene);
         }
         self.selected.retain(|id| scene.is_valid_node(*id));
+        let edit_mode_before = self.edit_mode;
         let mut update = NativeViewportUpdate::default();
         let size = [rect.size[0].max(1.0), rect.size[1].max(1.0)];
+        if self.look_through.is_some() {
+            let valid = self
+                .look_through
+                .and_then(|id| scene.get(id))
+                .is_some_and(|node| node.game_camera.is_some());
+            if !valid || input.key_pressed(InputKey::Escape) {
+                self.look_through = None;
+                update.needs_redraw = true;
+            }
+        }
 
         // Tool hotkeys are evaluated before camera movement, but never while
         // a primary gesture or command chord owns the frame. T is Scale; S is
         // permanently left to WASD navigation.
         let before_capture =
             ViewportInputFrame::from_snapshot(input, router, rect, self.viewport_active);
-        self.apply_tool_shortcuts(before_capture, scene);
+        update.scene_changed |= self.apply_tool_shortcuts(before_capture, scene);
 
         self.bridge
             .set_picking_policy(raf_render::bridge::PickingPolicy::for_render_config(
@@ -298,13 +391,32 @@ impl NativeGameViewportController {
             ));
         self.bridge
             .update_camera(self.mode == NativeViewportMode::View2d);
-        let view_proj = self.bridge.view_projection(size[0], size[1]);
+        let look_camera = self.look_through_camera(scene);
+        let view_proj = look_camera
+            .as_ref()
+            .map(|camera| self.bridge.view_projection_for(camera, size[0], size[1]))
+            .unwrap_or_else(|| self.bridge.view_projection(size[0], size[1]));
         let previous_hover = (
             self.bridge.highlighted_gizmo_axis(),
             self.bridge.highlighted_gizmo_scale_sign(),
         );
 
-        if self.edit_mode == NativeViewportEditMode::Object {
+        if self.edit_mode == NativeViewportEditMode::Mesh {
+            self.bridge.update_transform_hover(
+                scene,
+                None,
+                &view_proj,
+                [0.0, 0.0],
+                size[0],
+                size[1],
+            );
+            if let Some(pointer) = before_capture.pointer_local {
+                self.bridge
+                    .edit_session_mut()
+                    .update_hover(scene, &view_proj, size[0], size[1], pointer);
+                update.needs_redraw = true;
+            }
+        } else if self.edit_mode == NativeViewportEditMode::Object {
             if let Some(pointer) = before_capture.pointer_local {
                 if self.selected.len() == 1 {
                     self.bridge.update_transform_hover_scaled(
@@ -361,14 +473,61 @@ impl NativeGameViewportController {
             );
         }
 
-        if input.button_pressed(PointerButton::Secondary) {
+        let mut mesh_poked = false;
+        if self.edit_mode == NativeViewportEditMode::Mesh
+            && input.button_pressed(PointerButton::Secondary)
+        {
+            if let Some(pointer) = input.pointer_position.map(|point| rect.to_local(point)) {
+                let double = self
+                    .mesh_last_secondary_click
+                    .is_some_and(|(time, previous)| {
+                        let dx = pointer[0] - previous[0];
+                        let dy = pointer[1] - previous[1];
+                        input.time_seconds - time <= 0.35 && (dx * dx + dy * dy).sqrt() <= 6.0
+                    });
+                self.mesh_last_secondary_click = Some((input.time_seconds, pointer));
+                if double {
+                    mesh_poked = self.mesh_poke_at(scene, &view_proj, size, pointer);
+                    if mesh_poked {
+                        update.scene_changed = true;
+                        update.needs_redraw = true;
+                    }
+                }
+            }
+        }
+        if input.button_pressed(PointerButton::Secondary) && !mesh_poked {
             let _ = try_capture_camera(router, input, rect, PointerButton::Secondary);
         }
         if input.button_pressed(PointerButton::Middle) {
             let _ = try_capture_camera(router, input, rect, PointerButton::Middle);
         }
 
-        if input.button_pressed(PointerButton::Primary) {
+        if input.button_pressed(PointerButton::Primary)
+            && self.edit_mode == NativeViewportEditMode::Mesh
+        {
+            if try_capture_viewport_tool(router, input, rect) {
+                if let Some(pointer) = input.pointer_position.map(|point| rect.to_local(point)) {
+                    let selected = self.selected.first().copied();
+                    self.bridge.handle_edit_selection_click(
+                        scene,
+                        selected,
+                        &view_proj,
+                        size[0],
+                        size[1],
+                        pointer,
+                        input.modifiers.shift,
+                    );
+                    self.bridge
+                        .begin_edit_drag(scene, selected, &view_proj, size[0], size[1], pointer);
+                    if self.bridge.edit_session().is_dragging() {
+                        self.begin_scene_edit(scene);
+                    }
+                    update.selection_changed = true;
+                    update.needs_redraw = true;
+                    self.refresh_mesh_status(scene);
+                }
+            }
+        } else if input.button_pressed(PointerButton::Primary) {
             let anchor = self.gizmo_anchor(scene);
             let gizmo_hit = self.edit_mode == NativeViewportEditMode::Object
                 && self.bridge.highlighted_gizmo_axis() != GizmoAxis::None
@@ -430,9 +589,14 @@ impl NativeGameViewportController {
                     Some(InputOwner::ViewportGizmo | InputOwner::ViewportTool)
                 ))
         {
+            let mesh_drag = self.edit_mode == NativeViewportEditMode::Mesh
+                && self.bridge.edit_session().is_dragging()
+                && self.scene_edit_snapshot.is_some();
             let changed = self.free_drag.as_ref().is_some_and(|drag| drag.moved)
-                || self.bridge.active_drag_axis() != GizmoAxis::None;
+                || self.bridge.active_drag_axis() != GizmoAxis::None
+                || mesh_drag;
             self.bridge.end_transform_drag();
+            self.bridge.clear_edit_drag_state();
             self.free_drag = None;
             self.gesture_start = None;
             self.collision_contact = false;
@@ -442,11 +606,17 @@ impl NativeGameViewportController {
             } else {
                 self.scene_edit_snapshot = None;
             }
+            if self.edit_mode == NativeViewportEditMode::Mesh {
+                self.refresh_mesh_status(scene);
+            }
         }
 
         let camera_transition_was_active = self.bridge.has_camera_transition();
         let camera_transition_active = self.bridge.update_camera_transitions(input.delta_seconds);
         update.camera_motion |= camera_transition_active;
+        if camera_transition_active {
+            self.camera_navigation_active = true;
+        }
         let hover_changed = previous_hover.0 != self.bridge.highlighted_gizmo_axis()
             || (previous_hover.1 - self.bridge.highlighted_gizmo_scale_sign()).abs() > f32::EPSILON;
         update.needs_redraw |= update.scene_changed
@@ -460,16 +630,27 @@ impl NativeGameViewportController {
             // receive the exact settled orientation.
             || camera_transition_was_active
             || camera_transition_active;
+        update.mesh_session_started = edit_mode_before != NativeViewportEditMode::Mesh
+            && self.edit_mode == NativeViewportEditMode::Mesh;
+        update.mesh_session_finished = edit_mode_before == NativeViewportEditMode::Mesh
+            && self.edit_mode != NativeViewportEditMode::Mesh;
+        update.mesh_session_cancelled =
+            update.mesh_session_finished && self.mesh_last_exit_cancelled;
+        self.mesh_last_exit_cancelled = false;
+        self.last_frame_seconds = input.delta_seconds.clamp(1.0 / 240.0, 0.1);
         update
     }
 
     pub fn build_scene_frame(&mut self, scene: &SceneGraph, size: [u32; 2]) -> SceneRenderFrame {
         let width = size[0].max(1);
         let height = size[1].max(1);
-        self.bridge
-            .update_camera(self.mode == NativeViewportMode::View2d);
+        let look_camera = self.look_through_camera(scene);
+        if look_camera.is_none() {
+            self.bridge
+                .update_camera(self.mode == NativeViewportMode::View2d);
+        }
         let light_dir = raf_render::scene_renderer::SCENE_LIGHT_DIRECTION.normalize();
-        let mut frame = self.bridge.build_scene_frame(
+        let mut frame = self.bridge.build_scene_frame_with_camera(
             scene,
             width as f32,
             height as f32,
@@ -477,9 +658,15 @@ impl NativeGameViewportController {
             raf_render::scene_renderer::SCENE_BACKGROUND,
             light_dir,
             self.render_options(),
-            self.edit_mode == NativeViewportEditMode::Vertex,
+            false,
+            look_camera.as_ref(),
         );
-        if self.bridge.gizmo().visible {
+        if look_camera.is_some() {
+            self.append_safe_frame(&mut frame);
+        }
+        if self.edit_mode == NativeViewportEditMode::Mesh {
+            self.append_mesh_edit_overlay(scene, &mut frame);
+        } else if self.bridge.gizmo().visible && !self.camera_navigation_active {
             self.camera_helpers.append_to(
                 scene,
                 &mut frame,
@@ -487,7 +674,9 @@ impl NativeGameViewportController {
                 self.camera_helper_pixel_scale,
             );
         }
-        self.append_renderer_owned_gizmo(scene, &mut frame);
+        if self.edit_mode == NativeViewportEditMode::Object && !self.camera_navigation_active {
+            self.append_renderer_owned_gizmo(scene, &mut frame);
+        }
         self.append_collision_contact_outline(scene, &mut frame);
         if let Some(placement) = &self.placement {
             placement.append(&mut frame);
@@ -612,12 +801,15 @@ impl NativeGameViewportController {
             .update_camera(self.mode == NativeViewportMode::View2d);
     }
 
-    fn apply_tool_shortcuts(&mut self, input: ViewportInputFrame, scene: &SceneGraph) {
-        if !input.keyboard_enabled
-            || input.button_down(PointerButton::Primary)
-            || input.modifiers.command_modifier()
-        {
-            return;
+    fn apply_tool_shortcuts(&mut self, input: ViewportInputFrame, scene: &mut SceneGraph) -> bool {
+        if !input.keyboard_enabled || input.button_down(PointerButton::Primary) {
+            return false;
+        }
+        if self.edit_mode == NativeViewportEditMode::Mesh {
+            return self.apply_mesh_shortcuts(input, scene);
+        }
+        if input.modifiers.command_modifier() {
+            return false;
         }
         if input.key_pressed(InputKey::G) {
             self.set_gizmo_mode(GizmoMode::Translate);
@@ -630,18 +822,308 @@ impl NativeGameViewportController {
         } else if input.key_pressed(InputKey::F) && self.focus_lock_enabled {
             self.focus_selection(scene);
         } else if input.key_pressed(InputKey::Tab) && !self.selected.is_empty() {
-            self.edit_mode = NativeViewportEditMode::Object;
-            self.bridge.clear_edit_drag_state();
-            self.edit_notice = true;
+            return self.enter_mesh_edit(scene);
         }
         if input.key_pressed(InputKey::Numpad2) {
             self.mode = NativeViewportMode::View2d;
         } else if input.key_pressed(InputKey::Numpad3) {
             self.mode = NativeViewportMode::View3d;
         }
+        false
+    }
+
+    fn apply_mesh_shortcuts(&mut self, input: ViewportInputFrame, scene: &mut SceneGraph) -> bool {
+        if input.key_pressed(InputKey::Tab) {
+            return self.finish_mesh_edit(scene, true);
+        }
+        if input.key_pressed(InputKey::Escape) {
+            return self.finish_mesh_edit(scene, false);
+        }
+        if input.key_pressed(InputKey::Digit1) {
+            self.set_mesh_select_mode(MeshSelectMode::Vertex);
+        } else if input.key_pressed(InputKey::Digit2) {
+            self.set_mesh_select_mode(MeshSelectMode::Edge);
+        } else if input.key_pressed(InputKey::Digit3) {
+            self.set_mesh_select_mode(MeshSelectMode::Face);
+        }
+        if input.key_pressed(InputKey::G) && !input.modifiers.command_modifier() {
+            self.mesh_axis = None;
+            self.refresh_mesh_status(scene);
+        }
+        if input.modifiers.shift {
+            if input.key_pressed(InputKey::X) {
+                self.mesh_axis = Some(0);
+            } else if input.key_pressed(InputKey::Y) {
+                self.mesh_axis = Some(1);
+            } else if input.key_pressed(InputKey::Z) {
+                self.mesh_axis = Some(2);
+            }
+        }
+        if input.key_pressed(InputKey::A) && !input.modifiers.command_modifier() {
+            self.bridge.edit_session_mut().select_all(scene);
+            self.refresh_mesh_status(scene);
+        } else if input.key_pressed(InputKey::Backspace) {
+            self.bridge.edit_session_mut().clear_selection();
+            self.refresh_mesh_status(scene);
+        }
+        if input.key_pressed(InputKey::E) && !input.modifiers.command_modifier() {
+            return self.mesh_extrude(scene);
+        }
+        if input.key_pressed(InputKey::I) && !input.modifiers.command_modifier() {
+            return self.mesh_inset(scene);
+        }
+        if input.key_pressed(InputKey::R) && input.modifiers.command_modifier() {
+            return self.mesh_subdivide(scene);
+        }
+        if input.key_pressed(InputKey::X) || input.key_pressed(InputKey::Delete) {
+            return self.mesh_delete_faces(scene);
+        }
+        false
+    }
+
+    fn set_mesh_select_mode(&mut self, mode: MeshSelectMode) {
+        self.bridge.edit_session_mut().set_mode(mode);
+        self.mesh_status = Some(format!("Select: {}", mode.slug()));
+    }
+
+    fn refresh_mesh_status(&mut self, scene: &SceneGraph) {
+        let session = self.bridge.edit_session();
+        let vertices = session.selected_vertices.len();
+        let faces = session.selected_faces.len();
+        let total_vertices = session.mesh(scene).map_or(0, |mesh| mesh.vertices.len());
+        let total_faces = session.mesh(scene).map_or(0, |mesh| mesh.face_count());
+        let axis = match self.mesh_axis {
+            Some(0) => " | axis X",
+            Some(1) => " | axis Y",
+            Some(2) => " | axis Z",
+            _ => "",
+        };
+        self.mesh_status = Some(format!(
+            "{}V selected | {}F selected | {}V / {}F total{}",
+            vertices, faces, total_vertices, total_faces, axis
+        ));
+    }
+
+    fn enter_mesh_edit(&mut self, scene: &mut SceneGraph) -> bool {
+        if self.selected.len() != 1 {
+            self.edit_notice = true;
+            return false;
+        }
+        let Some(id) = self.selected.first().copied() else {
+            return false;
+        };
+        let Some(node) = scene.get(id) else {
+            return false;
+        };
+        if node.is_folder {
+            self.mesh_status = Some("Folders have no mesh topology to edit.".into());
+            self.edit_notice = true;
+            return false;
+        }
+        if node.mesh_asset.is_some() && node.editable_mesh.is_none() {
+            self.mesh_status =
+                Some("Imported meshes are not editable yet; convert or use a primitive.".into());
+            self.edit_notice = true;
+            return false;
+        }
+        let primitive = node.primitive;
+        self.mesh_entry_snapshot = Some(scene.clone());
+        let mut changed = false;
+        if node.editable_mesh.is_none() {
+            let mut data =
+                raf_render::editable::EditableMesh::from_primitive(primitive).to_scene_data();
+            data.touch();
+            if let Some(node) = scene.get_mut(id) {
+                node.editable_mesh = Some(data);
+            }
+            changed = true;
+        }
+        self.edit_mode = NativeViewportEditMode::Mesh;
+        self.edit_notice = false;
+        self.mesh_axis = None;
+        self.look_through = None;
+        self.bridge
+            .prepare_selected_edit_mesh(scene, self.selected.first().copied());
+        self.bridge
+            .edit_session_mut()
+            .set_mode(MeshSelectMode::Vertex);
+        self.refresh_mesh_status(scene);
+        changed
+    }
+
+    fn finish_mesh_edit(&mut self, scene: &mut SceneGraph, accept: bool) -> bool {
+        let mut changed = false;
+        if !accept {
+            if let Some(snapshot) = self.mesh_entry_snapshot.take() {
+                *scene = snapshot;
+                changed = true;
+            }
+        } else {
+            self.mesh_entry_snapshot = None;
+        }
+        self.mesh_last_exit_cancelled = !accept;
+        self.mesh_last_secondary_click = None;
+        self.edit_mode = NativeViewportEditMode::Object;
+        self.mesh_axis = None;
+        self.mesh_status = None;
+        self.edit_notice = false;
+        self.bridge.clear_edit_drag_state();
+        self.bridge.edit_session_mut().release();
+        changed
+    }
+
+    fn mesh_face_selection(&self) -> Vec<u32> {
+        self.bridge.edit_session().selected_faces.clone()
+    }
+
+    fn mesh_extrude(&mut self, scene: &mut SceneGraph) -> bool {
+        let faces = self.mesh_face_selection();
+        if faces.is_empty() {
+            self.mesh_status = Some("Extrude needs a selected face (press 3 first).".into());
+            return false;
+        }
+        self.mutate_mesh(scene, |mesh| mesh.extrude_faces(&faces, 0.25).map(|_| ()))
+    }
+
+    fn mesh_inset(&mut self, scene: &mut SceneGraph) -> bool {
+        let faces = self.mesh_face_selection();
+        if faces.is_empty() {
+            self.mesh_status = Some("Inset needs a selected face (press 3 first).".into());
+            return false;
+        }
+        self.mutate_mesh(scene, |mesh| mesh.inset_faces(&faces, 0.2).map(|_| ()))
+    }
+
+    fn mesh_subdivide(&mut self, scene: &mut SceneGraph) -> bool {
+        let faces = self.mesh_face_selection();
+        if faces.is_empty() {
+            self.mesh_status = Some("Subdivide needs a selected face (press 3 first).".into());
+            return false;
+        }
+        self.mutate_mesh(scene, |mesh| mesh.subdivide_faces(&faces).map(|_| ()))
+    }
+
+    fn mesh_delete_faces(&mut self, scene: &mut SceneGraph) -> bool {
+        let faces = self.mesh_face_selection();
+        if faces.is_empty() {
+            self.mesh_status = Some("Delete needs a selected face (press 3 first).".into());
+            return false;
+        }
+        let Some(id) = self.bridge.edit_session().node() else {
+            return false;
+        };
+        self.begin_scene_edit(scene);
+        let changed = scene
+            .get_mut(id)
+            .and_then(|node| node.editable_mesh.as_mut())
+            .is_some_and(|mesh| {
+                if mesh.delete_faces(&faces).is_err() {
+                    return false;
+                }
+                mesh.touch();
+                true
+            });
+        if changed {
+            let emptied = scene
+                .get(id)
+                .and_then(|node| node.editable_mesh.as_ref())
+                .is_none_or(|mesh| mesh.is_empty());
+            if emptied {
+                if let Some(node) = scene.get_mut(id) {
+                    node.editable_mesh = None;
+                }
+            }
+            if emptied {
+                self.completed_scene_edit_snapshot = self.scene_edit_snapshot.take();
+                self.finish_mesh_edit(scene, true);
+                return true;
+            }
+            self.completed_scene_edit_snapshot = self.scene_edit_snapshot.take();
+            self.bridge.edit_session_mut().clear_selection();
+            self.refresh_mesh_status(scene);
+        } else {
+            self.scene_edit_snapshot = None;
+        }
+        changed
+    }
+
+    /// Double right-click on a face inserts a movable point and splits that
+    /// triangle into three. This is the low-friction way to add topology
+    /// without leaving Tab Mode or opening a modeling application.
+    fn mesh_poke_at(
+        &mut self,
+        scene: &mut SceneGraph,
+        view_proj: &glam::Mat4,
+        size: [f32; 2],
+        pointer: [f32; 2],
+    ) -> bool {
+        let Some((face, point)) = self
+            .bridge
+            .pick_edit_face_point(scene, view_proj, size[0], size[1], pointer)
+        else {
+            self.mesh_status =
+                Some("Right-click a face twice to add a point on its surface.".into());
+            return false;
+        };
+        let Some(id) = self.bridge.edit_session().node() else {
+            return false;
+        };
+        self.begin_scene_edit(scene);
+        let inserted = scene
+            .get_mut(id)
+            .and_then(|node| node.editable_mesh.as_mut())
+            .and_then(|mesh| mesh.poke_face(face, point).ok());
+        if let Some(vertex) = inserted {
+            self.completed_scene_edit_snapshot = self.scene_edit_snapshot.take();
+            self.bridge
+                .edit_session_mut()
+                .set_mode(MeshSelectMode::Vertex);
+            self.bridge.edit_session_mut().selected_vertices = vec![vertex];
+            self.refresh_mesh_status(scene);
+            true
+        } else {
+            self.scene_edit_snapshot = None;
+            self.mesh_status = Some("Could not add a point to that face.".into());
+            false
+        }
+    }
+
+    fn mutate_mesh(
+        &mut self,
+        scene: &mut SceneGraph,
+        operation: impl FnOnce(&mut raf_core::scene::EditableMeshData) -> Result<(), String>,
+    ) -> bool {
+        let Some(id) = self.bridge.edit_session().node() else {
+            return false;
+        };
+        self.begin_scene_edit(scene);
+        let changed = scene
+            .get_mut(id)
+            .and_then(|node| node.editable_mesh.as_mut())
+            .is_some_and(|mesh| {
+                if operation(mesh).is_err() {
+                    return false;
+                }
+                mesh.touch();
+                true
+            });
+        if changed {
+            self.completed_scene_edit_snapshot = self.scene_edit_snapshot.take();
+            self.bridge.edit_session_mut().clear_selection();
+            self.refresh_mesh_status(scene);
+        } else {
+            self.scene_edit_snapshot = None;
+        }
+        changed
     }
 
     fn update_camera(&mut self, input: ViewportInputFrame) -> bool {
+        // Look-through is a fixed entity viewpoint; orbit/fly input must not
+        // desync the rendered camera from the selection/manipulation camera.
+        if self.look_through.is_some() {
+            self.camera_navigation_active = false;
+            return false;
+        }
         let primary_tool_owns_pointer = input.button_down(PointerButton::Primary);
         let secondary = input.button_down(PointerButton::Secondary);
         let middle = input.button_down(PointerButton::Middle);
@@ -663,6 +1145,11 @@ impl NativeGameViewportController {
 
         let pointer_camera_active = !primary_tool_owns_pointer && (secondary || middle);
         let keyboard_camera_active = input.keyboard_enabled && fly != [0.0; 3];
+        let scroll_camera_active =
+            !input.modifiers.command_modifier() && input.scroll_delta != [0.0; 2];
+        let was_navigating = self.camera_navigation_active;
+        self.camera_navigation_active =
+            pointer_camera_active || keyboard_camera_active || scroll_camera_active;
         self.bridge.handle_camera_input(
             ViewportPointerInput {
                 pointer_delta: if pointer_camera_active {
@@ -696,7 +1183,7 @@ impl NativeGameViewportController {
         );
         self.bridge
             .update_camera(self.mode == NativeViewportMode::View2d);
-        pointer_camera_active || keyboard_camera_active || input.scroll_delta != [0.0; 2]
+        was_navigating || pointer_camera_active || keyboard_camera_active || scroll_camera_active
     }
 
     fn update_primary_gesture(
@@ -712,6 +1199,21 @@ impl NativeGameViewportController {
         let Some(pointer) = input.pointer_local else {
             return false;
         };
+        if self.edit_mode == NativeViewportEditMode::Mesh {
+            if !self.bridge.edit_session().is_dragging() {
+                return false;
+            }
+            let changed = self.bridge.drag_selected_vertices(
+                scene,
+                self.move_sensitivity,
+                pointer,
+                self.mesh_axis,
+            );
+            if changed {
+                self.refresh_mesh_status(scene);
+            }
+            return changed;
+        }
         if self.bridge.active_drag_axis() != GizmoAxis::None {
             let multi = self
                 .gesture_start
@@ -807,9 +1309,14 @@ impl NativeGameViewportController {
             delta
         };
         for member in &drag.members {
-            let parent=scene.get(member.id).and_then(|node|node.parent).map(|id|scene.world_matrix(id)).unwrap_or(Mat4::IDENTITY);
+            let parent = scene
+                .get(member.id)
+                .and_then(|node| node.parent)
+                .map(|id| scene.world_matrix(id))
+                .unwrap_or(Mat4::IDENTITY);
             if let Some(node) = scene.get_mut(member.id) {
-                node.position = member.local_start + parent.inverse().transform_vector3(final_delta);
+                node.position =
+                    member.local_start + parent.inverse().transform_vector3(final_delta);
             }
         }
         drag.moved = true;
@@ -852,7 +1359,12 @@ impl NativeGameViewportController {
         let members = if self.selected.len() > 1 && self.selected.contains(&picked) {
             self.selected
                 .iter()
-                .filter(|id| !self.selected.iter().any(|parent| *id != parent && building_mode::is_descendant_of_any(scene, **id, &[*parent])))
+                .filter(|id| {
+                    !self.selected.iter().any(|parent| {
+                        *id != parent
+                            && building_mode::is_descendant_of_any(scene, **id, &[*parent])
+                    })
+                })
                 .filter_map(|id| {
                     scene
                         .get(*id)
@@ -936,10 +1448,9 @@ impl NativeGameViewportController {
             .copied()
             .filter(|id| scene.get(*id).is_some_and(|node| !node.locked))
             .filter(|id| {
-                !self
-                    .selected
-                    .iter()
-                    .any(|parent| parent != id && building_mode::is_descendant_of_any(scene, *id, &[*parent]))
+                !self.selected.iter().any(|parent| {
+                    parent != id && building_mode::is_descendant_of_any(scene, *id, &[*parent])
+                })
             })
             .collect()
     }
@@ -964,7 +1475,11 @@ impl NativeGameViewportController {
             self.gesture_start = None;
             return;
         }
-        let pivot=movers.iter().map(|m|scene.world_matrix(m.id).transform_point3(Vec3::ZERO)).sum::<Vec3>() / movers.len() as f32;
+        let pivot = movers
+            .iter()
+            .map(|m| scene.world_matrix(m.id).transform_point3(Vec3::ZERO))
+            .sum::<Vec3>()
+            / movers.len() as f32;
         let mut start_union: Option<Aabb> = None;
         for mover in &movers {
             if let Some(bounds) = building_mode::mover_aabb(scene, mover.id) {
@@ -1187,15 +1702,25 @@ impl NativeGameViewportController {
             GizmoAxis::Z => 2usize,
             GizmoAxis::None => return,
         };
-        let parent=scene.get(mover.id).and_then(|node|node.parent).map(|id|scene.world_matrix(id)).unwrap_or(Mat4::IDENTITY);
+        let parent = scene
+            .get(mover.id)
+            .and_then(|node| node.parent)
+            .map(|id| scene.world_matrix(id))
+            .unwrap_or(Mat4::IDENTITY);
         let Some(node) = scene.get_mut(mover.id) else {
             return;
         };
         match self.bridge.gizmo().mode {
             GizmoMode::Translate => {
-                let raw = axis_of(parent.transform_vector3(node.position-mover.start_pos),axis);
+                let raw = axis_of(
+                    parent.transform_vector3(node.position - mover.start_pos),
+                    axis,
+                );
                 let snapped = building_mode::snap_scalar(raw, self.grid_spacing);
-                node.position=mover.start_pos+parent.inverse().transform_vector3(axis_direction(axis)*snapped);
+                node.position = mover.start_pos
+                    + parent
+                        .inverse()
+                        .transform_vector3(axis_direction(axis) * snapped);
             }
             GizmoMode::Rotate | GizmoMode::Scale => {}
         }
@@ -1432,6 +1957,95 @@ impl NativeGameViewportController {
             world_stream_load_radius: self.world_stream_config.load_radius,
             geometry_detail: self.geometry_detail,
             texture_quality: self.texture_quality,
+            particles: ParticleRenderOptions {
+                enabled: self.particle_preview.enabled,
+                paused: self.particle_preview.paused,
+                frozen: self.particle_preview.frozen,
+                stopped: self.particle_preview.stopped,
+                time_scale: self.particle_preview.time_scale.clamp(0.0, 8.0),
+                quality: raf_core::scene::ParticleQuality::Epic,
+                max_sprites: self.particle_preview.max_sprites,
+                wind: self.particle_preview.wind,
+            },
+            particle_dt: self.last_frame_seconds,
+            camera_navigation: self.camera_navigation_active,
+            stable_scene_packet: self.camera_navigation_active,
+            focus_node: if self.edit_mode == NativeViewportEditMode::Mesh {
+                self.selected.first().map(|id| id.0 as u64)
+            } else {
+                None
+            },
+        }
+    }
+
+    /// Camera framing guides: 90% action-safe frame plus rule-of-thirds lines.
+    fn append_safe_frame(&self, frame: &mut SceneRenderFrame) {
+        let width = frame.width as f32;
+        let height = frame.height as f32;
+        if width <= 1.0 || height <= 1.0 {
+            return;
+        }
+        let frame_color = [255, 255, 255, 92];
+        let guide_color = [255, 255, 255, 42];
+        let margin = 0.05;
+        let left = width * margin;
+        let right = width * (1.0 - margin);
+        let top = height * margin;
+        let bottom = height * (1.0 - margin);
+        for (start, end) in [
+            ([left, top], [right, top]),
+            ([right, top], [right, bottom]),
+            ([right, bottom], [left, bottom]),
+            ([left, bottom], [left, top]),
+        ] {
+            push_screen_line(frame, start, end, frame_color, 1.0);
+        }
+        for step in 1..3 {
+            let x = width * (step as f32 / 3.0);
+            let y = height * (step as f32 / 3.0);
+            push_screen_line(frame, [x, 0.0], [x, height], guide_color, 1.0);
+            push_screen_line(frame, [0.0, y], [width, y], guide_color, 1.0);
+        }
+    }
+
+    /// Tab Mode overlay: selected faces, wireframe and draggable vertex
+    /// handles, all in target pixels so they stay readable at any distance.
+    fn append_mesh_edit_overlay(&self, scene: &SceneGraph, frame: &mut SceneRenderFrame) {
+        if self.edit_mode != NativeViewportEditMode::Mesh {
+            return;
+        }
+        let Some(overlay) = self.bridge.project_edit_overlay(
+            scene,
+            self.selected.first().copied(),
+            &frame.view_proj,
+            frame.width as f32,
+            frame.height as f32,
+        ) else {
+            return;
+        };
+        for face in &overlay.faces {
+            push_screen_triangle(frame, face.points, [255, 138, 24, 54]);
+        }
+        if overlay.edges.len() <= 4096 {
+            for edge in &overlay.edges {
+                let color = if edge.selected {
+                    [255, 196, 92, 230]
+                } else {
+                    [255, 146, 32, 150]
+                };
+                push_screen_line(frame, edge.start, edge.end, color, 1.2);
+            }
+        }
+        for vertex in &overlay.vertices {
+            let fill = if vertex.selected {
+                [255, 255, 255, 255]
+            } else if vertex.hovered {
+                [255, 216, 120, 255]
+            } else {
+                [255, 146, 32, 255]
+            };
+            push_screen_square(frame, vertex.position, 5.0, [26, 18, 10, 220]);
+            push_screen_square(frame, vertex.position, 3.4, fill);
         }
     }
 
@@ -1613,7 +2227,9 @@ impl GameViewportPort for NativeGameViewportController {
     }
 
     fn set_selected_ids(&mut self, ids: Vec<SceneNodeId>) {
-        self.selected = ids;
+        if self.edit_mode != NativeViewportEditMode::Mesh {
+            self.selected = ids;
+        }
     }
 
     fn focus_entity(&mut self, scene: &SceneGraph, id: Option<SceneNodeId>) {
@@ -1621,6 +2237,10 @@ impl GameViewportPort for NativeGameViewportController {
             self.selected = vec![id];
         }
         self.focus_selection(scene);
+    }
+
+    fn set_look_through(&mut self, scene: &SceneGraph, id: Option<SceneNodeId>) {
+        self.set_look_through(scene, id);
     }
 }
 
@@ -1688,6 +2308,43 @@ fn mark_contact(flag: &mut bool, clamped: f32, raw: f32) {
     if (clamped - raw).abs() > 1e-4 {
         *flag = true;
     }
+}
+
+fn push_screen_triangle(frame: &mut SceneRenderFrame, points: [[f32; 2]; 3], color: [u8; 4]) {
+    frame
+        .commands
+        .draw_screen_triangle(BasicScreenTriangle { points, color });
+}
+
+fn push_screen_square(frame: &mut SceneRenderFrame, center: [f32; 2], half: f32, color: [u8; 4]) {
+    let min = [center[0] - half, center[1] - half];
+    let max = [center[0] + half, center[1] + half];
+    push_screen_triangle(frame, [min, [max[0], min[1]], max], color);
+    push_screen_triangle(frame, [min, max, [min[0], max[1]]], color);
+}
+
+fn push_screen_line(
+    frame: &mut SceneRenderFrame,
+    start: [f32; 2],
+    end: [f32; 2],
+    color: [u8; 4],
+    width: f32,
+) {
+    let dx = end[0] - start[0];
+    let dy = end[1] - start[1];
+    let length = (dx * dx + dy * dy).sqrt();
+    if !length.is_finite() || length < 0.5 {
+        return;
+    }
+    let half = (width * 0.5).max(0.35);
+    let nx = -dy / length * half;
+    let ny = dx / length * half;
+    let a = [start[0] + nx, start[1] + ny];
+    let b = [end[0] + nx, end[1] + ny];
+    let c = [end[0] - nx, end[1] - ny];
+    let d = [start[0] - nx, start[1] - ny];
+    push_screen_triangle(frame, [a, b, c], color);
+    push_screen_triangle(frame, [a, c, d], color);
 }
 
 #[cfg(test)]
@@ -1916,5 +2573,141 @@ mod tests {
 
         assert!(!update.camera_motion);
         assert!(!update.needs_redraw);
+    }
+
+    #[test]
+    fn tab_mesh_mode_converts_and_cancel_restores_the_primitive() {
+        let mut scene = SceneGraph::default();
+        let id = scene.add_root_with_primitive("Cube", Primitive::Cube);
+        let mut controller = NativeGameViewportController::default();
+        controller.selected = vec![id];
+
+        assert!(controller.enter_mesh_edit(&mut scene));
+        assert_eq!(controller.edit_mode, NativeViewportEditMode::Mesh);
+        assert!(scene.get(id).unwrap().editable_mesh.is_some());
+
+        assert!(controller.finish_mesh_edit(&mut scene, false));
+        assert_eq!(controller.edit_mode, NativeViewportEditMode::Object);
+        assert!(scene.get(id).unwrap().editable_mesh.is_none());
+    }
+
+    #[test]
+    fn tab_mesh_mode_apply_keeps_the_authored_topology() {
+        let mut scene = SceneGraph::default();
+        let id = scene.add_root_with_primitive("Cube", Primitive::Cube);
+        let mut controller = NativeGameViewportController::default();
+        controller.selected = vec![id];
+
+        assert!(controller.enter_mesh_edit(&mut scene));
+        controller.bridge.edit_session_mut().selected_faces = vec![0];
+        assert!(controller.mesh_extrude(&mut scene));
+        let faces = scene
+            .get(id)
+            .and_then(|node| node.editable_mesh.as_ref())
+            .map(|mesh| mesh.face_count())
+            .unwrap_or_default();
+        assert!(faces > 12);
+
+        assert!(!controller.finish_mesh_edit(&mut scene, true));
+        assert_eq!(controller.edit_mode, NativeViewportEditMode::Object);
+        assert_eq!(
+            scene
+                .get(id)
+                .and_then(|node| node.editable_mesh.as_ref())
+                .map(|mesh| mesh.face_count()),
+            Some(faces)
+        );
+    }
+
+    #[test]
+    fn double_right_click_adds_a_movable_point_on_the_clicked_face() {
+        let mut scene = SceneGraph::default();
+        let id = scene.add_root_with_primitive("Cube", Primitive::Cube);
+        let mut controller = NativeGameViewportController::default();
+        controller.selected = vec![id];
+        assert!(controller.enter_mesh_edit(&mut scene));
+        let view_proj = controller.bridge().view_projection(800.0, 600.0);
+        let world = scene
+            .world_matrix(id)
+            .transform_point3(Vec3::new(0.0, 0.0, 0.5));
+        let (pointer, _) =
+            raf_render::math::transform::project_point(world, &view_proj, 800.0, 600.0)
+                .expect("face projects on screen");
+        let before = scene.get(id).unwrap().editable_mesh.as_ref().unwrap();
+        let (faces, vertices) = (before.face_count(), before.vertices.len());
+        assert!(controller.mesh_poke_at(&mut scene, &view_proj, [800.0, 600.0], pointer));
+        let after = scene.get(id).unwrap().editable_mesh.as_ref().unwrap();
+        assert_eq!(after.face_count(), faces + 2);
+        assert_eq!(after.vertices.len(), vertices + 1);
+        assert_eq!(
+            controller.bridge.edit_session().selected_vertices.len(),
+            1,
+            "the inserted point becomes the active selection"
+        );
+    }
+
+    #[test]
+    fn camera_navigation_reuses_the_scene_packet_with_many_objects() {
+        let mut scene = SceneGraph::default();
+        for index in 0..24 {
+            let id = scene.add_root_with_primitive(&format!("Cube {index}"), Primitive::Cube);
+            if let Some(node) = scene.get_mut(id) {
+                let angle = index as f32 / 24.0 * std::f32::consts::TAU;
+                node.position = Vec3::new(angle.cos() * 6.0, index as f32 * 0.1, angle.sin() * 6.0);
+            }
+        }
+        let mut controller = NativeGameViewportController::default();
+        controller.selected = vec![scene.iter().next().unwrap().0];
+        controller.bridge.gizmo_mut().visible = true;
+        controller.camera_navigation_active = true;
+
+        let first = controller.build_scene_frame(&scene, [800, 600]);
+        let first_hash = first.commands.content_hash();
+        controller.bridge.set_orbit_angles(0.4, 0.2);
+        controller.bridge.update_camera(false);
+        let second = controller.build_scene_frame(&scene, [800, 600]);
+        let second_hash = second.commands.content_hash();
+        assert_eq!(
+            first_hash, second_hash,
+            "camera navigation must not invalidate the retained scene packet"
+        );
+    }
+
+    #[test]
+    fn camera_navigation_keeps_the_scene_packet_content_stable() {
+        let mut scene = SceneGraph::default();
+        let id = scene.add_root_with_primitive("Cube", Primitive::Cube);
+        let mut controller = NativeGameViewportController::default();
+        controller.selected = vec![id];
+        controller.bridge.gizmo_mut().visible = true;
+        controller.camera_navigation_active = true;
+
+        let first = controller.build_scene_frame(&scene, [800, 600]);
+        let first_hash = first.commands.content_hash();
+        controller.bridge.set_orbit_angles(0.4, 0.2);
+        controller.bridge.update_camera(false);
+        let second = controller.build_scene_frame(&scene, [800, 600]);
+        let second_hash = second.commands.content_hash();
+        assert_eq!(
+            first_hash, second_hash,
+            "camera navigation must not invalidate the retained scene packet"
+        );
+    }
+
+    #[test]
+    fn look_through_rejects_nodes_without_a_game_camera() {
+        let mut scene = SceneGraph::default();
+        let plain = scene.add_root_with_primitive("Plain", Primitive::Cube);
+        let mut controller = NativeGameViewportController::default();
+
+        controller.set_look_through(&scene, Some(plain));
+        assert!(!controller.look_through_active());
+
+        if let Some(node) = scene.get_mut(plain) {
+            node.game_camera = Some(raf_core::runtime_config::GameCamera::default());
+        }
+        controller.set_look_through(&scene, Some(plain));
+        assert!(controller.look_through_active());
+        assert!(controller.look_through_camera(&scene).is_some());
     }
 }

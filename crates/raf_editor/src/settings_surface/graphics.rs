@@ -5,7 +5,7 @@ use raf_render::api_graphic_basic::ui_surface::{StudioUiPalette, UiNode, UiSelec
 
 use super::controls::{
     card, group_label, range_row, range_row_disabled, range_row_with_description, select_row,
-    toggle_row, toggle_row_with_description,
+    select_row_with_description, toggle_row, toggle_row_with_description,
 };
 
 pub(super) fn performance(
@@ -14,8 +14,8 @@ pub(super) fn performance(
     open_select: Option<&str>,
 ) -> UiNode {
     card(palette, "settings.performance")
-        .with_child(group_label(palette, "settings.group.quality"))
-        .with_child(select_row(
+        .with_child(group_label(palette, "settings.group.editor_performance"))
+        .with_child(select_row_with_description(
             palette,
             "settings.quality",
             "settings.quality",
@@ -33,8 +33,9 @@ pub(super) fn performance(
                 RenderQuality::High => 3,
             },
             open_select,
+            "settings.quality_desc",
         ))
-        .with_child(select_row(
+        .with_child(select_row_with_description(
             palette,
             "settings.render_execution_policy",
             "settings.render_execution_policy",
@@ -53,6 +54,7 @@ pub(super) fn performance(
                 RenderExecutionPolicy::GpuPreferred => 2,
             },
             open_select,
+            "settings.render_execution_policy_desc",
         ))
         .with_child(group_label(palette, "settings.group.frame_pacing"))
         .with_child(toggle_row_with_description(
@@ -91,6 +93,82 @@ pub(super) fn performance(
             1.0,
             format!("{} fps", settings.fps_limit),
             settings.fps_limit == 0,
+        ))
+        .with_child(group_label(palette, "settings.group.particle_preview"))
+        .with_child(toggle_row_with_description(
+            palette,
+            "settings.particle_preview.enabled",
+            "settings.particle_preview.enabled",
+            settings.particle_preview.enabled,
+            "settings.particle_preview.enabled_desc",
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.particle_preview.paused",
+            "settings.particle_preview.paused",
+            settings.particle_preview.paused,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.particle_preview.frozen",
+            "settings.particle_preview.frozen",
+            settings.particle_preview.frozen,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.particle_preview.stopped",
+            "settings.particle_preview.stopped",
+            settings.particle_preview.stopped,
+        ))
+        .with_child(range_row(
+            palette,
+            "settings.particle_preview.max_sprites",
+            "settings.particle_preview.max_sprites",
+            settings.particle_preview.max_sprites as f32,
+            0.0,
+            100_000.0,
+            1_000.0,
+            format!("{} sprites", settings.particle_preview.max_sprites),
+        ))
+        .with_child(range_row(
+            palette,
+            "settings.particle_preview.time_scale",
+            "settings.particle_preview.time_scale",
+            settings.particle_preview.time_scale,
+            0.0,
+            4.0,
+            0.05,
+            format!("{:.2}x", settings.particle_preview.time_scale),
+        ))
+        .with_child(range_row(
+            palette,
+            "settings.particle_preview.wind_x",
+            "settings.particle_preview.wind_x",
+            settings.particle_preview.wind[0],
+            -20.0,
+            20.0,
+            0.1,
+            format!("{:.2}", settings.particle_preview.wind[0]),
+        ))
+        .with_child(range_row(
+            palette,
+            "settings.particle_preview.wind_y",
+            "settings.particle_preview.wind_y",
+            settings.particle_preview.wind[1],
+            -20.0,
+            20.0,
+            0.1,
+            format!("{:.2}", settings.particle_preview.wind[1]),
+        ))
+        .with_child(range_row(
+            palette,
+            "settings.particle_preview.wind_z",
+            "settings.particle_preview.wind_z",
+            settings.particle_preview.wind[2],
+            -20.0,
+            20.0,
+            0.1,
+            format!("{:.2}", settings.particle_preview.wind[2]),
         ))
 }
 

@@ -1,9 +1,9 @@
 //! Transactional world plan execution and commit.
 
-use super::plan::{load_planned_world, plan_cache, update_persisted_plan, PlannedWorld};
 use super::super::build::{build_scene, order_build_groups, reconcile_scene};
 use super::super::entity::update_entity;
 use super::super::query::{parsed_command_from_params, text_argument};
+use super::plan::{load_planned_world, plan_cache, update_persisted_plan, PlannedWorld};
 use super::*;
 
 /// Plans are applied through the same validated semantic commands as a manual
@@ -16,11 +16,7 @@ use super::*;
 const PLAN_GROUP_CHUNK: usize = 32;
 const PLAN_ENTITY_CHUNK: usize = 128;
 
-fn plan_chunk_command(
-    plan: &PlannedWorld,
-    key: &str,
-    chunk: &[Value],
-) -> ParsedCommand {
+fn plan_chunk_command(plan: &PlannedWorld, key: &str, chunk: &[Value]) -> ParsedCommand {
     let mut params = serde_json::json!({ key: chunk });
     if let Some(parent) = &plan.parent {
         params["parent"] = parent.clone();
@@ -98,16 +94,15 @@ pub(crate) fn apply_plan_to_scene(
         && plan.updates.is_empty()
         && plan.deletions.is_empty()
     {
-        return Err("The world plan contains no groups, entities, updates or deletions.".to_string());
+        return Err(
+            "The world plan contains no groups, entities, updates or deletions.".to_string(),
+        );
     }
     let original_scene = scene.clone();
     let original_selection = selection.clone();
     let original_viewport_selection = viewport.selected_ids();
-    let ordered_groups = match order_build_groups(
-        plan.groups.clone(),
-        scene,
-        plan.parent.as_ref(),
-    ) {
+    let ordered_groups = match order_build_groups(plan.groups.clone(), scene, plan.parent.as_ref())
+    {
         Ok(groups) => groups,
         Err(error) => return Err(error),
     };
@@ -159,7 +154,10 @@ pub(crate) fn apply_plan_to_scene(
             let command = parsed_command_from_params("game.update", params);
             let output = update_entity(&command, &mut context);
             if matches!(output.level, crate::commands::output::CommandLevel::Error) {
-                return Err(format!("Plan update '{target}' failed: {}", output.lines.join(" ")));
+                return Err(format!(
+                    "Plan update '{target}' failed: {}",
+                    output.lines.join(" ")
+                ));
             }
             updated += 1;
         }
@@ -175,7 +173,9 @@ pub(crate) fn apply_plan_to_scene(
             match resolve_plan_target(context.scene, target) {
                 Some(id) => {
                     if !context.scene.remove_node(id) {
-                        return Err(format!("Plan deletion target '{target}' could not be removed."));
+                        return Err(format!(
+                            "Plan deletion target '{target}' could not be removed."
+                        ));
                     }
                     deleted += 1;
                 }
@@ -249,7 +249,10 @@ pub(crate) fn apply_plan_to_scene(
     Ok(result)
 }
 
-pub(crate) fn execute_commit(request: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(crate) fn execute_commit(
+    request: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let result = (|| -> Result<CommandOutput, String> {
         let plan_id = text_argument(request, "plan_id")
             .or_else(|| text_argument(request, "id"))

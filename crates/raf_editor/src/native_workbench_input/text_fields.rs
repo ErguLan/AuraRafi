@@ -88,6 +88,10 @@ impl NativeGameWorkbench {
                 self.assets_surface.script_name = value.clone();
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             }
+            "assets.particle-name" => {
+                self.assets_surface.particle_name = value.clone();
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            }
             "assets.rename-value" => {
                 self.assets_surface.rename_value = value.clone();
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -95,6 +99,11 @@ impl NativeGameWorkbench {
             "console.input" => {
                 self.console.set_input(value.clone());
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            }
+            "console.search" => {
+                if self.console.set_search_query(value.clone()) {
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                }
             }
             "agent.input" => {
                 self.agent_panel.borrow_mut().apply_action(
@@ -432,6 +441,42 @@ impl NativeGameWorkbench {
             }
             return true;
         }
+        if let Some(field) = name.strip_prefix("inspector.audio.commit:") {
+            if let Some(target) = selected.first().copied() {
+                let value = self
+                    .host
+                    .session()
+                    .interaction
+                    .controls
+                    .text(&format!("inspector.audio.{field}.text"))
+                    .to_string();
+                intents.push(NativeWorkbenchIntent::InspectorCommit {
+                    target,
+                    field: format!("audio.{field}"),
+                    value,
+                });
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            }
+            return true;
+        }
+        if let Some(field) = name.strip_prefix("inspector.light.commit:") {
+            if let Some(target) = selected.first().copied() {
+                let value = self
+                    .host
+                    .session()
+                    .interaction
+                    .controls
+                    .text(&format!("inspector.light.{field}.text"))
+                    .to_string();
+                intents.push(NativeWorkbenchIntent::InspectorCommit {
+                    target,
+                    field: format!("light.{field}"),
+                    value,
+                });
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            }
+            return true;
+        }
         if let Some(field) = name.strip_prefix("inspector.camera.commit:") {
             if let Some(target) = selected.first().copied() {
                 let value = self
@@ -444,6 +489,24 @@ impl NativeGameWorkbench {
                 intents.push(NativeWorkbenchIntent::InspectorCommit {
                     target,
                     field: format!("camera.{field}"),
+                    value,
+                });
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            }
+            return true;
+        }
+        if let Some(field) = name.strip_prefix("inspector.particle.commit:") {
+            if let Some(target) = selected.first().copied() {
+                let value = self
+                    .host
+                    .session()
+                    .interaction
+                    .controls
+                    .text(&format!("inspector.particle.{field}.text"))
+                    .to_string();
+                intents.push(NativeWorkbenchIntent::InspectorCommit {
+                    target,
+                    field: format!("particle.{field}"),
                     value,
                 });
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -549,8 +612,23 @@ fn inspector_dropdown_navigation_command(
                 raf_core::scene::Primitive::Plane => "Plane",
                 raf_core::scene::Primitive::Cylinder => "Cylinder",
                 raf_core::scene::Primitive::Capsule => "Capsule",
+                raf_core::scene::Primitive::Wedge => "Wedge",
+                raf_core::scene::Primitive::Torus => "Torus",
+                raf_core::scene::Primitive::Prism => "Prism",
+                raf_core::scene::Primitive::Sphere2D => "Sphere 2D",
             },
-            &["Empty", "Cube", "Sphere", "Plane", "Cylinder", "Capsule"],
+            &[
+                "Empty",
+                "Cube",
+                "Sphere",
+                "Plane",
+                "Cylinder",
+                "Capsule",
+                "Wedge",
+                "Torus",
+                "Prism",
+                "Sphere 2D",
+            ],
         ),
         "collider" => (
             match node.collider.collider_type {

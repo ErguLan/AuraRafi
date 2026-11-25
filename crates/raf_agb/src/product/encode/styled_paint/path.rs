@@ -104,10 +104,7 @@ impl Shape {
     /// Inner border shape. Matches the retained shader: the inner corner radius
     /// loses the largest of its two adjacent border widths.
     pub fn inner(self, widths: [f32; 4]) -> Result<Option<Self>> {
-        if !widths
-            .iter()
-            .all(|width| width.is_finite() && *width >= 0.)
-        {
+        if !widths.iter().all(|width| width.is_finite() && *width >= 0.) {
             return Err(Error::Invalid("invalid border widths"));
         }
         let [top, right, bottom, left] = widths;
@@ -116,7 +113,12 @@ impl Shape {
         if high.x <= low.x || high.y <= low.y {
             return Ok(None);
         }
-        let inset = [top.max(left), top.max(right), bottom.max(right), bottom.max(left)];
+        let inset = [
+            top.max(left),
+            top.max(right),
+            bottom.max(right),
+            bottom.max(left),
+        ];
         Ok(Some(
             Self {
                 low,

@@ -253,9 +253,21 @@ fn write_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) -> 
             format!("Path: {relative}"),
             format!(
                 "Hooks: {}{}{}",
-                if compiled.has_on_start { "on_start " } else { "" },
-                if compiled.has_on_update { "on_update " } else { "" },
-                if compiled.has_on_destroy { "on_destroy " } else { "" },
+                if compiled.has_on_start {
+                    "on_start "
+                } else {
+                    ""
+                },
+                if compiled.has_on_update {
+                    "on_update "
+                } else {
+                    ""
+                },
+                if compiled.has_on_destroy {
+                    "on_destroy "
+                } else {
+                    ""
+                },
             )
             .trim_end()
             .to_string(),
@@ -277,7 +289,10 @@ fn write_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) -> 
 /// Validate `script.write` source without touching the project.
 pub fn preview_write(command: &ParsedCommand) -> CommandOutput {
     let Some(file) = command.arg("file") else {
-        return CommandOutput::error("Preview script.write", "Missing file=<relative .rhai path>.");
+        return CommandOutput::error(
+            "Preview script.write",
+            "Missing file=<relative .rhai path>.",
+        );
     };
     let Some(content) = command.arg("content") else {
         return CommandOutput::error("Preview script.write", "Missing content=<Rhai source>.");
@@ -345,7 +360,9 @@ fn normalize_write_path(file: &str) -> Result<String, String> {
         relative = format!("scripts/{relative}");
     }
     if !relative.to_ascii_lowercase().ends_with(".rhai") {
-        return Err("script.write accepts .rhai sources; use script.create for other stubs.".into());
+        return Err(
+            "script.write accepts .rhai sources; use script.create for other stubs.".into(),
+        );
     }
     Ok(relative)
 }
@@ -779,11 +796,14 @@ fn run_keys(command: &ParsedCommand) -> Result<Vec<String>, String> {
             continue;
         }
         if key.len() > 32
-            || !key
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+            || !key.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+            })
         {
-            return Err("keys accepts lowercase key names such as w, space, shift or arrow_left.".to_string());
+            return Err(
+                "keys accepts lowercase key names such as w, space, shift or arrow_left."
+                    .to_string(),
+            );
         }
         if !normalized.contains(&key) {
             normalized.push(key);

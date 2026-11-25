@@ -8,6 +8,7 @@ impl NativeGameWorkbench {
         key: &String,
         value: &bool,
         selected: &[SceneNodeId],
+        project: Option<&Project>,
         intents: &mut Vec<NativeWorkbenchIntent>,
     ) {
         if key.starts_with("inspector.") {
@@ -26,6 +27,34 @@ impl NativeGameWorkbench {
             });
         } else if key == "console.auto-scroll" {
             if self.console.set_auto_scroll(*value) {
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            }
+        } else if key == "settings.command_console_enabled" {
+            if self.agent_settings.command_console_enabled != *value {
+                self.agent_settings.command_console_enabled = *value;
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                intents.push(NativeWorkbenchIntent::AgentSettingsChanged(
+                    self.agent_settings.clone(),
+                ));
+                if *value
+                    && project.is_some_and(|project| !project.settings.enable_console_commands)
+                {
+                    intents.push(NativeWorkbenchIntent::ProjectSettingToggle {
+                        key: "project-settings.enable-console".to_string(),
+                        value: true,
+                    });
+                }
+            }
+        } else if key == "console.wrap" {
+            if self.console.set_wrap_messages(*value) {
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            }
+        } else if key == "console.show-timestamps" {
+            if self.console.set_show_timestamps(*value) {
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            }
+        } else if key == "console.terminal" {
+            if self.console.set_terminal_palette(*value) {
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             }
         } else if apply_settings_toggle(&mut self.agent_settings, key, *value) {
@@ -83,6 +112,61 @@ impl NativeGameWorkbench {
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
         match name.as_str() {
+            "console.commands.toggle" => {
+                let project_blocks =
+                    project.is_some_and(|project| !project.settings.enable_console_commands);
+                if self.agent_settings.command_console_enabled && project_blocks {
+                    intents.push(NativeWorkbenchIntent::ProjectSettingToggle {
+                        key: "project-settings.enable-console".to_string(),
+                        value: true,
+                    });
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    return true;
+                }
+                self.agent_settings.command_console_enabled =
+                    !self.agent_settings.command_console_enabled;
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                intents.push(NativeWorkbenchIntent::AgentSettingsChanged(
+                    self.agent_settings.clone(),
+                ));
+                if self.agent_settings.command_console_enabled && project_blocks {
+                    intents.push(NativeWorkbenchIntent::ProjectSettingToggle {
+                        key: "project-settings.enable-console".to_string(),
+                        value: true,
+                    });
+                }
+                return true;
+            }
+            "console.commands.enable" => {
+                if !self.agent_settings.command_console_enabled {
+                    self.agent_settings.command_console_enabled = true;
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    intents.push(NativeWorkbenchIntent::AgentSettingsChanged(
+                        self.agent_settings.clone(),
+                    ));
+                }
+                if project.is_some_and(|project| !project.settings.enable_console_commands) {
+                    intents.push(NativeWorkbenchIntent::ProjectSettingToggle {
+                        key: "project-settings.enable-console".to_string(),
+                        value: true,
+                    });
+                }
+                return true;
+            }
+            "console.source.clear" => {
+                if self.console.set_source_filter(None) {
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                }
+                return true;
+            }
+            _ if name.starts_with("console.source.filter:") => {
+                if let Some(source) = name.strip_prefix("console.source.filter:") {
+                    if self.console.toggle_source_filter(source) {
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
+                }
+                return true;
+            }
             "console.filter.all" => {
                 if self.console.set_filter_level(None) {
                     self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -105,6 +189,94 @@ impl NativeGameWorkbench {
                 if self.console.set_filter_level(Some(LogLevel::Error)) {
                     self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 }
+                return true;
+            }
+            "console.filter.success" => {
+                if self.console.set_filter_level(Some(LogLevel::Success)) {
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                }
+                return true;
+            }
+            "console.filter.verbose" => {
+                if self.console.set_filter_level(Some(LogLevel::Verbose)) {
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                }
+                return true;
+            }
+            "console.column.reset" => {
+                if self.console.reset_column_widths() {
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                }
+                return true;
+            }
+            _ if name.starts_with("console.column.resize.start:")
+                || name.starts_with("console.column.resize.end:") =>
+            {
+                return true;
+            }
+            _ if name.starts_with("console.column.resize:") => {
+                if let Some(raw) = name.strip_prefix("console.column.resize:") {
+                    if let Ok(index) = raw.parse::<usize>() {
+                        if self.console.resize_column(index, 4.0) {
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        }
+                    }
+                }
+                return true;
+            }
+            _ if name.starts_with("console.recent.use:") => {
+                if let Some(raw) = name.strip_prefix("console.recent.use:") {
+                    if let Ok(index) = raw.parse::<usize>() {
+                        if let Some(command) = self.console.recent_command(index).cloned() {
+                            self.console.set_input(command);
+                            let input = self.console.input().to_string();
+                            self.host.session_mut().interaction.controls.set_text(
+                                "console.input",
+                                input,
+                                4096,
+                            );
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        }
+                    }
+                }
+                return true;
+            }
+            "console.auto-scroll.resume" => {
+                self.console.set_auto_scroll(true);
+                let max = self
+                    .host
+                    .session()
+                    .interaction
+                    .controls
+                    .scroll_max_offset("console.log-scroll");
+                self.host
+                    .session_mut()
+                    .interaction
+                    .controls
+                    .set_scroll_offset("console.log-scroll", [0.0, max[1]]);
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                return true;
+            }
+            "console.export" => {
+                self.console.filters_open = false;
+                let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+                let directory = project
+                    .map(|project| project.path.join("logs"))
+                    .unwrap_or_else(|| std::env::temp_dir().join("aurarafi-logs"));
+                let file = directory.join(format!("console-{stamp}.log"));
+                let result = std::fs::create_dir_all(&directory)
+                    .and_then(|_| std::fs::write(&file, self.console.export_text()));
+                match result {
+                    Ok(()) => {
+                        self.console
+                            .log_success(format!("Console log exported: {}", file.display()));
+                    }
+                    Err(error) => {
+                        self.console
+                            .log(LogLevel::Error, format!("Console export failed: {error}"));
+                    }
+                }
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 return true;
             }
             "console.submit" => {
@@ -135,6 +307,7 @@ impl NativeGameWorkbench {
                 return true;
             }
             "console.clear" => {
+                self.console.filters_open = false;
                 self.console.clear_entries();
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 return true;

@@ -162,6 +162,33 @@ authored transforms at the playhead. Capture saves every addressed track in
 the selected non-additive layer. Play reads the currently saved asset, and
 multiple compatible entities can share it. Unlinking leaves the file in Assets.
 
+For a rigged GLB or glTF in Assets, select **Place with skeleton**. The command
+equivalent is `game.mesh_asset action=rig path=models/actor.glb clip=0`.
+The scene holds the model asset and its editable joint hierarchy. The first
+clip is embedded in the placed rig and can be published from the Animations
+dock. Key buttons jump the playhead, and each track can toggle linear/step.
+Cubic transform tracks are sampled at import into editable linear keys.
+
+An animation layer may declare `action` with a `request`, `priority`,
+`interruptible` and a list of `free_slots`. Set the owner's `animation_action`
+text variable to request a variant. Each free slot must be an existing null
+entity reference. The evaluator reads those slots and never changes the held
+entities or their parenting. Clear and reissue the request to repeat a take.
+Optional `contacts` define direct two-bone chains and a ground or entity goal.
+The runtime sweeps a tip-sized box against solid oriented boxes; this covers
+tip translation. `physics_follow` blends a joint toward an authored dynamic
+body and can apply bounded matching torque in advanced physics mode.
+
+For motion matching, use looping base layers with `motion_speed` and
+`motion_heading_degrees`, then set `motion_match` with a shared position
+`pose_path`, `lookahead` in seconds and `pose_weight`. The matcher selects a
+sample against the actor's planar velocity and its currently sampled pose.
+The Animations dock can bake an editable transform take at 30 fps.
+`game.animation.bake` accepts an explicit `fps`. `game.animation.retarget`
+maps source and target joint paths with optional `translation_ratio` values.
+These tools operate on authored transform tracks; contact and torque
+simulation are not included in the baked file.
+
 The command `game.update` takes `animation_asset` with the asset-relative file
 path, or `null` to unlink. An inline transform rig can still be authored by
 Agent, attached CLI/MCP or the editor console. For example, given `Puppet` with a child `Head`:

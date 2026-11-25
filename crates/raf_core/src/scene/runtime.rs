@@ -126,6 +126,48 @@ impl Default for RigidBody {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioBus {
+    Master,
+    Music,
+    #[default]
+    Sfx,
+    Voice,
+    Ambient,
+}
+
+impl AudioBus {
+    pub const ALL: [Self; 5] = [
+        Self::Master,
+        Self::Music,
+        Self::Sfx,
+        Self::Voice,
+        Self::Ambient,
+    ];
+
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::Master => "master",
+            Self::Music => "music",
+            Self::Sfx => "sfx",
+            Self::Voice => "voice",
+            Self::Ambient => "ambient",
+        }
+    }
+
+    pub fn from_slug(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "master" => Some(Self::Master),
+            "music" => Some(Self::Music),
+            "sfx" | "effects" => Some(Self::Sfx),
+            "voice" => Some(Self::Voice),
+            "ambient" => Some(Self::Ambient),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioSource {
     #[serde(default)]
@@ -138,6 +180,19 @@ pub struct AudioSource {
     pub looping: bool,
     #[serde(default = "default_volume")]
     pub volume: f32,
+    /// Mixer destination. Existing scenes without this field use SFX.
+    #[serde(default)]
+    pub bus: AudioBus,
+    /// When enabled, playback gain follows the entity's world position and the
+    /// active camera listener. This is the 3D link between sound and a block.
+    #[serde(default)]
+    pub spatial: bool,
+    #[serde(default = "default_audio_min_distance")]
+    pub min_distance: f32,
+    #[serde(default = "default_audio_max_distance")]
+    pub max_distance: f32,
+    #[serde(default = "default_audio_rolloff")]
+    pub rolloff: f32,
 }
 
 impl Default for AudioSource {
@@ -148,8 +203,60 @@ impl Default for AudioSource {
             autoplay: false,
             looping: false,
             volume: default_volume(),
+            bus: AudioBus::Sfx,
+            spatial: false,
+            min_distance: default_audio_min_distance(),
+            max_distance: default_audio_max_distance(),
+            rolloff: default_audio_rolloff(),
         }
     }
+}
+
+impl AudioSource {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !self.volume.is_finite() || !(0.0..=1.0).contains(&self.volume) {
+            return Err("Audio volume must be within 0..1.");
+        }
+        if !self.min_distance.is_finite()
+            || !self.max_distance.is_finite()
+            || self.min_distance <= 0.0
+            || self.max_distance <= self.min_distance
+            || self.max_distance > 10_000.0
+        {
+            return Err("Audio distances require 0 < min < max <= 10000.");
+        }
+        if !self.rolloff.is_finite() || !(0.1..=8.0).contains(&self.rolloff) {
+            return Err("Audio rolloff must be within 0.1..8.");
+        }
+        Ok(())
+    }
+
+    pub fn spatial_gain(&self, distance: f32) -> f32 {
+        if !self.spatial || !distance.is_finite() {
+            return 1.0;
+        }
+        if distance <= self.min_distance {
+            return 1.0;
+        }
+        if distance >= self.max_distance {
+            return 0.0;
+        }
+        let normalized = (distance - self.min_distance)
+            / (self.max_distance - self.min_distance).max(f32::EPSILON);
+        (1.0 - normalized).clamp(0.0, 1.0).powf(self.rolloff)
+    }
+}
+
+fn default_audio_min_distance() -> f32 {
+    1.0
+}
+
+fn default_audio_max_distance() -> f32 {
+    20.0
+}
+
+fn default_audio_rolloff() -> f32 {
+    1.0
 }
 
 fn default_true() -> bool {
@@ -160,7 +267,9 @@ fn default_mass() -> f32 {
     1.0
 }
 
-fn default_friction() -> f32 { 0.5 }
+fn default_friction() -> f32 {
+    0.5
+}
 
 fn default_damping() -> f32 {
     0.06
@@ -168,4 +277,33 @@ fn default_damping() -> f32 {
 
 fn default_volume() -> f32 {
     1.0
+}
+
+#[cfg(test)]
+mod audio_tests {
+    use super::*;
+
+    #[test]
+    fn spatial_curve_and_bus_defaults_are_bounded() {
+        let mut source = AudioSource::default();
+        assert_eq!(source.bus, AudioBus::Sfx);
+        assert!(!source.spatial);
+        source.spatial = true;
+        source.min_distance = 1.0;
+        source.max_distance = 10.0;
+        assert_eq!(source.spatial_gain(0.5), 1.0);
+        assert_eq!(source.spatial_gain(10.0), 0.0);
+        assert!(source.spatial_gain(5.0) > 0.0);
+        assert!(source.validate().is_ok());
+    }
+
+    #[test]
+    fn invalid_audio_distances_are_rejected() {
+        let mut source = AudioSource::default();
+        source.max_distance = 1.0;
+        assert!(source.validate().is_err());
+        source.max_distance = 20.0;
+        source.volume = 1.5;
+        assert!(source.validate().is_err());
+    }
 }

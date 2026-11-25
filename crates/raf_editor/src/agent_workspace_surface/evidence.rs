@@ -1,8 +1,8 @@
 //! Evidence tabs, gallery, comparison and read-only 3D preview.
 
-use super::*;
 use super::layout::label;
 use super::tools::{world_panel, WorldPanelModel};
+use super::*;
 
 pub(super) fn evidence_surface(
     palette: StudioUiPalette,
@@ -485,11 +485,7 @@ fn evidence_card(
             .with_text_value(format!(
                 "{} · {}",
                 t(artifact.kind.label_key(), panel.language),
-                artifact
-                    .compare_lines
-                    .first()
-                    .cloned()
-                    .unwrap_or_default()
+                artifact.compare_lines.first().cloned().unwrap_or_default()
             ))
             .with_text_style(UiTextStyle::body(tokens.text_muted))
             .with_text_overflow(UiTextOverflow::Ellipsis)
@@ -509,7 +505,10 @@ fn evidence_metadata(
 ) -> UiNode {
     let tokens = workspace_tokens(palette);
     let mut block = UiNode::new(
-        format!("agent.workspace.evidence.meta.{}", evidence_image_key(&artifact.uri)),
+        format!(
+            "agent.workspace.evidence.meta.{}",
+            evidence_image_key(&artifact.uri)
+        ),
         UiNodeKind::Panel,
     )
     .with_layout(UiLayout {
@@ -519,7 +518,10 @@ fn evidence_metadata(
     });
     block = block.with_child(
         UiNode::new(
-            format!("agent.workspace.evidence.meta.label.{}", evidence_image_key(&artifact.uri)),
+            format!(
+                "agent.workspace.evidence.meta.label.{}",
+                evidence_image_key(&artifact.uri)
+            ),
             UiNodeKind::Label,
         )
         .with_text_value(artifact.label.clone())
@@ -529,7 +531,10 @@ fn evidence_metadata(
     );
     block = block.with_child(
         UiNode::new(
-            format!("agent.workspace.evidence.meta.kind.{}", evidence_image_key(&artifact.uri)),
+            format!(
+                "agent.workspace.evidence.meta.kind.{}",
+                evidence_image_key(&artifact.uri)
+            ),
             UiNodeKind::Label,
         )
         .with_text_value(t(artifact.kind.label_key(), language))
@@ -625,42 +630,33 @@ fn evidence_compare_panel(
     selected: &[&EvidenceArtifact],
 ) -> UiNode {
     let tokens = workspace_tokens(palette);
-    let mut root = UiNode::new(
-        "agent.workspace.evidence.compare",
-        UiNodeKind::Panel,
-    )
-    .with_layout(UiLayout {
-        flow: UiFlow::Column,
-        gap: 6.0,
-        padding: UiSpacing::same(8.0),
-        ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
-    })
-    .with_style(UiStyle {
-        fill: tokens.surface_alt,
-        border: tokens.accent_hot,
-        border_width: 1.0,
-        radius: 8.0,
-        ..UiStyle::transparent()
-    })
-    .with_child(
-        UiNode::new(
-            "agent.workspace.evidence.compare.title",
-            UiNodeKind::Label,
-        )
-        .with_text_key("agent_workspace.evidence_compare")
-        .with_text_style(UiTextStyle::button(tokens.accent_hot))
-        .with_layout(UiLayout::fit_content()),
-    );
-    let mut row = UiNode::new(
-        "agent.workspace.evidence.compare.row",
-        UiNodeKind::Toolbar,
-    )
-    .with_layout(UiLayout {
-        flow: UiFlow::Row,
-        gap: 8.0,
-        align_items: UiAlign::Start,
-        ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
-    });
+    let mut root = UiNode::new("agent.workspace.evidence.compare", UiNodeKind::Panel)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 6.0,
+            padding: UiSpacing::same(8.0),
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        })
+        .with_style(UiStyle {
+            fill: tokens.surface_alt,
+            border: tokens.accent_hot,
+            border_width: 1.0,
+            radius: 8.0,
+            ..UiStyle::transparent()
+        })
+        .with_child(
+            UiNode::new("agent.workspace.evidence.compare.title", UiNodeKind::Label)
+                .with_text_key("agent_workspace.evidence_compare")
+                .with_text_style(UiTextStyle::button(tokens.accent_hot))
+                .with_layout(UiLayout::fit_content()),
+        );
+    let mut row = UiNode::new("agent.workspace.evidence.compare.row", UiNodeKind::Toolbar)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            gap: 8.0,
+            align_items: UiAlign::Start,
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        });
     for artifact in selected.iter().take(2) {
         let key = evidence_image_key(&artifact.uri);
         let mut column = UiNode::new(
@@ -693,14 +689,11 @@ fn evidence_compare_panel(
         row = row.with_child(column);
     }
     root.with_child(row).with_child(
-        UiNode::new(
-            "agent.workspace.evidence.compare.hint",
-            UiNodeKind::Label,
-        )
-        .with_text_key("agent_workspace.evidence_compare_hint")
-        .with_text_style(UiTextStyle::body(tokens.text_muted))
-        .with_text_overflow(UiTextOverflow::Wrap)
-        .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
+        UiNode::new("agent.workspace.evidence.compare.hint", UiNodeKind::Label)
+            .with_text_key("agent_workspace.evidence_compare_hint")
+            .with_text_style(UiTextStyle::body(tokens.text_muted))
+            .with_text_overflow(UiTextOverflow::Wrap)
+            .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
     )
 }
 
@@ -716,15 +709,12 @@ pub(super) fn evidence_gallery(
         .iter()
         .filter_map(|uri| artifacts.iter().find(|artifact| &artifact.uri == uri))
         .collect::<Vec<_>>();
-    let mut root = UiNode::new(
-        "agent.workspace.evidence.gallery",
-        UiNodeKind::Panel,
-    )
-    .with_layout(UiLayout {
-        flow: UiFlow::Column,
-        gap: 8.0,
-        ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
-    });
+    let mut root =
+        UiNode::new("agent.workspace.evidence.gallery", UiNodeKind::Panel).with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 8.0,
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        });
     let mut header = UiNode::new(
         "agent.workspace.evidence.gallery.header",
         UiNodeKind::Toolbar,
@@ -736,26 +726,20 @@ pub(super) fn evidence_gallery(
         ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
     })
     .with_child(
-        UiNode::new(
-            "agent.workspace.evidence.gallery.title",
-            UiNodeKind::Label,
-        )
-        .with_text_key("agent_workspace.evidence_gallery")
-        .with_text_style(UiTextStyle::panel_title(tokens.text))
-        .with_layout(UiLayout {
-            grow: 1.0,
-            width_mode: UiSizeMode::Fill,
-            ..UiLayout::fit_content()
-        }),
+        UiNode::new("agent.workspace.evidence.gallery.title", UiNodeKind::Label)
+            .with_text_key("agent_workspace.evidence_gallery")
+            .with_text_style(UiTextStyle::panel_title(tokens.text))
+            .with_layout(UiLayout {
+                grow: 1.0,
+                width_mode: UiSizeMode::Fill,
+                ..UiLayout::fit_content()
+            }),
     )
     .with_child(
-        UiNode::new(
-            "agent.workspace.evidence.gallery.count",
-            UiNodeKind::Label,
-        )
-        .with_text_value(format!("{}", artifacts.len()))
-        .with_text_style(UiTextStyle::button(tokens.text_muted))
-        .with_layout(UiLayout::fit_content()),
+        UiNode::new("agent.workspace.evidence.gallery.count", UiNodeKind::Label)
+            .with_text_value(format!("{}", artifacts.len()))
+            .with_text_style(UiTextStyle::button(tokens.text_muted))
+            .with_layout(UiLayout::fit_content()),
     );
     if !panel.evidence_selected.is_empty() {
         header = header.with_child(button(
@@ -821,12 +805,7 @@ pub(super) fn evidence_gallery(
             ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
         });
         for (column, artifact) in chunk.iter().enumerate() {
-            line = line.with_child(evidence_card(
-                palette,
-                panel,
-                artifact,
-                row * 2 + column,
-            ));
+            line = line.with_child(evidence_card(palette, panel, artifact, row * 2 + column));
         }
         if chunk.len() == 1 {
             line = line.with_child(

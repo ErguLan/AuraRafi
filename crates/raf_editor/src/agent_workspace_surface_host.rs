@@ -163,7 +163,11 @@ impl AgentWorkspaceSurfaceHost {
         self.lab_field_key = key;
         if let Some((editor, [width, height])) = field {
             let size = texture_size(width, height);
-            let pixels = paint(&Field::new(&editor.lab, width, height), size, &workspace_tokens(palette));
+            let pixels = paint(
+                &Field::new(&editor.lab, width, height),
+                size,
+                &workspace_tokens(palette),
+            );
             if let Err(error) = self.host.images_mut().insert_rgba(IMAGE_KEY, size, pixels) {
                 tracing::warn!(%error, "Electronics signal map could not be registered");
             }
@@ -173,7 +177,9 @@ impl AgentWorkspaceSurfaceHost {
     }
 
     fn sync_evidence_images(&mut self, service: &AgentService) {
-        let Some(workspace) = service.selected_workspace().filter(|workspace| !workspace.closing)
+        let Some(workspace) = service
+            .selected_workspace()
+            .filter(|workspace| !workspace.closing)
         else {
             if !self.evidence_keys.is_empty() {
                 for key in self.evidence_keys.drain() {
@@ -356,7 +362,11 @@ impl AgentWorkspaceSurfaceHost {
             self.review_open,
             self.confirmation,
             self.layout,
-            laboratory.map(|editor| (editor.lab.version, editor.lab_fingerprint(), editor.analysis_running())),
+            laboratory.map(|editor| (
+                editor.lab.version,
+                editor.lab_fingerprint(),
+                editor.analysis_running()
+            )),
             (
                 settings.agent_mode,
                 settings.font_size,
@@ -427,9 +437,10 @@ impl AgentWorkspaceSurfaceHost {
             // The splitter and camera acquire their own pointer ownership before
             // RafUI sees the snapshot, preventing click-through into the chat.
             let before = self.layout;
-            if service.selected_lab_target().is_none() && self
-                .resize
-                .input(input.snapshot(), router, geometry, &mut self.layout)
+            if service.selected_lab_target().is_none()
+                && self
+                    .resize
+                    .input(input.snapshot(), router, geometry, &mut self.layout)
             {
                 if self.layout != before {
                     self.last_key.clear();
@@ -514,7 +525,10 @@ impl AgentWorkspaceSurfaceHost {
                     if let Some(path) = payload.get("path").and_then(|v| v.as_str()) {
                         if let Some((current, session, _)) = service.selected_lab_target() {
                             if current != std::path::Path::new(path) {
-                                intents.push(AgentWorkspaceIntent::LeaveLaboratory(current.to_owned(), session));
+                                intents.push(AgentWorkspaceIntent::LeaveLaboratory(
+                                    current.to_owned(),
+                                    session,
+                                ));
                             }
                         }
                         service.request(PathBuf::from(path));
@@ -523,7 +537,9 @@ impl AgentWorkspaceSurfaceHost {
                 }
                 UiAction::Command { name } => match name.as_str() {
                     command if command.starts_with("agent.lab.") => {
-                        intents.push(AgentWorkspaceIntent::Laboratory(command["agent.lab.".len()..].to_owned()));
+                        intents.push(AgentWorkspaceIntent::Laboratory(
+                            command["agent.lab.".len()..].to_owned(),
+                        ));
                     }
                     "agent.workspace.tab.preview" => {
                         self.evidence = EvidenceTab::Preview;
@@ -638,7 +654,10 @@ impl AgentWorkspaceSurfaceHost {
                 UiAction::SetText { key, value } => {
                     let action = match key.as_str() {
                         key if key.starts_with("lab.output-value:") => {
-                            intents.push(AgentWorkspaceIntent::Laboratory(format!("{}:{value}", &key[4..])));
+                            intents.push(AgentWorkspaceIntent::Laboratory(format!(
+                                "{}:{value}",
+                                &key[4..]
+                            )));
                             None
                         }
                         "agent.input" => Some(AgentAction::SetInput(value)),
@@ -697,10 +716,15 @@ impl AgentWorkspaceSurfaceHost {
             if let Some(workspace) = service.selected_workspace().filter(|w| !w.closing) {
                 let mut panel = workspace.panel.borrow_mut();
                 let dropped_on_composer = input.snapshot().pointer_position.is_some_and(|point| {
-                    self.host.layout_rect("agent.composer").is_some_and(|rect| rect.contains([point[0] - self.rect.x, point[1] - self.rect.y]))
+                    self.host.layout_rect("agent.composer").is_some_and(|rect| {
+                        rect.contains([point[0] - self.rect.x, point[1] - self.rect.y])
+                    })
                 });
                 if dropped_on_composer && !input.dropped_files().is_empty() {
-                    panel.apply_action(AgentAction::AttachFiles(input.dropped_files().to_vec()), settings);
+                    panel.apply_action(
+                        AgentAction::AttachFiles(input.dropped_files().to_vec()),
+                        settings,
+                    );
                     self.last_key.clear();
                 }
                 if input.snapshot().modifiers.command_modifier()
@@ -708,7 +732,12 @@ impl AgentWorkspaceSurfaceHost {
                     && router.keyboard_owner() == Some(self.owner())
                     && input.snapshot().key_pressed(InputKey::V)
                     && !input.has_clipboard_text()
-                    && self.host.session().interaction.focus.has_focus("agent.input")
+                    && self
+                        .host
+                        .session()
+                        .interaction
+                        .focus
+                        .has_focus("agent.input")
                 {
                     panel.apply_action(AgentAction::PasteImage, settings);
                     self.last_key.clear();
@@ -767,8 +796,7 @@ fn evidence_thumbnail(path: &std::path::Path) -> Option<Vec<u8>> {
     }
     const THUMB_WIDTH: u32 = 320;
     const THUMB_HEIGHT: u32 = 180;
-    let scale = (THUMB_WIDTH as f32 / width as f32)
-        .min(THUMB_HEIGHT as f32 / height as f32);
+    let scale = (THUMB_WIDTH as f32 / width as f32).min(THUMB_HEIGHT as f32 / height as f32);
     let resized_width = ((width as f32 * scale).round() as u32).clamp(1, THUMB_WIDTH);
     let resized_height = ((height as f32 * scale).round() as u32).clamp(1, THUMB_HEIGHT);
     let resized = image::imageops::resize(
@@ -777,11 +805,8 @@ fn evidence_thumbnail(path: &std::path::Path) -> Option<Vec<u8>> {
         resized_height,
         image::imageops::FilterType::Triangle,
     );
-    let mut canvas = image::RgbaImage::from_pixel(
-        THUMB_WIDTH,
-        THUMB_HEIGHT,
-        image::Rgba([18, 19, 22, 255]),
-    );
+    let mut canvas =
+        image::RgbaImage::from_pixel(THUMB_WIDTH, THUMB_HEIGHT, image::Rgba([18, 19, 22, 255]));
     image::imageops::overlay(
         &mut canvas,
         &resized,

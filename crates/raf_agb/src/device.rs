@@ -135,6 +135,14 @@ fn graph_error(error: crate::frame_graph::FrameGraphError) -> Error {
     Error::Backend(error.to_string())
 }
 
+/// Maximum number of local point/spot lights one frame may carry.
+pub const MAX_LOCAL_LIGHTS: usize = 8;
+/// Vec4 slots reserved for local lights. Each light owns four slots so every
+/// authored field fits without compressing or reinterpreting channels.
+pub const LOCAL_LIGHT_VECS: usize = 4 * MAX_LOCAL_LIGHTS;
+/// Slot stride between one local light and the next.
+pub const LOCAL_LIGHT_STRIDE: usize = 4;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Frame {
     pub view_projection: [[f32; 4]; 4],
@@ -148,6 +156,14 @@ pub struct Frame {
     /// Authored environment, improved technology, toon steps, toon softness.
     /// `Frame::uniforms` packs this verbatim into `RasterUniforms::lighting`.
     pub lighting_style: [f32; 4],
+    /// Local lights packed in groups of four `vec4`s:
+    /// `[position.xyz, range]`, `[color.rgb, intensity]`,
+    /// `[direction.xyz, kind]` and
+    /// `[inner_cos, outer_cos, falloff, 0]`.
+    /// `kind` is 0 for point and 1 for spot. Unused slots stay zero.
+    pub lights: [[f32; 4]; LOCAL_LIGHT_VECS],
+    /// `x` is the number of active local lights in `0..=8`; `yzw` stay zero.
+    pub light_counts: [f32; 4],
     /// Top-left normalized scene viewport `[x, y, width, height]` inside the
     /// full target. Overlay batches always cover the whole target.
     pub viewport: [f32; 4],
@@ -190,6 +206,12 @@ pub struct RasterUniforms {
     /// 1, steps are in 0..=6 and softness in 0..=1. This field owns every
     /// lighting-style control so other vectors keep their original meaning.
     pub lighting: [f32; 4],
+    /// Local lights, four `vec4`s per light in the layout documented on
+    /// [`Frame::lights`]. Every slot is 16-byte aligned.
+    pub lights: [[f32; 4]; LOCAL_LIGHT_VECS],
+    /// `x` is the active local light count; the shader never reads an inactive
+    /// slot, so a stopped light costs no shading work.
+    pub light_counts: [f32; 4],
 }
 
 impl Frame {
@@ -206,6 +228,8 @@ impl Frame {
             eye: [x, y, z, 0.],
             environment: self.environment,
             lighting: self.lighting_style,
+            lights: self.lights,
+            light_counts: self.light_counts,
         }
     }
 
@@ -515,7 +539,9 @@ impl<B: Backend> Device<B> {
         if !self.resources.contains(previous) {
             return Err(Error::Invalid("stale workload handle"));
         }
-        self.backend.wait()?;
+        // `upload` already submits and waits for the replacement to become
+        // visible before returning. A second queue-idle wait here only adds a
+        // full GPU stall to every retained packet revision.
         let replacement = self.upload(workload)?;
         self.retire(previous)?;
         Ok(replacement)
@@ -555,8 +581,8 @@ impl<B: Backend> Device<B> {
             });
         }
         // The registry owns the allocation and check_patch validated the ranges.
-        let native = Rc::get_mut(&mut resident.native)
-            .ok_or(Error::Invalid("resident packet is shared"))?;
+        let native =
+            Rc::get_mut(&mut resident.native).ok_or(Error::Invalid("resident packet is shared"))?;
         unsafe { self.backend.patch(native, patch) }?;
         self.patched_bytes += bytes;
         Ok(())
@@ -632,11 +658,7 @@ impl<B: Backend> Device<B> {
     /// owns the target clear; the executor is responsible for drawing the rest
     /// without clearing. An executor that does not support layers rejects more
     /// than one handle with `Error::Unsupported`.
-    pub fn draw_layers(
-        &mut self,
-        handles: &[MeshHandle],
-        frame: &Frame,
-    ) -> Result<FrameMetrics> {
+    pub fn draw_layers(&mut self, handles: &[MeshHandle], frame: &Frame) -> Result<FrameMetrics> {
         if handles.is_empty() {
             return Err(Error::Invalid("layered draw needs at least one packet"));
         }

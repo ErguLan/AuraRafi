@@ -3,7 +3,10 @@
 use super::query::*;
 use super::*;
 
-pub(super) fn reparent_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn reparent_entity(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Reparent entity", "Target not found.");
     };
@@ -43,7 +46,10 @@ pub(super) fn reparent_entity(command: &ParsedCommand, ctx: &mut GameCommandCont
     )
 }
 
-pub(super) fn snap_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn snap_entity(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Snap entity", "Target not found.");
     };
@@ -158,7 +164,10 @@ pub(super) fn snap_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<
     )
 }
 
-pub(super) fn set_transform(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn set_transform(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Set transform", "Target not found.");
     };
@@ -184,7 +193,10 @@ pub(super) fn set_transform(command: &ParsedCommand, ctx: &mut GameCommandContex
     )
 }
 
-pub(super) fn move_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn move_entity(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Move entity", "Target not found.");
     };
@@ -204,7 +216,10 @@ pub(super) fn move_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<
     )
 }
 
-pub(super) fn rotate_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn rotate_entity(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Rotate entity", "Target not found.");
     };
@@ -224,7 +239,10 @@ pub(super) fn rotate_entity(command: &ParsedCommand, ctx: &mut GameCommandContex
     )
 }
 
-pub(super) fn scale_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn scale_entity(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Scale entity", "Target not found.");
     };
@@ -246,7 +264,10 @@ pub(super) fn scale_entity(command: &ParsedCommand, ctx: &mut GameCommandContext
     )
 }
 
-pub(super) fn arrange_grid(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn arrange_grid(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let spacing = f32_arg(command, "spacing", 2.0).max(0.1);
     let selected = ctx.viewport.selected_ids();
     let ids = if selected.is_empty() {
@@ -324,7 +345,10 @@ pub(super) fn optional_vec3(values: [Option<f32>; 3], default: Vec3) -> Vec3 {
     )
 }
 
-pub(super) fn apply_transform_patch(node: &mut raf_core::scene::graph::SceneNode, patch: TransformPatch) {
+pub(super) fn apply_transform_patch(
+    node: &mut raf_core::scene::graph::SceneNode,
+    patch: TransformPatch,
+) {
     if !patch.position.iter().all(Option::is_none) {
         node.position = patch.position_or(node.position);
     }

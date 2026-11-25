@@ -90,7 +90,6 @@ struct TextureIngressSlot {
 
 enum ResidentLookup {
     Hit(Arc<CpuTexture>),
-    BudgetRejected,
     Missing,
 }
 
@@ -176,9 +175,6 @@ impl TextureIngress {
         if let Some(canonical) = cached_canonical.as_ref() {
             match self.lookup_resident(canonical.as_ref(), limits.max_dimension, frame) {
                 ResidentLookup::Hit(texture) => return Ok(texture),
-                ResidentLookup::BudgetRejected => {
-                    return Err(self.reject(path, frame, FRAME_BUDGET_REJECTION));
-                }
                 ResidentLookup::Missing => {}
             }
         }
@@ -189,9 +185,6 @@ impl TextureIngress {
         };
         match self.lookup_resident(canonical.as_ref(), limits.max_dimension, frame) {
             ResidentLookup::Hit(texture) => return Ok(texture),
-            ResidentLookup::BudgetRejected => {
-                return Err(self.reject(path, frame, FRAME_BUDGET_REJECTION));
-            }
             ResidentLookup::Missing => {}
         }
 
@@ -207,8 +200,7 @@ impl TextureIngress {
             return Err(self.reject(path, frame, RESIDENCY_BUDGET_REJECTION));
         }
         if estimated_bytes > 0
-            && self.frame_admitted_bytes.saturating_add(estimated_bytes)
-                > self.frame_budget_bytes
+            && self.frame_admitted_bytes.saturating_add(estimated_bytes) > self.frame_budget_bytes
         {
             return Err(self.reject(path, frame, FRAME_BUDGET_REJECTION));
         }
@@ -340,8 +332,7 @@ impl TextureIngress {
     fn reject(&mut self, path: &Path, frame: u64, message: &str) -> String {
         self.metrics.rejected = self.metrics.rejected.saturating_add(1);
         if self.rejected_paths.len() >= MAX_REJECTED_TEXTURE_PATHS {
-            self.rejected_paths
-                .retain(|_, rejected| *rejected == frame);
+            self.rejected_paths.retain(|_, rejected| *rejected == frame);
             if self.rejected_paths.len() >= MAX_REJECTED_TEXTURE_PATHS {
                 self.rejected_paths.clear();
             }
@@ -365,19 +356,15 @@ impl TextureIngress {
             {
                 let entry = &mut slot.entry;
                 first_use = entry.last_used != frame;
-                if first_use
-                    && self.frame_admitted_bytes.saturating_add(entry.bytes)
-                        > self.frame_budget_bytes
-                {
-                    outcome = ResidentLookup::BudgetRejected;
-                } else {
-                    if first_use {
-                        self.frame_admitted_bytes =
-                            self.frame_admitted_bytes.saturating_add(entry.bytes);
-                        entry.last_used = frame;
-                    }
-                    outcome = ResidentLookup::Hit(Arc::clone(&entry.texture));
+                if first_use {
+                    // Residency hits touch the LRU but never consume the
+                    // per-frame decode budget. The old accounting rejected
+                    // already-decoded textures whenever a scene used more than
+                    // half of the resident budget, which hid textures and
+                    // caused decode/evict thrash on camera movement.
+                    entry.last_used = frame;
                 }
+                outcome = ResidentLookup::Hit(Arc::clone(&entry.texture));
             }
         }
 
@@ -391,9 +378,10 @@ impl TextureIngress {
     }
 
     fn touch_lru(&mut self, canonical: &Path, max_dimension: u32) {
-        let position = self.lru.iter().position(|key| {
-            key.max_dimension == max_dimension && key.path.as_path() == canonical
-        });
+        let position = self
+            .lru
+            .iter()
+            .position(|key| key.max_dimension == max_dimension && key.path.as_path() == canonical);
         if let Some(position) = position {
             if let Some(key) = self.lru.remove(position) {
                 self.lru.push_back(key);
@@ -587,7 +575,10 @@ mod tests {
             .expect("reuse the resident texture");
 
         assert!(Arc::ptr_eq(&first, &second));
-        assert_eq!(first.source, path.canonicalize().expect("canonical test path"));
+        assert_eq!(
+            first.source,
+            path.canonicalize().expect("canonical test path")
+        );
         let metrics = ingress.metrics();
         assert_eq!(metrics.misses, 1);
         assert_eq!(metrics.hits, 1);
@@ -680,6 +671,34 @@ mod tests {
         ingress.clear();
         assert_eq!(ingress.metrics().entries, 0);
         assert_eq!(ingress.metrics().resident_bytes, 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resident_hits_do_not_consume_the_per_frame_decode_budget() {
+        let root = temporary_root("resident-free");
+        let paths = [
+            write_texture(&root, "a.png", 4, 4, [10, 20, 30, 255]),
+            write_texture(&root, "b.png", 4, 4, [40, 50, 60, 255]),
+            write_texture(&root, "c.png", 4, 4, [70, 80, 90, 255]),
+        ];
+        let mut ingress = TextureIngress::new(1024 * 1024);
+        ingress.set_frame_budget(100);
+        let limits = TextureDecodeLimits::default();
+        for (index, path) in paths.iter().enumerate() {
+            ingress
+                .get_or_decode(path, &root, limits, index as u64 + 1)
+                .expect("each texture decodes on its own frame");
+        }
+
+        // One frame requests all three resident textures. The decode budget
+        // must not reject already-decoded entries.
+        for path in &paths {
+            ingress
+                .get_or_decode(path, &root, limits, 10)
+                .expect("resident texture stays available");
+        }
+        assert_eq!(ingress.metrics().entries, 3);
         let _ = fs::remove_dir_all(root);
     }
 }

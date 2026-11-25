@@ -58,7 +58,10 @@ pub use ipc::{
     IpcFrame, ATTACH_DESCRIPTOR_FILE, ATTACH_DIRECTORY, ATTACH_PROTOCOL_VERSION,
 };
 pub use project::{Project, ProjectType};
-pub use scene::{NodeColor, Primitive, SceneGraph, SceneNode, SceneNodeId, WorldTransformCache};
+pub use scene::{
+    NodeColor, ParticlePlayback, ParticlePreviewSettings, ParticleQuality, ParticleRuntimeSettings,
+    ParticleSystemComponent, Primitive, SceneGraph, SceneNode, SceneNodeId, WorldTransformCache,
+};
 pub use transaction::{
     ArtifactRef, ExecutionBudget, Revision, TransactionId, TransactionLedger, TransactionRecord,
     UndoToken, VerificationSummary,

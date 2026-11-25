@@ -93,6 +93,7 @@ impl FilterPass {
                 depth_write: false,
                 vertex_stream: false,
                 blend: false,
+                cull: D3D12_CULL_MODE_NONE,
             },
         )?;
         let rtv = unsafe { rtv_heap.GetCPUDescriptorHandleForHeapStart() };

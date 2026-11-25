@@ -1,14 +1,18 @@
 //! Shared authoring geometry. Transforms are applied exactly once.
-use super::{Primitive, SceneGraph, SceneNodeId};
-use glam::Vec3;
+use super::{PivotMode, Primitive, SceneGraph, SceneNode, SceneNodeId};
+use glam::{Mat4, Vec3};
 use std::collections::HashSet;
 
-pub const CREATABLE_PRIMITIVES: [Primitive; 5] = [
+pub const CREATABLE_PRIMITIVES: [Primitive; 9] = [
     Primitive::Cube,
     Primitive::Sphere,
     Primitive::Cylinder,
     Primitive::Plane,
     Primitive::Capsule,
+    Primitive::Wedge,
+    Primitive::Torus,
+    Primitive::Prism,
+    Primitive::Sphere2D,
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -53,6 +57,30 @@ impl Primitive {
                 "builtin://primitive/capsule",
                 Vec3::new(0.5, 1.0, 0.5),
             ),
+            Self::Wedge => (
+                "wedge",
+                "app.primitive_wedge",
+                "builtin://primitive/wedge",
+                Vec3::splat(0.5),
+            ),
+            Self::Torus => (
+                "torus",
+                "app.primitive_torus",
+                "builtin://primitive/torus",
+                Vec3::new(0.5, 0.2, 0.5),
+            ),
+            Self::Prism => (
+                "prism",
+                "app.primitive_prism",
+                "builtin://primitive/prism",
+                Vec3::splat(0.5),
+            ),
+            Self::Sphere2D => (
+                "sphere2d",
+                "app.primitive_sphere2d",
+                "builtin://primitive/sphere2d",
+                Vec3::splat(0.5),
+            ),
         };
         ShapeDescriptor {
             slug,
@@ -68,6 +96,8 @@ impl Primitive {
             "box" | "block" => "cube",
             "ball" | "circle" | "uv_sphere" => "sphere",
             "floor" | "sprite" | "sprite2d" => "plane",
+            "billboard_sphere" | "sphere_2d" | "circle2d" => "sphere2d",
+            "ramp" => "wedge",
             "entity" => "empty",
             other => other,
         };
@@ -84,7 +114,11 @@ impl Primitive {
     }
 
     pub fn scale_for_dimensions(self, size: Vec3, previous: Vec3) -> Result<Vec3, &'static str> {
-        if self == Self::Empty || !size.is_finite() || !previous.is_finite() || size.min_element() < 0.0 {
+        if self == Self::Empty
+            || !size.is_finite()
+            || !previous.is_finite()
+            || size.min_element() < 0.0
+        {
             return Err("commands.error.dimensions_invalid");
         }
         let base = self.descriptor().half_extents * 2.0;
@@ -106,28 +140,83 @@ impl Primitive {
     }
 }
 
-pub fn node_geometry_bounds(scene: &SceneGraph, id: SceneNodeId) -> Option<(Vec3, Vec3)> {
-    let node = scene.get(id)?;
-    if node.is_folder || node.primitive == Primitive::Empty {
-        return None;
-    }
-    let half = node.primitive.descriptor().half_extents;
-    let world = scene.world_matrix(id);
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-    for x in [-half.x, half.x] {
-        for y in [-half.y, half.y] {
-            for z in [-half.z, half.z] {
-                let point = world.transform_point3(Vec3::new(x, y, z));
+/// Local point that becomes the node transform origin for the authored pivot.
+pub fn node_pivot_offset(node: &SceneNode) -> Vec3 {
+    let (min, max) = if let Some(mesh) = &node.editable_mesh {
+        mesh.bounds()
+            .unwrap_or((-Vec3::splat(0.5), Vec3::splat(0.5)))
+    } else if let Some(mesh) = &node.mesh_asset {
+        // Imported models keep their authored origin for `Center`. Their local
+        // AABB is often far from zero, so using its center would silently move
+        // every imported entity when it uses the default pivot. `Base` and
+        // `Corner` still use the cached import bounds. This is the documented
+        // limitation of the current `PivotMode` set; an explicit `Origin`
+        // variant would remove the special case.
+        if node.pivot == PivotMode::Center {
+            return Vec3::ZERO;
+        }
+        let bounds = mesh.bounds.unwrap_or([-0.5, -0.5, -0.5, 0.5, 0.5, 0.5]);
+        let scale = mesh.import_scale.max(f32::EPSILON);
+        (
+            Vec3::new(bounds[0], bounds[1], bounds[2]) * scale,
+            Vec3::new(bounds[3], bounds[4], bounds[5]) * scale,
+        )
+    } else if node.primitive == Primitive::Empty {
+        (-Vec3::splat(0.5), Vec3::splat(0.5))
+    } else {
+        let half = node.primitive.descriptor().half_extents;
+        (-half, half)
+    };
+    node.pivot.offset(min, max)
+}
+
+/// Render-space geometry matrix. The authored node transform (and every gizmo,
+/// script or camera anchored to it) keeps the node origin; only the drawn mesh
+/// is shifted so the authored pivot point lands on that origin.
+pub fn node_geometry_matrix(world: Mat4, node: &SceneNode) -> Mat4 {
+    world * Mat4::from_translation(-node_pivot_offset(node))
+}
+
+fn transformed_aabb(min: Vec3, max: Vec3, matrix: Mat4) -> Option<(Vec3, Vec3)> {
+    let mut out_min = Vec3::splat(f32::INFINITY);
+    let mut out_max = Vec3::splat(f32::NEG_INFINITY);
+    for x in [min.x, max.x] {
+        for y in [min.y, max.y] {
+            for z in [min.z, max.z] {
+                let point = matrix.transform_point3(Vec3::new(x, y, z));
                 if !point.is_finite() {
                     return None;
                 }
-                min = min.min(point);
-                max = max.max(point);
+                out_min = out_min.min(point);
+                out_max = out_max.max(point);
             }
         }
     }
-    Some((min, max))
+    Some((out_min, out_max))
+}
+
+pub fn node_geometry_bounds(scene: &SceneGraph, id: SceneNodeId) -> Option<(Vec3, Vec3)> {
+    let node = scene.get(id)?;
+    if node.is_folder {
+        return None;
+    }
+    let world = node_geometry_matrix(scene.world_matrix(id), node);
+    if let Some(mesh) = &node.editable_mesh {
+        let (min, max) = mesh.bounds()?;
+        return transformed_aabb(min, max, world);
+    }
+    if let Some(mesh) = &node.mesh_asset {
+        let bounds = mesh.bounds.unwrap_or([-0.5, -0.5, -0.5, 0.5, 0.5, 0.5]);
+        let scale = mesh.import_scale.max(f32::EPSILON);
+        let min = Vec3::new(bounds[0], bounds[1], bounds[2]) * scale;
+        let max = Vec3::new(bounds[3], bounds[4], bounds[5]) * scale;
+        return transformed_aabb(min, max, world);
+    }
+    if node.primitive == Primitive::Empty {
+        return None;
+    }
+    let half = node.primitive.descriptor().half_extents;
+    transformed_aabb(-half, half, world)
 }
 
 pub fn subtree_geometry_bounds(scene: &SceneGraph, root: SceneNodeId) -> Option<(Vec3, Vec3)> {
@@ -171,5 +260,50 @@ mod tests {
                 .unwrap(),
             Vec3::new(2.0, 3.0, 2.0)
         );
+    }
+
+    #[test]
+    fn render_geometry_applies_base_and_corner_pivots_without_moving_the_origin() {
+        let mut scene = SceneGraph::new();
+        let cube = scene.add_root_with_primitive("Cube", Primitive::Cube);
+        scene.get_mut(cube).unwrap().position = Vec3::new(10.0, 5.0, 0.0);
+        scene.get_mut(cube).unwrap().pivot = PivotMode::Base;
+
+        let (min, max) = node_geometry_bounds(&scene, cube).unwrap();
+        assert!((min.y - 5.0).abs() < 1e-5);
+        assert!((max.y - 6.0).abs() < 1e-5);
+        assert!(
+            (node_geometry_matrix(scene.world_matrix(cube), scene.get(cube).unwrap())
+                .transform_point3(Vec3::ZERO)
+                - Vec3::new(10.0, 5.5, 0.0))
+            .length()
+                < 1e-5
+        );
+
+        scene.get_mut(cube).unwrap().pivot = PivotMode::Corner;
+        let (min, max) = node_geometry_bounds(&scene, cube).unwrap();
+        assert!((min - Vec3::new(10.0, 5.0, 0.0)).length() < 1e-5);
+        assert!((max - Vec3::new(11.0, 6.0, 1.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn imported_center_pivot_preserves_the_authored_origin() {
+        let mut scene = SceneGraph::new();
+        let node = scene.add_root("Imported");
+        let mut reference = crate::scene::MeshAssetRef::new("models/a.glb");
+        reference.bounds = Some([1.0, 2.0, 3.0, 3.0, 6.0, 9.0]);
+        let node_ref = scene.get_mut(node).unwrap();
+        node_ref.mesh_asset = Some(reference);
+        node_ref.pivot = PivotMode::Center;
+
+        let (min, max) = node_geometry_bounds(&scene, node).unwrap();
+        assert!((min - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-5);
+        assert!((max - Vec3::new(3.0, 6.0, 9.0)).length() < 1e-5);
+        assert_eq!(node_pivot_offset(scene.get(node).unwrap()), Vec3::ZERO);
+
+        scene.get_mut(node).unwrap().pivot = PivotMode::Base;
+        let (min, max) = node_geometry_bounds(&scene, node).unwrap();
+        assert!((min - Vec3::new(-1.0, 0.0, -3.0)).length() < 1e-5);
+        assert!((max - Vec3::new(1.0, 4.0, 3.0)).length() < 1e-5);
     }
 }

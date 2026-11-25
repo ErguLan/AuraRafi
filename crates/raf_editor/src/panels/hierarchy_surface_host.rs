@@ -58,6 +58,7 @@ impl HierarchySurfaceHost {
                     "hierarchy",
                     [false; 3],
                     None,
+                    false,
                 ),
                 [0, 0, 0, 0],
             ),
@@ -95,6 +96,7 @@ impl HierarchySurfaceHost {
             "hierarchy",
             [false; 3],
             None,
+            false,
         ));
     }
 

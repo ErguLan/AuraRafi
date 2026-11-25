@@ -151,9 +151,7 @@ pub(crate) fn body(
                 }
             } else {
                 toolbar = toolbar
-                    .with_child(
-                        action("scan", "lab.scan", "scan", tokens).disabled(lab.scanning()),
-                    )
+                    .with_child(action("scan", "lab.scan", "scan", tokens).disabled(lab.scanning()))
                     .with_child(action(
                         "hardware.disable",
                         "lab.hardware_disable",

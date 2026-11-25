@@ -1,0 +1,212 @@
+{
+  "version": 1,
+  "name": "Rain",
+  "budget": {
+    "max_particles": 5000,
+    "max_sprites": 5000
+  },
+  "emitters": [
+    {
+      "name": "rain",
+      "texture": "particles/textures/soft.png",
+      "enabled": true,
+      "max_particles": 4200,
+      "rate": 900.0,
+      "burst": 300,
+      "lifetime": [
+        0.7,
+        1.2
+      ],
+      "speed": [
+        12.0,
+        18.0
+      ],
+      "spread": [
+        2.0,
+        2.0
+      ],
+      "direction": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "gravity": [
+        0.0,
+        -2.5,
+        0.0
+      ],
+      "drag": 0.0,
+      "size": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.022
+          },
+          {
+            "t": 0.7,
+            "value": 0.022
+          },
+          {
+            "t": 1.0,
+            "value": 0.016
+          }
+        ]
+      },
+      "opacity": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.55
+          },
+          {
+            "t": 0.8,
+            "value": 0.45
+          },
+          {
+            "t": 1.0,
+            "value": 0.0
+          }
+        ]
+      },
+      "color": {
+        "keys": [
+          {
+            "t": 0.0,
+            "color": [
+              175,
+              200,
+              255,
+              210
+            ]
+          },
+          {
+            "t": 0.85,
+            "color": [
+              150,
+              180,
+              240,
+              180
+            ]
+          },
+          {
+            "t": 1.0,
+            "color": [
+              120,
+              150,
+              220,
+              0
+            ]
+          }
+        ]
+      },
+      "shape": {
+        "type": "box",
+        "half_extents": [
+          4.5,
+          0.15,
+          4.5
+        ]
+      },
+      "flipbook": null,
+      "collision": {
+        "ground_y": 0.0,
+        "bounce": 0.0,
+        "kill": true
+      },
+      "wind_affects_drag": true
+    },
+    {
+      "name": "splash",
+      "texture": "particles/textures/soft.png",
+      "enabled": true,
+      "max_particles": 800,
+      "rate": 100.0,
+      "burst": 30,
+      "lifetime": [
+        0.18,
+        0.35
+      ],
+      "speed": [
+        0.8,
+        2.2
+      ],
+      "spread": [
+        70.0,
+        35.0
+      ],
+      "direction": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "gravity": [
+        0.0,
+        -9.8,
+        0.0
+      ],
+      "drag": 0.15,
+      "size": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.05
+          },
+          {
+            "t": 0.6,
+            "value": 0.03
+          },
+          {
+            "t": 1.0,
+            "value": 0.01
+          }
+        ]
+      },
+      "opacity": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.7
+          },
+          {
+            "t": 1.0,
+            "value": 0.0
+          }
+        ]
+      },
+      "color": {
+        "keys": [
+          {
+            "t": 0.0,
+            "color": [
+              170,
+              200,
+              255,
+              220
+            ]
+          },
+          {
+            "t": 1.0,
+            "color": [
+              90,
+              130,
+              220,
+              0
+            ]
+          }
+        ]
+      },
+      "shape": {
+        "type": "disc",
+        "radius": 0.08,
+        "inner": 0.02
+      },
+      "flipbook": null,
+      "collision": {
+        "ground_y": 0.0,
+        "bounce": 0.1,
+        "kill": true
+      },
+      "wind_affects_drag": true
+    }
+  ]
+}

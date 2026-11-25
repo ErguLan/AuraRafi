@@ -567,12 +567,18 @@ impl NativeGameWorkbench {
             } else {
                 append(
                     if self.hierarchy_active_tab == "lighting" {
-                        crate::panels::lighting_surface::inspector(
+                        let lighting_ui = crate::panels::lighting_surface::LightingUiState {
+                            open_color: self.lighting_color_editor.as_deref(),
+                            eyedropper: self.lighting_eyedropper.as_deref(),
+                            recent_colors: &self.lighting_recent_colors,
+                        };
+                        crate::panels::lighting_surface::inspector_with_state(
                             self.palette,
                             scene.environment(),
                             &self.lighting_section,
                             self.lighting_preview_neutral,
                             self.lighting_error,
+                            &lighting_ui,
                         )
                     } else if self.interface.workspace.active()
                         && self.inspector_view.tab
@@ -681,6 +687,7 @@ impl NativeGameWorkbench {
                     group,
                     group_rect.height <= 34.0,
                     drag_preview.as_ref(),
+                    self.console.error_count(),
                     group_rect.width,
                 ),
                 EditorRect::new(group_rect.x, group_rect.y, group_rect.width, tab_height),
@@ -810,7 +817,8 @@ impl NativeGameWorkbench {
                     let grid_viewport =
                         (content_rect.height - ASSET_TOOLBAR_HEIGHT - ASSET_SELECTION_BAR_HEIGHT)
                             .max(ASSET_CARD_MIN_VIEWPORT);
-                    let visible_range = asset_visible_range(
+                    let grid_width = asset_grid_viewport_width(content_rect.width);
+                    let visible_range = asset_visible_range_for_width(
                         &assets,
                         &self.assets_surface.query,
                         self.assets_surface.filter,
@@ -818,9 +826,18 @@ impl NativeGameWorkbench {
                         self.assets_surface.sort,
                         self.assets_scroll_offset,
                         grid_viewport,
+                        grid_width,
                         self.assets_surface.view,
                     );
-                    let entries = raf_assets::authoring_catalog::project_assets(&assets, scene);
+                    let assets_root = self
+                        .assets_project_root
+                        .as_ref()
+                        .map(|root| root.join("assets"));
+                    let entries = raf_assets::authoring_catalog::project_assets_with_root(
+                        assets_root.as_deref(),
+                        &assets,
+                        scene,
+                    );
                     let visible = crate::panels::assets_surface::visible_asset_rows(
                         &assets,
                         &self.assets_surface.query,
@@ -859,25 +876,28 @@ impl NativeGameWorkbench {
                         })
                         .collect::<std::collections::HashMap<_, _>>();
                     append(
-                        build_assets_surface(AssetsSurfaceParams {
-                            palette: self.palette,
-                            rows: &assets,
-                            language: self.agent_panel.borrow_mut().language,
-                            query: &self.assets_surface.query,
-                            filter: self.assets_surface.filter,
-                            script_extension: &self.assets_surface.script_extension,
-                            sort: self.assets_surface.sort,
-                            view: self.assets_surface.view,
-                            selected: self.assets_surface.selected_asset.as_deref(),
-                            highlight: self.assets_surface.highlight_asset.as_deref(),
-                            status: self.assets_surface.status.as_ref(),
-                            pending: self.project_catalog.is_pending(),
-                            catalog_error: self.project_catalog.error(),
-                            visible_range: Some(visible_range),
-                            create_open: self.assets_surface.create_menu_open,
-                            motion: self.assets_motion(),
-                            visuals: Some(&visuals),
-                        }),
+                        build_assets_surface_with_width(
+                            AssetsSurfaceParams {
+                                palette: self.palette,
+                                rows: &assets,
+                                language: self.agent_panel.borrow_mut().language,
+                                query: &self.assets_surface.query,
+                                filter: self.assets_surface.filter,
+                                script_extension: &self.assets_surface.script_extension,
+                                sort: self.assets_surface.sort,
+                                view: self.assets_surface.view,
+                                selected: self.assets_surface.selected_asset.as_deref(),
+                                highlight: self.assets_surface.highlight_asset.as_deref(),
+                                status: self.assets_surface.status.as_ref(),
+                                pending: self.project_catalog.is_pending(),
+                                catalog_error: self.project_catalog.error(),
+                                visible_range: Some(visible_range),
+                                create_open: self.assets_surface.create_menu_open,
+                                motion: self.assets_motion(),
+                                visuals: Some(&visuals),
+                            },
+                            grid_width,
+                        ),
                         content_rect,
                     );
                     assets_panel_rect = Some(content_rect);
@@ -1048,7 +1068,37 @@ impl NativeGameWorkbench {
                         )
                     })
                 });
-            if let Some((surface, height)) = modal {
+            let import_modal = self.assets_import.as_ref().map(|state| {
+                let modal_state = AssetsImportModalState {
+                    file_name: state.file_name.as_deref(),
+                    source_path: state.path.as_ref().and_then(|path| path.to_str()),
+                    file_size: state.file_size,
+                    options: state.options.clone(),
+                    phase: state.phase,
+                    preview: None,
+                    error: state.error.as_deref(),
+                };
+                (
+                    build_assets_import_modal_surface(self.palette, &modal_state),
+                    ASSETS_IMPORT_MODAL_WIDTH,
+                    560.0,
+                )
+            });
+            if let Some((surface, width, height)) = import_modal {
+                append(
+                    build_assets_import_backdrop_surface(self.palette),
+                    EditorRect::new(window.x, window.y, window.width, window.height),
+                );
+                append(
+                    surface,
+                    EditorRect::new(
+                        window.x + (window.width - width) * 0.5,
+                        window.y + (window.height - height) * 0.5,
+                        width,
+                        height,
+                    ),
+                );
+            } else if let Some((surface, height)) = modal {
                 append(
                     build_assets_backdrop_surface(self.palette),
                     EditorRect::new(window.x, window.y, window.width, window.height),
@@ -1102,6 +1152,19 @@ impl NativeGameWorkbench {
                         window,
                         toolbar_anchor,
                         [ASSETS_POPOVER_WIDTH, ASSETS_SCRIPT_POPOVER_HEIGHT],
+                        slide,
+                    ),
+                );
+            } else if self.assets_surface.particle_menu_open {
+                append(
+                    build_assets_particle_popover_surface(
+                        self.palette,
+                        &self.assets_surface.particle_name,
+                    ),
+                    assets_overlay_rect(
+                        window,
+                        toolbar_anchor,
+                        [ASSETS_POPOVER_WIDTH, ASSETS_PARTICLE_POPOVER_HEIGHT],
                         slide,
                     ),
                 );
@@ -1259,14 +1322,67 @@ impl NativeGameWorkbench {
                     crate::panels::console_surface::build_console_filters_surface(
                         self.palette,
                         &self.console,
+                        self.agent_settings.command_console_enabled,
                     ),
                     EditorRect::new(
-                        (rect.x + rect.width - 246.0).max(rect.x),
-                        (rect.y - 254.0).max(layout.workspace.y),
-                        238.0,
-                        254.0,
+                        (rect.x + rect.width - 268.0).max(rect.x),
+                        (rect.y - 438.0).max(layout.workspace.y),
+                        260.0,
+                        430.0,
                     ),
                 );
+            }
+        }
+        if self.hierarchy_active_tab == "lighting" {
+            if let Some(path) = self.lighting_color_editor.clone() {
+                if let Some(trigger) = self
+                    .host
+                    .layout_rect(&format!("lighting.field.{path}.trigger"))
+                {
+                    let backdrop = UiNode::new("lighting.color.backdrop", UiNodeKind::Panel)
+                        .with_layout(UiLayout::fill(UiFlow::None))
+                        .with_style(UiStyle::transparent())
+                        .with_event(raf_ui::UiEventBinding::command(
+                            raf_ui::UiEventKind::Click,
+                            "lighting.color.close",
+                        ));
+                    append(
+                        UiSurface::new("lighting.color.backdrop", self.palette, backdrop),
+                        layout.window,
+                    );
+                    let placement = raf_ui::overlays::place_overlay(
+                        trigger,
+                        [
+                            raf_ui::COLOR_PICKER_POPOVER_WIDTH,
+                            raf_ui::COLOR_PICKER_POPOVER_HEIGHT,
+                        ],
+                        UiRect::new(
+                            layout.window.x,
+                            layout.window.y,
+                            layout.window.width,
+                            layout.window.height,
+                        ),
+                        raf_ui::overlays::UiPlacement::BottomStart,
+                        2.0,
+                    );
+                    if let Some(surface) = crate::panels::lighting_surface::color_popover_surface(
+                        self.palette,
+                        scene.environment(),
+                        &path,
+                        &self.lighting_recent_colors,
+                        self.lighting_eyedropper.as_deref(),
+                    ) {
+                        append(
+                            surface,
+                            EditorRect::new(
+                                placement.rect.x,
+                                placement.rect.y,
+                                placement.rect.width,
+                                placement.rect.height,
+                            ),
+                        );
+                    }
+                }
             }
         }
         if self.project_type == ProjectType::Game

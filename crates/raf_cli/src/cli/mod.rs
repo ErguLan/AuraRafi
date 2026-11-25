@@ -18,3 +18,4 @@ pub(crate) const PROTOCOL_VERSION: &str = "2025-06-18";
 pub(crate) type CliResult<T> = Result<T, String>;
 
 pub(crate) use mcp::read_plan_resource;
+pub(crate) use mcp::mcp_command_is_mutation;

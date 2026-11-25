@@ -7,7 +7,7 @@
       "primitive": "cylinder",
       "position": [0.0, 0.0, 0.0],
       "scale": [1.0, 1.0, 1.0],
-      "color_rgba": [38, 38, 38, 255]
+      "color_rgba": [142, 148, 156, 255]
     }
   ]
 }

@@ -270,10 +270,14 @@ impl InterfaceSurfaceHost {
             ),
             ("meters", mount.size_meters.map(|v| v.to_string()).join(",")),
             ("canvas", mount.canvas_size.map(|v| v.to_string()).join(",")),
-        ].into_iter().map(|(key, value)| UiTextBinding::new(format!("ui.designer.field.{key}"), value, 4096));
+        ]
+        .into_iter()
+        .map(|(key, value)| UiTextBinding::new(format!("ui.designer.field.{key}"), value, 4096));
         let scope = format!("{:?}:{}:{}", self.path, self.document.id.0, self.selected);
         self.text_drafts.sync(scope, bindings, controls);
-        if let Some(key) = self.cancel_field.take() { self.text_drafts.cancel(&key, controls); }
+        if let Some(key) = self.cancel_field.take() {
+            self.text_drafts.cancel(&key, controls);
+        }
         self.seed_needed = false;
     }
     pub fn add(&mut self, kind: &str, language: Language) -> Result<(), String> {

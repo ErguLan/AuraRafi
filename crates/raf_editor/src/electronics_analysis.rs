@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 
-use raf_electronics::{CadSurfaceKind, DrcReport, Netlist, PcbLayout, Schematic, SimulationResults};
+use raf_electronics::{
+    CadSurfaceKind, DrcReport, Netlist, PcbLayout, Schematic, SimulationResults,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AnalysisKind {

@@ -1,21 +1,99 @@
-//! Bounded Windows PCM/WAV playback. No global mixer or audio dependency.
-use raf_core::SceneGraph;
+//! Bounded Windows PCM/WAV playback with a project mix and entity-linked 3D
+//! attenuation. No global audio dependency is introduced.
+use glam::Vec3;
+use raf_core::runtime_config::AudioSettings;
+use raf_core::scene::{AudioBus, SceneGraph};
 use raf_script::AudioCommand;
 use std::collections::HashMap;
 use std::path::Path;
+
+#[derive(Debug, Clone)]
+struct VoiceMeta {
+    entity: Option<String>,
+    base_volume: f32,
+    bus: AudioBus,
+    spatial: bool,
+    min_distance: f32,
+    max_distance: f32,
+    rolloff: f32,
+}
+
 pub struct RuntimeAudio {
     #[cfg(target_os = "windows")]
     voices: HashMap<String, windows::Voice>,
+    meta: HashMap<String, VoiceMeta>,
+    settings: AudioSettings,
     enabled: bool,
+    listener: Vec3,
 }
+
 impl RuntimeAudio {
-    pub fn new(enabled: bool) -> Self {
+    pub fn new(enabled: bool, settings: AudioSettings) -> Self {
         Self {
             enabled,
             #[cfg(target_os = "windows")]
             voices: HashMap::new(),
+            meta: HashMap::new(),
+            settings,
+            listener: Vec3::ZERO,
         }
     }
+
+    pub fn set_settings(&mut self, settings: AudioSettings) {
+        self.settings = settings;
+        self.refresh_volumes(None);
+    }
+
+    pub fn set_listener(&mut self, position: Vec3) {
+        if position.is_finite() {
+            self.listener = position;
+        }
+    }
+
+    /// Recompute spatial and bus gains. `scene` is optional for preview mixer
+    /// changes that are not tied to an entity.
+    pub fn update_listener(&mut self, scene: &SceneGraph, position: Vec3) {
+        self.set_listener(position);
+        self.refresh_volumes(Some(scene));
+    }
+
+    fn refresh_volumes(&mut self, scene: Option<&SceneGraph>) {
+        let settings = self.settings.clone();
+        #[cfg(target_os = "windows")]
+        for (name, voice) in self.voices.iter_mut() {
+            let Some(meta) = self.meta.get(name) else {
+                continue;
+            };
+            let spatial_gain = if meta.spatial && settings.spatial_audio {
+                match (scene, meta.entity.as_deref()) {
+                    (Some(scene), Some(entity_name)) => scene
+                        .iter()
+                        .find(|(id, node)| {
+                            scene.is_valid_node(*id) && node.name == entity_name
+                        })
+                        .map(|(id, _)| {
+                            let position = scene.world_matrix(id).w_axis.truncate();
+                            let distance = position.distance(self.listener);
+                            spatial_curve(
+                                distance,
+                                meta.min_distance,
+                                meta.max_distance,
+                                meta.rolloff,
+                            )
+                        })
+                        .unwrap_or(0.0),
+                    _ => 0.0,
+                }
+            } else {
+                1.0
+            };
+            let gain = settings.gain(meta.bus) * meta.base_volume * spatial_gain;
+            let _ = voice.set_volume(gain.clamp(0.0, 1.0));
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = (scene, settings);
+    }
+
     pub fn consume(
         &mut self,
         scene: &SceneGraph,
@@ -27,7 +105,17 @@ impl RuntimeAudio {
             return errors;
         }
         #[cfg(target_os = "windows")]
-        self.voices.retain(|_, voice| !voice.finished());
+        {
+            let finished = self
+                .voices
+                .iter()
+                .filter_map(|(name, voice)| voice.finished().then_some(name.clone()))
+                .collect::<Vec<_>>();
+            for name in finished {
+                self.voices.remove(&name);
+                self.meta.remove(&name);
+            }
+        }
         for command in commands.into_iter().take(256) {
             let result = self.apply(scene, root, command);
             if let Err(error) = result {
@@ -36,67 +124,162 @@ impl RuntimeAudio {
                 }
             }
         }
+        self.refresh_volumes(Some(scene));
         errors
     }
+
     fn apply(
         &mut self,
         scene: &SceneGraph,
         root: &Path,
         command: AudioCommand,
     ) -> Result<(), String> {
-        #[cfg(target_os = "windows")]
-        {
-            match command {
-                AudioCommand::Stop { name } => {
-                    self.voices.remove(&name);
-                }
-                AudioCommand::SetVolume { name, volume } => {
-                    if let Some(voice) = self.voices.get_mut(&name) {
-                        voice.set_volume(volume)?;
-                    }
-                }
-                AudioCommand::Play { name } => {
-                    let mut matches = scene.iter().filter(|(id, n)| {
-                        scene.is_valid_node(*id) && n.name == name && n.audio_source.enabled
-                    });
-                    let (_, node) = matches
-                        .next()
-                        .ok_or_else(|| format!("Audio source not found: {name}"))?;
-                    if matches.next().is_some() {
-                        return Err(format!("Ambiguous audio source: {name}"));
-                    }
-                    let source = node.audio_source.clone();
-                    let root = root.canonicalize().map_err(|e| e.to_string())?;
-                    let clip = root
-                        .join("assets")
-                        .join(&source.clip)
-                        .canonicalize()
-                        .map_err(|e| format!("Audio clip {}: {e}", source.clip))?;
-                    if !clip.starts_with(root.join("assets")) {
-                        return Err("audio clip escapes project assets".into());
-                    }
-                    self.voices.remove(&name);
-                    if self.voices.len() >= 4 {
-                        return Err("runtime audio voice budget exceeded (4)".into());
-                    }
-                    self.voices.insert(
-                        name,
-                        windows::Voice::open(&clip, source.looping, source.volume)?,
-                    );
+        match command {
+            AudioCommand::Stop { name } => {
+                #[cfg(target_os = "windows")]
+                self.voices.remove(&name);
+                self.meta.remove(&name);
+            }
+            AudioCommand::StopAll => {
+                self.stop();
+            }
+            AudioCommand::SetVolume { name, volume } => {
+                if let Some(meta) = self.meta.get_mut(&name) {
+                    meta.base_volume = volume.clamp(0.0, 1.0);
                 }
             }
+            AudioCommand::SetBusVolume { bus, volume } => {
+                let volume = volume.clamp(0.0, 1.0);
+                match bus {
+                    AudioBus::Master => self.settings.master_volume = volume,
+                    AudioBus::Music => self.settings.music_volume = volume,
+                    AudioBus::Sfx => self.settings.sfx_volume = volume,
+                    AudioBus::Voice => self.settings.voice_volume = volume,
+                    AudioBus::Ambient => self.settings.ambient_volume = volume,
+                }
+            }
+            AudioCommand::Play { name } => {
+                let mut matches = scene.iter().filter(|(id, n)| {
+                    scene.is_valid_node(*id) && n.name == name && n.audio_source.enabled
+                });
+                let (id, node) = matches
+                    .next()
+                    .ok_or_else(|| format!("Audio source not found: {name}"))?;
+                if matches.next().is_some() {
+                    return Err(format!("Ambiguous audio source: {name}"));
+                }
+                let source = node.audio_source.clone();
+                source.validate()?;
+                if source.clip.trim().is_empty() {
+                    return Err(format!("Audio source {name} has no clip."));
+                }
+                let root = root.canonicalize().map_err(|e| e.to_string())?;
+                let clip = root
+                    .join("assets")
+                    .join(&source.clip)
+                    .canonicalize()
+                    .map_err(|e| format!("Audio clip {}: {e}", source.clip))?;
+                if !clip.starts_with(root.join("assets")) {
+                    return Err("audio clip escapes project assets".into());
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    return Err(
+                        "native audio output is currently implemented only on Windows".into(),
+                    );
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    let limit = self.settings.max_voices.max(1) as usize;
+                    if self.voices.len() >= limit {
+                        return Err(format!("runtime audio voice budget exceeded ({limit})"));
+                    }
+                    let position = scene.world_matrix(id).w_axis.truncate();
+                    let spatial_gain = if source.spatial && self.settings.spatial_audio {
+                        spatial_curve(
+                            position.distance(self.listener),
+                            source.min_distance,
+                            source.max_distance,
+                            source.rolloff,
+                        )
+                    } else {
+                        1.0
+                    };
+                    let gain =
+                        self.settings.gain(source.bus) * source.volume * spatial_gain;
+                    self.voices.remove(&name);
+                    self.voices.insert(
+                        name.clone(),
+                        windows::Voice::open(&clip, source.looping, gain.clamp(0.0, 1.0))?,
+                    );
+                }
+                self.meta.insert(
+                    name,
+                    VoiceMeta {
+                        entity: Some(node.name.clone()),
+                        base_volume: source.volume,
+                        bus: source.bus,
+                        spatial: source.spatial,
+                        min_distance: source.min_distance,
+                        max_distance: source.max_distance,
+                        rolloff: source.rolloff,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// One-shot playback for the Assets audition button.
+    pub fn preview_file(
+        &mut self,
+        path: &Path,
+        volume: f32,
+        looping: bool,
+    ) -> Result<(), String> {
+        if !self.enabled {
+            return Err("audio is disabled".into());
+        }
+        #[cfg(target_os = "windows")]
+        {
+            self.voices.remove("__preview__");
+            self.voices.insert(
+                "__preview__".to_string(),
+                windows::Voice::open(path, looping, volume.clamp(0.0, 1.0))?,
+            );
             Ok(())
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = (scene, root, command);
+            let _ = (path, volume, looping);
             Err("native audio output is currently implemented only on Windows".into())
         }
     }
+
+    pub fn stop_preview(&mut self) {
+        #[cfg(target_os = "windows")]
+        self.voices.remove("__preview__");
+    }
+
+    pub fn is_previewing(&self) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            self.voices
+                .get("__preview__")
+                .is_some_and(|voice| !voice.finished())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+    }
+
     pub fn stop(&mut self) {
         #[cfg(target_os = "windows")]
         self.voices.clear();
+        self.meta.clear();
     }
+
     pub fn set_paused(&mut self, paused: bool) {
         #[cfg(target_os = "windows")]
         for voice in self.voices.values_mut() {
@@ -104,6 +287,33 @@ impl RuntimeAudio {
         }
         #[cfg(not(target_os = "windows"))]
         let _ = paused;
+    }
+}
+
+fn spatial_curve(distance: f32, min: f32, max: f32, rolloff: f32) -> f32 {
+    if !distance.is_finite() {
+        return 0.0;
+    }
+    if distance <= min {
+        return 1.0;
+    }
+    if distance >= max {
+        return 0.0;
+    }
+    let normalized = (distance - min) / (max - min).max(f32::EPSILON);
+    (1.0 - normalized).clamp(0.0, 1.0).powf(rolloff.clamp(0.1, 8.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spatial_curve;
+
+    #[test]
+    fn spatial_curve_keeps_near_full_and_fades_to_zero() {
+        assert_eq!(spatial_curve(0.5, 1.0, 10.0, 1.0), 1.0);
+        assert_eq!(spatial_curve(10.0, 1.0, 10.0, 1.0), 0.0);
+        let middle = spatial_curve(5.5, 1.0, 10.0, 1.0);
+        assert!(middle > 0.4 && middle < 0.6);
     }
 }
 #[cfg(target_os = "windows")]

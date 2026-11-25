@@ -152,10 +152,15 @@ impl Backend for WebGpu {
             .flat_map(|batch| {
                 let range = batch.indices.as_ref().unwrap_or(&batch.vertices);
                 [
+                    // Keep these indices in sync with the pipeline array order
+                    // in web/backend.js.
                     match batch.mode {
                         DrawMode::Scene => 0,
-                        DrawMode::Overlay | DrawMode::SceneNoDepth => 1,
-                        DrawMode::DepthReadOnly => 2,
+                        DrawMode::SceneTwoSided => 1,
+                        DrawMode::Overlay | DrawMode::SceneNoDepth => 2,
+                        DrawMode::DepthReadOnly => 3,
+                        DrawMode::SceneTransparent => 4,
+                        DrawMode::SceneTransparentTwoSided => 5,
                     },
                     batch.texture,
                     range.start,

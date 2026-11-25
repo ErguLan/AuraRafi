@@ -1,8 +1,8 @@
 //! Behavior and variable section composition for the game Inspector.
 
-use super::*;
 use super::behavior_surface;
 use super::sections::section_title;
+use super::*;
 
 /// Builds the variable and behavior children in document order.
 pub(super) fn build_behavior_sections(

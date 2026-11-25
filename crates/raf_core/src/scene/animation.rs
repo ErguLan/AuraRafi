@@ -16,6 +16,59 @@ pub struct AnimationRig {
     pub layers: Vec<AnimationLayer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impact: Option<ImpactReaction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contacts: Vec<PoseContact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion_match: Option<MotionMatching>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub physics_follow: Vec<PhysicsFollower>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicsFollower {
+    pub path: Vec<String>,
+    pub body: uuid::Uuid,
+    pub weight: f32,
+    pub stiffness: f32,
+    pub damping: f32,
+    pub max_torque: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MotionMatching {
+    pub pose_path: Vec<String>,
+    pub lookahead: f32,
+    pub pose_weight: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PoseContact {
+    /// Direct root, middle and tip chain, addressed relative to the rig owner.
+    pub chain: [Vec<String>; 3],
+    pub goal: ContactGoal,
+    /// Bend hint relative to the rig owner.
+    pub pole: Vec3,
+    /// Half-extent of the conservative tip sweep, in world meters.
+    pub radius: f32,
+    #[serde(default = "one")]
+    pub weight: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContactGoal {
+    Ground {
+        above: f32,
+        below: f32,
+        minimum_alignment: f32,
+    },
+    Target {
+        entity: uuid::Uuid,
+        offset: Vec3,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -37,10 +90,28 @@ pub struct AnimationLayer {
     /// Base locomotion sample in m/s. Speed layers share one normalized gait cycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub motion_speed: Option<f32>,
+    #[serde(default)]
+    pub motion_heading_degrees: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<ActionLayer>,
     /// Add translations and post-multiply rotations instead of overriding.
     #[serde(default)]
     pub additive: bool,
     pub tracks: Vec<AnimationTrack>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionLayer {
+    /// Matched against the owner's `animation_action` text variable.
+    pub request: String,
+    /// Entity-reference variables that must exist and be empty to use this layer.
+    #[serde(default)]
+    pub free_slots: Vec<String>,
+    #[serde(default)]
+    pub priority: i16,
+    #[serde(default)]
+    pub interruptible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,8 +157,55 @@ fn one() -> f32 {
 
 impl AnimationRig {
     pub fn validate(&self) -> Result<(), String> {
-        if self.layers.len() > MAX_LAYERS || (self.layers.is_empty() && self.impact.is_none()) {
+        if self.layers.len() > MAX_LAYERS
+            || self.contacts.len() > 16
+            || self.physics_follow.len() > 64
+            || (self.layers.is_empty()
+                && self.impact.is_none()
+                && self.contacts.is_empty()
+                && self.physics_follow.is_empty())
+        {
             return Err("Animation rig has an invalid layer count".into());
+        }
+        let mut joints = HashSet::new();
+        for contact in &self.contacts {
+            for path in &contact.chain {
+                validate_path(path)?;
+                if !joints.insert(path) {
+                    return Err("Contact chains cannot share joints".into());
+                }
+            }
+            if !contact.pole.is_finite()
+                || !(0.005..=1.0).contains(&contact.radius)
+                || !(0.0..=1.0).contains(&contact.weight)
+            {
+                return Err("Invalid contact chain settings".into());
+            }
+            match contact.goal {
+                ContactGoal::Ground {
+                    above,
+                    below,
+                    minimum_alignment,
+                } if (0.0..=2.0).contains(&above)
+                    && (0.005..=3.0).contains(&below)
+                    && (0.01..=1.0).contains(&minimum_alignment) => {}
+                ContactGoal::Target { offset, .. } if offset.is_finite() => {}
+                _ => return Err("Invalid animation contact goal".into()),
+            }
+        }
+        let mut followers = HashSet::new();
+        let mut bodies = HashSet::new();
+        for follower in &self.physics_follow {
+            validate_path(&follower.path)?;
+            if !followers.insert(&follower.path)
+                || !bodies.insert(follower.body)
+                || !(0.0..=1.0).contains(&follower.weight)
+                || !(0.0..=10_000.0).contains(&follower.stiffness)
+                || !(0.0..=1_000.0).contains(&follower.damping)
+                || !(0.0..=100_000.0).contains(&follower.max_torque)
+            {
+                return Err("Invalid or duplicate physics follower".into());
+            }
         }
         let mut names = HashSet::new();
         let mut tracks = 0;
@@ -103,12 +221,28 @@ impl AnimationRig {
                 || !names.insert(&layer.name)
                 || !valid_duration(layer.duration)
                 || !(0.0..=1.0).contains(&layer.weight)
+                || !(-360.0..=360.0).contains(&layer.motion_heading_degrees)
                 || !(0.0..=MAX_SECONDS).contains(&layer.start)
                 || !(0.0..=layer.duration).contains(&layer.fade_in)
                 || !(0.0..=layer.duration).contains(&layer.fade_out)
                 || (layer.looping && layer.fade_out != 0.0)
             {
                 return Err(format!("Invalid animation layer {:?}", layer.name));
+            }
+            if let Some(action) = &layer.action {
+                if action.request.trim().is_empty()
+                    || action.request.len() > 128
+                    || action.free_slots.len() > 8
+                    || action
+                        .free_slots
+                        .iter()
+                        .any(|slot| slot.trim().is_empty() || slot.len() > 128)
+                    || layer.looping
+                    || layer.start != 0.0
+                    || layer.motion_speed.is_some()
+                {
+                    return Err(format!("Invalid animation action {:?}", action.request));
+                }
             }
             if let Some(speed) = layer.motion_speed {
                 if overlays_started
@@ -120,8 +254,8 @@ impl AnimationRig {
                     || layer.fade_in != 0.0
                     || layer.fade_out != 0.0
                     || previous_motion.is_some_and(|(prior, prior_speed)| {
-                        speed <= prior_speed
-                            || prior.duration != layer.duration
+                        (self.motion_match.is_none()
+                            && (speed <= prior_speed || prior.duration != layer.duration))
                             || prior.tracks.len() != layer.tracks.len()
                             || prior
                                 .tracks
@@ -159,6 +293,27 @@ impl AnimationRig {
                     }
                     previous = key.time;
                 }
+            }
+        }
+        if let Some(settings) = &self.motion_match {
+            validate_path(&settings.pose_path)?;
+            if !(0.05..=2.0).contains(&settings.lookahead)
+                || !(0.0..=100.0).contains(&settings.pose_weight)
+                || previous_motion.is_none()
+                || self
+                    .layers
+                    .iter()
+                    .take_while(|layer| layer.motion_speed.is_some())
+                    .any(|layer| {
+                        !layer.tracks.iter().any(|track| {
+                            track.path == settings.pose_path
+                                && track.channel == AnimationChannel::Position
+                        })
+                    })
+            {
+                return Err(
+                    "Motion matching needs a position feature on every locomotion clip".into(),
+                );
             }
         }
         if let Some(reaction) = &self.impact {

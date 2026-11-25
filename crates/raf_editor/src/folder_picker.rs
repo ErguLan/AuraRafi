@@ -176,6 +176,17 @@ mod win32 {
             )
         }
     }
+
+    pub(super) fn pick_asset_file() -> Option<PathBuf> {
+        unsafe {
+            show_open_dialog(
+                "Import asset",
+                false,
+                "Asset files (*.glb;*.gltf;*.png;*.jpg;*.jpeg;*.webp;*.wav;*.mp3;*.ogg;*.rhai)",
+                "*.glb;*.gltf;*.png;*.jpg;*.jpeg;*.webp;*.wav;*.mp3;*.ogg;*.rhai",
+            )
+        }
+    }
 }
 
 /// Normalizes the first non-empty line produced by a platform dialog helper.
@@ -211,12 +222,7 @@ mod linux {
         ])) {
             return Some(path);
         }
-        run(Command::new("kdialog").args([
-            "--getexistingdirectory",
-            ".",
-            "--title",
-            title,
-        ]))
+        run(Command::new("kdialog").args(["--getexistingdirectory", ".", "--title", title]))
     }
 
     pub(super) fn pick_file(title: &str, filter_name: &str, pattern: &str) -> Option<PathBuf> {
@@ -229,13 +235,7 @@ mod linux {
         ])) {
             return Some(path);
         }
-        run(Command::new("kdialog").args([
-            "--getopenfilename",
-            ".",
-            pattern,
-            "--title",
-            title,
-        ]))
+        run(Command::new("kdialog").args(["--getopenfilename", ".", pattern, "--title", title]))
     }
 }
 
@@ -329,6 +329,37 @@ pub fn pick_project_folder(_current_location: &str) -> Option<PathBuf> {
     }
 }
 
+/// Opens the browser-style picker used by Assets > Import.
+pub fn pick_asset_file() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        win32::pick_asset_file()
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        linux::pick_file(
+            "Import asset",
+            "Asset files (*.glb;*.gltf;*.png;*.jpg;*.jpeg;*.webp;*.wav;*.mp3;*.ogg;*.rhai)",
+            "*.glb;*.gltf;*.png;*.jpg;*.jpeg;*.webp;*.wav;*.mp3;*.ogg;*.rhai",
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        macos::pick_file(
+            "Import asset",
+            "Asset files (*.glb;*.gltf;*.png;*.jpg;*.jpeg;*.webp;*.wav;*.mp3;*.ogg;*.rhai)",
+            "*.glb;*.gltf;*.png;*.jpg;*.jpeg;*.webp;*.wav;*.mp3;*.ogg;*.rhai",
+        )
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
 /// Opens the browser-style picker filtered to `.ron` project files.
 pub fn pick_project_file(_current_location: &str) -> Option<PathBuf> {
     #[cfg(windows)]
@@ -338,12 +369,20 @@ pub fn pick_project_file(_current_location: &str) -> Option<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        linux::pick_file("Open AuraRafi project file", "AuraRafi project (*.ron)", "*.ron")
+        linux::pick_file(
+            "Open AuraRafi project file",
+            "AuraRafi project (*.ron)",
+            "*.ron",
+        )
     }
 
     #[cfg(target_os = "macos")]
     {
-        macos::pick_file("Open AuraRafi project file", "AuraRafi project (*.ron)", "*.ron")
+        macos::pick_file(
+            "Open AuraRafi project file",
+            "AuraRafi project (*.ron)",
+            "*.ron",
+        )
     }
 
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
@@ -355,30 +394,48 @@ pub fn pick_project_file(_current_location: &str) -> Option<PathBuf> {
 /// Destination selection owned by the running editor, without opening another application.
 pub fn pick_output_folder(title: &str) -> Option<PathBuf> {
     #[cfg(windows)]
-    { win32::pick_output_folder(title) }
+    {
+        win32::pick_output_folder(title)
+    }
 
     #[cfg(target_os = "linux")]
-    { linux::pick_directory(title) }
+    {
+        linux::pick_directory(title)
+    }
 
     #[cfg(target_os = "macos")]
-    { macos::pick_directory(title) }
+    {
+        macos::pick_directory(title)
+    }
 
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    { let _ = title; None }
+    {
+        let _ = title;
+        None
+    }
 }
 
 pub(crate) fn pick_firmware(title: &str) -> Option<PathBuf> {
     #[cfg(windows)]
-    { win32::pick_firmware(title) }
+    {
+        win32::pick_firmware(title)
+    }
 
     #[cfg(target_os = "linux")]
-    { linux::pick_file(title, "Firmware (*.bin)", "*.bin") }
+    {
+        linux::pick_file(title, "Firmware (*.bin)", "*.bin")
+    }
 
     #[cfg(target_os = "macos")]
-    { macos::pick_file(title, "Firmware (*.bin)", "*.bin") }
+    {
+        macos::pick_file(title, "Firmware (*.bin)", "*.bin")
+    }
 
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    { let _ = title; None }
+    {
+        let _ = title;
+        None
+    }
 }
 
 #[cfg(test)]
@@ -387,7 +444,8 @@ mod tests {
 
     #[test]
     fn platform_picker_output_is_trimmed_to_the_first_path() {
-        let path = normalize_picker_path(b"\r\n  /tmp/firmware.bin  \r\nwarning: ignored\n").unwrap();
+        let path =
+            normalize_picker_path(b"\r\n  /tmp/firmware.bin  \r\nwarning: ignored\n").unwrap();
         assert_eq!(path, std::path::PathBuf::from("/tmp/firmware.bin"));
     }
 

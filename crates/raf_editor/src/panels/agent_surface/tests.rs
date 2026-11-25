@@ -74,13 +74,7 @@ fn plan_review_card_exposes_counts_tree_validations_and_actions() {
     assert_eq!(review.overlap_count, 2);
 
     let panel = AgentPanel::default();
-    let card = plan_review_card(
-        StudioUiPalette::IndustrialDark,
-        &panel,
-        &review,
-        760.0,
-        0,
-    );
+    let card = plan_review_card(StudioUiPalette::IndustrialDark, &panel, &review, 760.0, 0);
     for id in [
         "agent.plan.review.0",
         "agent.plan.metric.groups.0",
@@ -133,7 +127,9 @@ fn plan_review_card_is_wired_into_history_and_cancel_hides_it() {
     let plan = tool_message(&serde_json::to_string(&result).unwrap());
     let messages = vec![&user, &plan];
     let entries = history_entries(&messages, &std::collections::HashSet::new());
-    assert!(entries.iter().any(|entry| matches!(entry, HistoryEntry::Plan(1))));
+    assert!(entries
+        .iter()
+        .any(|entry| matches!(entry, HistoryEntry::Plan(1))));
 
     let mut panel = AgentPanel::default();
     let surface = build_history(
@@ -148,7 +144,9 @@ fn plan_review_card_is_wired_into_history_and_cancel_hides_it() {
     );
     assert!(node(&surface, "agent.plan.review.1").is_some());
 
-    panel.dismissed_plans.insert("plan_history_demo".to_string());
+    panel
+        .dismissed_plans
+        .insert("plan_history_demo".to_string());
     let surface = build_history(
         StudioUiPalette::IndustrialDark,
         &panel,
@@ -198,16 +196,31 @@ fn harness_reasoning_visibility_and_expansion_follow_settings() {
     let mut panel = AgentPanel::default();
     let mut answer = message("Done");
     answer.reasoning = Some(raf_ai::chat::ProviderReasoning {
-        endpoint: "https://openrouter.ai/api/v1".into(), model: "test/model".into(),
-        transport: String::new(), text: "Provider reasoning".into(), details: Vec::new(),
+        endpoint: "https://openrouter.ai/api/v1".into(),
+        model: "test/model".into(),
+        transport: String::new(),
+        text: "Provider reasoning".into(),
+        details: Vec::new(),
     });
     let id = format!("agent.reasoning.{}", answer.id);
-    let render = |panel: &AgentPanel| build_history(StudioUiPalette::IndustrialDark, panel,
-        ProjectType::Game, &[&answer], 600.0, 0.0, AgentSurfaceVariant::Embedded, |_| false);
+    let render = |panel: &AgentPanel| {
+        build_history(
+            StudioUiPalette::IndustrialDark,
+            panel,
+            ProjectType::Game,
+            &[&answer],
+            600.0,
+            0.0,
+            AgentSurfaceVariant::Embedded,
+            |_| false,
+        )
+    };
     let collapsed = render(&panel);
     assert!(node(&collapsed, &format!("{id}.toggle")).is_some());
     assert!(node(&collapsed, &format!("{id}.text")).is_none());
-    panel.expanded_tools.insert(format!("reasoning:{}", answer.id));
+    panel
+        .expanded_tools
+        .insert(format!("reasoning:{}", answer.id));
     assert!(node(&render(&panel), &format!("{id}.text")).is_some());
     panel.show_reasoning = false;
     assert!(node(&render(&panel), &format!("{id}.toggle")).is_none());
@@ -313,9 +326,11 @@ fn harness_cpu_layout_keeps_grouped_activity_and_composer_inside_the_panel() {
     assert!(input.y >= composer.y && input.bottom() <= composer.bottom() + 1.0);
     assert!(reasoning.x >= composer.x && reasoning.right() <= composer.right() + 1.0);
     assert!(composer.bottom() <= 641.0);
-    assert!(rendered.frame.text_requests.iter().any(|request| request
-        .text_key
-        .contains("Vista de prueba \u{00b7}")));
+    assert!(rendered
+        .frame
+        .text_requests
+        .iter()
+        .any(|request| request.text_key.contains("Vista de prueba \u{00b7}")));
     assert!(rendered
         .frame
         .layout_boxes
@@ -341,12 +356,8 @@ fn harness_workspace_tools_are_compact_and_failures_remain_visible() {
         .unwrap(),
     );
     tool.role = MessageRole::Tool;
-    let height = estimated_message_height_with_variant(
-        &tool,
-        700.0,
-        AgentSurfaceVariant::Embedded,
-        false,
-    );
+    let height =
+        estimated_message_height_with_variant(&tool, 700.0, AgentSurfaceVariant::Embedded, false);
     assert!(height < 70.0);
     let card = message_card_with_variant(
         StudioUiPalette::IndustrialDark,
@@ -362,12 +373,8 @@ fn harness_workspace_tools_are_compact_and_failures_remain_visible() {
     tool.content = "Error: Verification failed".into();
     assert!(tool_needs_attention(&tool));
     assert!(
-        estimated_message_height_with_variant(
-            &tool,
-            700.0,
-            AgentSurfaceVariant::Embedded,
-            false
-        ) > height
+        estimated_message_height_with_variant(&tool, 700.0, AgentSurfaceVariant::Embedded, false)
+            > height
     );
 }
 
@@ -597,10 +604,8 @@ fn session_rows_keep_distinct_vertical_tracks() {
             )),
     );
     let mut session = UiSurfaceSession::default();
-    let frame =
-        session.build_frame_with_resolved_text(&surface, 280, 180, [0, 0, 0, 255], |key| {
-            key.to_string()
-        });
+    let frame = session
+        .build_frame_with_resolved_text(&surface, 280, 180, [0, 0, 0, 255], |key| key.to_string());
     let first = frame
         .layout_boxes
         .iter()
@@ -646,10 +651,8 @@ fn message_rows_reserve_height_instead_of_overlapping() {
             )),
     );
     let mut session = UiSurfaceSession::default();
-    let frame =
-        session.build_frame_with_resolved_text(&surface, 400, 240, [0, 0, 0, 255], |key| {
-            key.to_string()
-        });
+    let frame = session
+        .build_frame_with_resolved_text(&surface, 400, 240, [0, 0, 0, 255], |key| key.to_string());
     let first_row = frame
         .layout_boxes
         .iter()
@@ -697,12 +700,16 @@ fn wrapped_message_rows_advance_by_their_measured_height() {
     );
     let mut session = UiSurfaceSession::default();
     let frame =
-        session.build_frame_with_resolved_text(&surface, 300, 240, [0, 0, 0, 255], |key| {
-            match key {
+        session.build_frame_with_resolved_text(
+            &surface,
+            300,
+            240,
+            [0, 0, 0, 255],
+            |key| match key {
                 "app.agent_label" => "Agent".to_string(),
                 _ => key.to_string(),
-            }
-        });
+            },
+        );
     let first_row = frame
         .layout_boxes
         .iter()
@@ -840,10 +847,8 @@ fn selector_click_dispatches_the_shared_select_contract() {
         1.0,
     );
     let mut session = UiSurfaceSession::default();
-    let frame =
-        session.build_frame_with_resolved_text(&surface, 720, 400, [0, 0, 0, 255], |key| {
-            key.to_string()
-        });
+    let frame = session
+        .build_frame_with_resolved_text(&surface, 720, 400, [0, 0, 0, 255], |key| key.to_string());
     let trigger = frame
         .layout_boxes
         .iter()
@@ -895,10 +900,8 @@ fn model_menu_custom_id_action_is_reachable_and_compact_selectors_keep_their_wid
         1.0,
     );
     let mut session = UiSurfaceSession::default();
-    let frame =
-        session.build_frame_with_resolved_text(&surface, 720, 400, [0, 0, 0, 255], |key| {
-            key.to_string()
-        });
+    let frame = session
+        .build_frame_with_resolved_text(&surface, 720, 400, [0, 0, 0, 255], |key| key.to_string());
     // The single-field custom model entry lives inline in the picker: the
     // old separate add-model dialog is gone.
     let confirm = frame
@@ -1003,9 +1006,8 @@ fn dock_frame(
         1.0,
     );
     let mut session = UiSurfaceSession::default();
-    session.build_frame_with_resolved_text(&surface, 800, 800, [0, 0, 0, 255], |key| {
-        key.to_string()
-    })
+    session
+        .build_frame_with_resolved_text(&surface, 800, 800, [0, 0, 0, 255], |key| key.to_string())
 }
 
 #[test]

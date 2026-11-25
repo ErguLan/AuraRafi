@@ -116,15 +116,24 @@ mod tests {
     fn normalized_rect_maps_to_target_pixels() {
         let rect = ViewportRect::from_normalized([0.25, 0.1, 0.5, 0.6], TARGET);
         assert_eq!(rect.pixels, [320, 72, 640, 432]);
-        assert_eq!([rect.x, rect.y, rect.width, rect.height], [320., 72., 640., 432.]);
+        assert_eq!(
+            [rect.x, rect.y, rect.width, rect.height],
+            [320., 72., 640., 432.]
+        );
     }
 
     #[test]
     fn default_viewport_covers_the_full_target() {
-        assert_eq!(validate_viewport([0., 0., 1., 1.]).unwrap(), [0., 0., 1., 1.]);
+        assert_eq!(
+            validate_viewport([0., 0., 1., 1.]).unwrap(),
+            [0., 0., 1., 1.]
+        );
         let rect = ViewportRect::from_normalized([0., 0., 1., 1.], [640, 360]);
         assert_eq!(rect.pixels, [0, 0, 640, 360]);
-        assert_eq!(ViewportRect::for_mode(rect, DrawMode::Overlay, [640, 360]), rect);
+        assert_eq!(
+            ViewportRect::for_mode(rect, DrawMode::Overlay, [640, 360]),
+            rect
+        );
     }
 
     #[test]
@@ -133,12 +142,18 @@ mod tests {
         let full = ViewportRect::full(TARGET);
         for mode in [
             DrawMode::Scene,
+            DrawMode::SceneTwoSided,
+            DrawMode::SceneTransparent,
+            DrawMode::SceneTransparentTwoSided,
             DrawMode::DepthReadOnly,
             DrawMode::SceneNoDepth,
         ] {
             assert_eq!(ViewportRect::for_mode(scene, mode, TARGET), scene);
         }
-        assert_eq!(ViewportRect::for_mode(scene, DrawMode::Overlay, TARGET), full);
+        assert_eq!(
+            ViewportRect::for_mode(scene, DrawMode::Overlay, TARGET),
+            full
+        );
     }
 
     #[test]

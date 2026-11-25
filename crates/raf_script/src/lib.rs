@@ -27,6 +27,7 @@ pub mod lifetime;
 pub mod node_handle;
 pub mod physics_api;
 pub mod prelude;
+pub mod quality_api;
 pub mod query_api;
 pub mod reference_analysis;
 pub mod references;

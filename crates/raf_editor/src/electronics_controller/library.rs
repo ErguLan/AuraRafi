@@ -56,7 +56,6 @@ impl NativeElectronicsEditor {
                 && self.pcb.footprint_assets.contains_key(&placement.footprint)
         })
     }
-
 }
 
 pub(super) fn component_asset_key(kind_label: &str) -> &'static str {

@@ -29,13 +29,21 @@ pub(super) fn workspace_header(
         })
         .with_child(button(
             "agent.workspace.back",
-            if is_lab { "lab.back" } else { "agent_workspace.projects" },
+            if is_lab {
+                "lab.back"
+            } else {
+                "agent_workspace.projects"
+            },
             "agent.workspace.back",
             tokens,
         ))
         .with_child(
             UiNode::new("agent.workspace.title", UiNodeKind::Label)
-                .with_text_key(if is_lab { "lab.title" } else { "agent_workspace.title" })
+                .with_text_key(if is_lab {
+                    "lab.title"
+                } else {
+                    "agent_workspace.title"
+                })
                 .with_event(UiEventBinding::command(
                     UiEventKind::DragStart,
                     "window.drag",
@@ -57,7 +65,11 @@ pub(super) fn workspace_header(
         )
         .with_child(button(
             "agent.workspace.settings",
-                if is_lab { "lab.provider" } else { "app.settings_menu" },
+            if is_lab {
+                "lab.provider"
+            } else {
+                "app.settings_menu"
+            },
             "agent.workspace.settings",
             tokens,
         ))
@@ -84,8 +96,12 @@ pub(super) fn workspace_header(
             preview.disabled(ready.is_none())
         });
     if is_lab {
-        header.children.retain(|child| !matches!(child.id.as_str(),
-            "agent.workspace.review" | "agent.workspace.preview" | "agent.workspace.editor"));
+        header.children.retain(|child| {
+            !matches!(
+                child.id.as_str(),
+                "agent.workspace.review" | "agent.workspace.preview" | "agent.workspace.editor"
+            )
+        });
     }
     header = header
         .with_child(window_button(

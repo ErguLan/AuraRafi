@@ -12,7 +12,7 @@ use crate::cli::attach::{
     execute_task_cli, launch_editor_if_needed, open_editor_project, project_save_request,
     run_attached_cli,
 };
-use crate::cli::mcp::run_mcp_stdio;
+use crate::cli::mcp::{run_mcp_stdio, McpHost};
 use crate::cli::output::{print_editors, print_project_path, print_response};
 use crate::cli::{CliResult, PROGRAM};
 use crate::discovery;
@@ -69,6 +69,12 @@ pub(crate) fn run_cli(arguments: Vec<String>) -> CliResult<()> {    let options 
         }
         let client = AttachedClient::connect(&attach_path, "raf-mcp")?;
         return run_mcp_stdio(client);
+    }
+    // Without an explicit project the MCP server starts unattached: it never
+    // launches or opens a project, and resolves the live editor per call via
+    // raf_editors / raf_attach or a single-live-editor auto-attach.
+    if command == "mcp" && !options.has("project") {
+        return run_mcp_stdio(McpHost::unattached());
     }
     let mut engine = HeadlessEngine::new(project_path.as_deref())?;
 

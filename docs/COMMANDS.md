@@ -14,11 +14,14 @@ Presentation source checks: `python -B tools/check_rafui_cost_contracts.py`.
 This catches direct blocking operations in the guarded modules only; it is
 not a proof about indirect calls, aliases, macros, or overall frame cost.
 
-## Precise shape dimensions
+## Shapes and precise dimensions
 
-The shared shape catalog includes `capsule`: Y-aligned, centered, 1 m diameter
-and 2 m total height at scale [1, 1, 1]. It uses existing collider types rather
-than introducing a dedicated runtime capsule collider.
+The shared shape catalog contains `empty`, `cube`, `sphere`, `plane`,
+`cylinder`, `capsule`, `wedge`, `torus`, `prism` and `sphere2d`. Capsule is
+Y-aligned, centered, 1 m diameter and 2 m total height at scale [1, 1, 1]. It
+uses existing collider types rather than introducing a dedicated runtime
+capsule collider. Sphere2D is a camera-facing billboard disk that reads as a
+sphere while remaining flat; it is not a second sphere volume.
 
 `game.add` and `game.update` accept optional local `size: [X,Y,Z]` in metres.
 The command computes scale from the same descriptor used by the Inspector,
@@ -27,6 +30,8 @@ same request are rejected without editing the scene. A Plane has zero Y size.
 
 ```text
 /game.add primitive=capsule name=Marker size=[1,2,1]
+/game.add primitive=wedge name=Ramp size=[2,1,3]
+/game.add primitive=sphere2d name=OrbGlow
 /game.update target=Marker size=[2,6,2]
 ```
 
@@ -39,7 +44,188 @@ Typed tool arguments use the same contract:
 Hierarchy insertion parent is a native UI context. Explicit parents prevail;
 CLI/MCP defaults remain unchanged. Asset placement preview, thumbnail generation
 and Hierarchy view-state persistence never modify the user's scene on their own.
-GLB/GLTF files are discoverable, but model import/placement remains a 0.12 item.
+
+## 3D mesh assets
+
+`/game.mesh_asset` inspects and places GLB/GLTF meshes. Paths are relative
+to the project `assets` directory; the command accepts `.glb` or `.gltf` only.
+
+```text
+/game.mesh_asset action=inspect path=models/shelf.glb
+/game.mesh_asset action=import path=models/shelf.glb
+/game.mesh_asset action=place path=models/shelf.glb name=Shelf parent=Store
+/game.mesh_asset action=place mesh_asset={"path":"models/shelf.glb","node":2,"import_scale":0.01} name=Shelf
+/game.mesh_asset action=rig path=models/character.glb clip=0
+/game.mesh_asset action=remove target=Shelf
+```
+
+Placement parameters are `name`, `parent` and `transform`; `action=place` also
+accepts a `mesh_asset` reference object with the cached `path`, `node`,
+`import_scale` and `content_hash`. `node` selects one source node from a
+multi-node glTF; omitting it flattens every static mesh. `import_scale` is a
+uniform scale applied after the node transform. `action=import` copies a model
+package into the project assets; absolute host paths require `host=true` from
+the editor import action only.
+
+The importer is deliberately bounded: at most 64 MiB per model file, 500,000
+triangles, 2,000,000 vertices, 64 materials, 32 textures, 10,000 nodes and node
+depth 32. External `.bin` and texture references are confined to the model
+file's directory. Skins, morph targets and animation playback are not part of
+the static placement path. A failed import returns an explicit error and never
+substitutes placeholder geometry.
+
+`action=rig` places the source hierarchy and its skinned geometry. `clip`
+selects an embedded animation by zero-based index and defaults to the first
+clip, when one exists. The command returns the placed root and the available
+clip names. In the editor, use **Assets → Place with Skeleton** and publish the
+rig through **Animations → Save rig as asset** to create a reusable clip.
+
+`game.animation.bake` returns a sampled transform clip at 12–120 fps.
+`game.animation.retarget` returns a transform clip transferred between the local
+rest poses of two hierarchies. Both return an `animation` value that can be
+applied through `game.update`. Bindings use explicit, one-to-one node paths.
+
+```text
+/game.animation.bake target=Character fps=30
+/game.animation.retarget target=NewCharacter source=Character bindings=[{"source":["Hips","Foot"],"target":["Pelvis","Shoe"]}]
+```
+
+`game.add` and `game.update` also accept the scene surface and pivot contract.
+The optional `surface` object controls base-color appearance:
+
+```json
+{"texture":"assets/generated/wall.png","tiling":[2,2],"unlit":false,"double_sided":true,"opacity":1.0}
+```
+
+`pivot` is `center`, `base` or `corner` and chooses the local anchor used for
+placement and scaling. `models/shelf.glb` paths are stored without the `assets/`
+prefix in `MeshAssetRef`; traversal outside assets is rejected.
+
+## Entity lights
+
+`/game.light` creates, updates or removes a point/spot light component on an
+ordinary scene entity:
+
+```text
+/game.light action=create name=Lamp kind=point intensity=2 range=6
+/game.light action=update target=Lamp kind=spot outer_cone_degrees=48
+/game.light action=remove target=Lamp
+```
+
+`game.add` and `game.update` accept the same component as a `light` object:
+
+```json
+{"target":"Lamp","light":{"kind":"spot","color":[255,226,170],"intensity":1.5,"range":8,"inner_cone_degrees":28,"outer_cone_degrees":52,"enabled":true}}
+```
+
+The `light` object replaces the component; pass `null` on `game.update` to
+remove it. Use `game.light action=update` when only some light values should
+change.
+
+Point lights emit in every direction. Spot lights emit along the entity's local
+-Z axis and use `inner_cone_degrees`/`outer_cone_degrees`. Colors are RGB bytes in sRGB,
+intensity is a multiplier from 0 to 64, range is metres from 0.05 to 10000, and
+spot cones require `0 <= inner < outer <= 179`. The authoritative validation is
+`SceneLight::validate` in `raf_core`; rejected values do not mutate the scene.
+
+## Entity audio
+
+`/game.audio` attaches a mixer bus and optional 3D attenuation to an ordinary
+scene entity. The clip is relative to the project `assets` directory:
+
+```text
+/game.audio action=attach target=Shelf clip=audio/checkout.wav bus=sfx spatial=true
+/game.audio action=update target=Shelf volume=0.6 looping=true
+/game.audio action=remove target=Shelf
+```
+
+`spatial=true` follows the entity's world transform and uses the active camera
+as the listener. `min_distance` is full volume, `max_distance` is silence, and
+`rolloff` shapes the distance curve. Buses are `master`, `music`, `sfx`, `voice`
+and `ambient`. The native output path currently decodes PCM WAV; MP3/OGG/FLAC
+are catalogued but not decoded. See [AUDIO.md](AUDIO.md).
+
+Entity lights are bounded: at most 8 enabled local lights per frame are chosen
+by influence around the camera focus. Higher render profiles do not raise this
+cap yet. Entity lights do not cast shadows. Sun, sky and ambient lighting remain
+world settings through `lighting.inspect`, `lighting.set` and `lighting.reset`.
+The Agent tools `light_create` and `light_update` route through `game.add` and
+`game.update` rather than a second light implementation.
+
+## Mesh editing
+
+`/game.mesh` enters and edits the persistent triangle topology stored on a scene
+entity. `action=inspect` reports counts and bounds; add `topology=true` to return
+`positions` and `indices`. `action=enter` converts a primitive into editable
+topology, `action=set` replaces `vertices`/`indices`, `move` and `scale` edit
+vertex indices, and `extrude`, `inset`, `subdivide` and `delete` operate on face
+indices (`face=n` is shorthand for `faces=[n]`). `revert` restores the parametric
+primitive and `apply` validates the current mesh without changing the scene.
+
+```text
+/game.mesh action=inspect target=Cube topology=true
+/game.mesh action=enter target=Cube
+/game.mesh action=extrude target=Cube faces=[0] distance=0.25
+/game.mesh action=revert target=Cube
+```
+
+The native Agent tool `mesh_edit` routes to this command for Game authoring and
+gameplay intent. In the editor, Tab Mode is the interactive equivalent; see
+[MESH_EDITING.md](MESH_EDITING.md) for the keys, persistence and limits.
+Imported GLB/GLTF meshes are not editable yet. Indices are local to the entity;
+the entity transform still applies.
+
+## Spawn markers and trigger volumes
+
+`/game.spawn` attaches, updates or removes a `SpawnMarker` component with a
+bounded `tag` and `radius`. `/game.trigger` marks an entity as a static trigger
+volume, creates an AABB collider from the primitive when the entity has none, and
+reuses the existing `TriggerEnter`/`TriggerStay`/`TriggerExit` runtime events.
+
+```text
+/game.spawn action=attach target=PlayerStart tag=player.start radius=0.8
+/game.trigger action=attach target=CheckoutZone
+```
+
+Hierarchy classifies these entities as `spawn` and `trigger` types and supports
+`type:spawn`, `type:trigger`, `type:assembly` and their aliases.
+
+## Linked Assemblies
+
+Assembly instances keep their own nodes and values, plus a
+`linked_assembly.source`, `version` and `source_hash`. The legacy
+`.prefab.ron` extension and `prefab.capture`/`prefab.instantiate` command names
+remain for compatibility.
+
+```text
+/prefab.capture target=Rig file=parts/rig.prefab.ron
+/prefab.instantiate file=parts/rig.prefab.ron
+/assembly.revert target=Rig
+/assembly.update target=Rig
+/assembly.make_unique target=Rig
+```
+
+`revert` reloads the source and replaces the instance, preserving the root
+identity, transform, color, visibility, lock and variables. `update` preserves
+the whole root and replaces children. `make_unique` detaches the instance
+without changing current values. All three validate nested sources, reject
+cycles (depth 8, 4096 nodes) and reuse scene slots before growing the scene. See
+[ASSEMBLIES.md](ASSEMBLIES.md).
+
+## Camera activation and look-through
+
+`/game.camera` accepts
+`action=create|add|set|remove|activate|look_through|editor_view`.
+`create` makes a new camera entity; `add`/`set` attach or configure a component
+on an existing entity; `activate` makes it the active Game camera and
+`look_through` renders the editor viewport through that camera with a 90% safe
+frame and rule-of-thirds guides. Escape or `action=editor_view` restores the
+editor navigation camera. The optional lens fields are `fov`, `near`, `far`,
+`orthographic` and `ortho_scale`. Activation never starts Play and does not
+overwrite the startup camera project setting.
+
+The Agent tool `camera_activate` is a typed wrapper for
+`game.camera action=activate`. `scene_camera` covers all camera actions.
 
 ## Runtime service authoring
 
@@ -230,6 +416,7 @@ Games:
 - `/game.color`, `/game.arrange_grid`
 - `/game.generate_prefab`, `/game.snap`, `/game.update`, `/game.batch`
 - `/game.create_group`, `/game.reparent`, `/game.build`, `/game.reconcile`, `/game.repair`
+- `/game.camera`, `/game.mesh_asset`, `/game.light`, `/game.audio`, `/game.mesh`
 - `/game.describe_scene`, `/game.focus`
 
 Native Nodes authoring command IDs (emitted by the retained Nodes surface):
@@ -249,11 +436,14 @@ persisted with `nodes.ron` by `/project.save`.
 The native Agent uses a semantic tool layer over these commands. Its compact
 tools are `project_summary`, `scene_outline`, `scene_query`,
 `scene_spatial_map`, `scene_check_overlaps`, `scene_diff`, `scene_design_audit`,
-`scene_inspect`, `selection_get`, `assets_catalog`, `assets_recommend`,
-`asset_inspect`, `scripts_catalog`, `project_health`, and `scene_verify`.
+`scene_inspect`, `mesh_asset_inspect`, `selection_get`, `assets_catalog`,
+`assets_recommend`, `asset_inspect`, `scripts_catalog`, `project_health`, and
+`scene_verify`.
 Authoring tools such as `scene_build`, `scene_reconcile`, `scene_repair`, `scene_create_group`, `scene_create`,
 `scene_update`, `scene_reparent`, `scene_delete`, `scene_duplicate`,
-`scene_snap`, `scene_arrange`, `scene_instantiate_template`, and `scene_batch` are only
+`scene_snap`, `scene_arrange`, `scene_instantiate_template`, `light_create`,
+`light_update`, `mesh_asset_place`, `mesh_edit`, `scene_camera`, `camera_activate`,
+`scene_component`, and `scene_batch` are only
 advertised when the project domain and prompt require them. `scene_build`
 creates groups before entities, accepts child groups in any order, and accepts
 group references by name or path;
@@ -500,13 +690,14 @@ Limits:
 
 ## Extending Commands
 
-Camera authoring uses `/game.camera action=create|add|remove|set` with an
-explicit target for existing entities. Optional lens fields are `fov`,
-`near`, `far`, `orthographic` and `ortho_scale`; create also accepts
-`name` and `parent`. It preserves a Part's geometry, validates before
-mutation and never starts Play. Native Inspector/Hierarchy use this same
-kernel and scene undo history; attached changes retain confirmation/revision
-and undo-token requirements.
+Camera authoring uses `/game.camera action=create|add|set|remove|activate|look_through`
+with an explicit target for existing entities. Optional lens fields are `fov`,
+`near`, `far`, `orthographic` and `ortho_scale`; create also accepts `name` and
+`parent`. It preserves a Part's geometry, validates before mutation and never
+starts Play. Native Inspector/Hierarchy use this same kernel and scene undo
+history; attached changes retain confirmation/revision and undo-token
+requirements. `camera_activate` is the compact Agent wrapper for
+`action=activate`.
 
 `/script.compile_nodes file=<project-relative nodes.ron>` compiles a saved
 graph and returns real Rhai source in JSON. It does not write a file or

@@ -294,6 +294,10 @@ impl Backend for Metal {
             depth.set_clear_depth(1.);
             let command = self.queue.new_command_buffer();
             let render = command.new_render_command_encoder(pass);
+            // Scene meshes are authored counter-clockwise when seen from
+            // outside. Metal defaults to clockwise, so pin the winding once per
+            // encoder and only vary the cull mode per batch.
+            render.set_front_facing_winding(MTLWinding::CounterClockwise);
             render.set_vertex_buffer(0, Some(&resident.vertices), 0);
             render.set_vertex_buffer(1, Some(&resident.instances), 0);
             let uniforms = frame.uniforms(plan.extent);
@@ -325,17 +329,41 @@ impl Backend for Metal {
                 for batch in batches {
                     if bound != Some(batch.mode) {
                         bound = Some(batch.mode);
-                        let (pipeline, depth) = match batch.mode {
-                            DrawMode::Scene => (&self.pipelines.scene, &self.pipelines.scene_depth),
-                            DrawMode::DepthReadOnly => {
-                                (&self.pipelines.scene, &self.pipelines.read_depth)
-                            }
-                            DrawMode::Overlay | DrawMode::SceneNoDepth => {
-                                (&self.pipelines.overlay, &self.pipelines.overlay_depth)
-                            }
+                        let (pipeline, depth, cull) = match batch.mode {
+                            DrawMode::Scene => (
+                                &self.pipelines.scene,
+                                &self.pipelines.scene_depth,
+                                MTLCullMode::Back,
+                            ),
+                            DrawMode::SceneTwoSided => (
+                                &self.pipelines.scene,
+                                &self.pipelines.scene_depth,
+                                MTLCullMode::None,
+                            ),
+                            DrawMode::SceneTransparent => (
+                                &self.pipelines.scene,
+                                &self.pipelines.read_depth,
+                                MTLCullMode::Back,
+                            ),
+                            DrawMode::SceneTransparentTwoSided => (
+                                &self.pipelines.scene,
+                                &self.pipelines.read_depth,
+                                MTLCullMode::None,
+                            ),
+                            DrawMode::DepthReadOnly => (
+                                &self.pipelines.scene,
+                                &self.pipelines.read_depth,
+                                MTLCullMode::None,
+                            ),
+                            DrawMode::Overlay | DrawMode::SceneNoDepth => (
+                                &self.pipelines.overlay,
+                                &self.pipelines.overlay_depth,
+                                MTLCullMode::None,
+                            ),
                         };
                         render.set_render_pipeline_state(pipeline);
                         render.set_depth_stencil_state(depth);
+                        render.set_cull_mode(cull);
                         let target = ViewportRect::for_mode(scene, batch.mode, plan.extent);
                         set_viewport(render, target);
                     }
@@ -495,7 +523,12 @@ fn set_viewport(render: &RenderCommandEncoderRef, rect: ViewportRect) {
         zfar: 1.,
     });
     let [x, y, width, height] = rect.pixels;
-    render.set_scissor_rect(x.into(), y.into(), width.into(), height.into());
+    render.set_scissor_rect(MTLScissorRect {
+        x: x.into(),
+        y: y.into(),
+        width: width.into(),
+        height: height.into(),
+    });
 }
 
 fn finish(command: &CommandBufferRef) -> Result<()> {

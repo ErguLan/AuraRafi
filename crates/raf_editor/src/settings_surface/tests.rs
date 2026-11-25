@@ -1,7 +1,7 @@
 //! Settings surface regressions.
 
 use raf_core::ai::AiProvider;
-use raf_core::config::EngineSettings;
+use raf_core::config::{EngineSettings, Language};
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiAction, UiCompactMode, UiFlow, UiNode, UiNodeKind, UiSizeMode,
     UiSurfaceMaterial,
@@ -11,7 +11,8 @@ use raf_ui::UiRect;
 use super::ai::ai;
 use super::{
     build_settings_surface, build_settings_surface_with_state, provider_id, SettingsSection,
-    SETTINGS_COMPACT_BREAKPOINT, SETTINGS_NAV_WIDTH, SETTINGS_ROW_HEIGHT,
+    PERFORMANCE_FILTER_COMMAND, SETTINGS_COMPACT_BREAKPOINT, SETTINGS_IMPACT_ROW_HEIGHT,
+    SETTINGS_IMPACT_STACKED_ROW_HEIGHT, SETTINGS_NAV_WIDTH, SETTINGS_ROW_HEIGHT,
     SETTINGS_STACKED_ROW_HEIGHT,
 };
 
@@ -89,6 +90,18 @@ fn find_node<'a>(node: &'a UiNode, id: &str) -> Option<&'a UiNode> {
         return Some(node);
     }
     node.children.iter().find_map(|child| find_node(child, id))
+}
+
+fn layout_rect(
+    frame: &raf_render::api_graphic_basic::ui_surface::UiSurfaceFrame,
+    id: &str,
+) -> UiRect {
+    frame
+        .layout_boxes
+        .iter()
+        .find(|layout| layout.id == id)
+        .unwrap_or_else(|| panic!("missing layout box {id}"))
+        .rect
 }
 
 fn collect_nodes_with_class<'a>(node: &'a UiNode, class: &str, output: &mut Vec<&'a UiNode>) {
@@ -552,6 +565,7 @@ fn settings_footer_reports_dirty_and_clean_states() {
         &[],
         "",
         false,
+        false,
     );
     let dirty = super::build_settings_surface_with_state_and_api_keys(
         StudioUiPalette::IndustrialDark,
@@ -563,6 +577,7 @@ fn settings_footer_reports_dirty_and_clean_states() {
         &[],
         "",
         true,
+        false,
     );
     assert_eq!(
         find_node(&clean.root, "settings.footer.status-label")
@@ -574,4 +589,216 @@ fn settings_footer_reports_dirty_and_clean_states() {
             .and_then(|node| node.text_key.as_deref()),
         Some("app.unsaved_changes_title")
     );
+}
+
+#[test]
+fn settings_performance_metadata_matches_the_visible_rows() {
+    let palette = StudioUiPalette::IndustrialDark;
+    let expected = [
+        (SettingsSection::Appearance, 3, 0),
+        (SettingsSection::Performance, 12, 6),
+        (SettingsSection::Editor, 5, 0),
+        (SettingsSection::Viewport, 4, 0),
+        (SettingsSection::Electronics, 2, 0),
+        (SettingsSection::Scripting, 0, 0),
+        (SettingsSection::Runtime, 8, 1),
+        (SettingsSection::Ai, 0, 0),
+        (SettingsSection::Platform, 1, 1),
+    ];
+
+    for (section, performance, high) in expected {
+        let surface = build_settings_surface(palette, &EngineSettings::default(), section);
+        let card = find_node(&surface.root, section.key())
+            .unwrap_or_else(|| panic!("missing card for {section:?}"));
+        let summary = super::impact::summarize(card);
+        assert_eq!(
+            (summary.performance, summary.high),
+            (performance, high),
+            "unexpected performance metadata for {section:?}"
+        );
+
+        let filter = find_node(&surface.root, "settings.performance-filter");
+        assert_eq!(
+            filter.is_some(),
+            performance > 0,
+            "filter visibility mismatch for {section:?}"
+        );
+        if performance > 0 {
+            let summary_label =
+                find_node(&surface.root, "settings.impact.summary").expect("section summary label");
+            let text = summary_label.text_value.as_deref().unwrap_or_default();
+            assert!(text.contains(&performance.to_string()));
+            if high > 0 {
+                assert!(text.contains(&high.to_string()));
+            }
+        }
+    }
+
+    let surface = build_settings_surface(
+        palette,
+        &EngineSettings::default(),
+        SettingsSection::Performance,
+    );
+    let performance = find_node(&surface.root, "settings.quality.impact.performance")
+        .expect("quality performance badge");
+    assert!(performance
+        .classes
+        .iter()
+        .any(|class| class == "settings-impact-performance-high"));
+    assert_eq!(
+        performance.tooltip_key.as_deref(),
+        Some("settings.impact.tooltip.performance.high.lowers_cost")
+    );
+    assert!(find_node(&surface.root, "settings.quality.impact.visual").is_some());
+    let quality_row = find_node(&surface.root, "settings.quality.row").expect("quality row");
+    assert_eq!(quality_row.layout.basis[1], SETTINGS_IMPACT_ROW_HEIGHT);
+    assert_eq!(
+        quality_row.layout.responsive[0].basis,
+        Some([0.0, SETTINGS_IMPACT_STACKED_ROW_HEIGHT])
+    );
+}
+
+#[test]
+fn performance_filter_hides_only_rows_without_a_performance_contract() {
+    let palette = StudioUiPalette::IndustrialDark;
+    let rect = UiRect::new(0.0, 0.0, 1080.0, 720.0);
+    let normal = super::build_settings_surface_with_state_and_api_keys(
+        palette,
+        &EngineSettings::default(),
+        SettingsSection::Performance,
+        rect,
+        "",
+        None,
+        &[],
+        "",
+        false,
+        false,
+    );
+    let filter =
+        find_node(&normal.root, "settings.performance-filter").expect("performance filter");
+    assert!(!filter
+        .classes
+        .iter()
+        .any(|class| class == "settings-impact-filter-active"));
+    assert!(filter.event_handlers.iter().any(|binding| matches!(
+        &binding.action,
+        UiAction::Command { name } if name == PERFORMANCE_FILTER_COMMAND
+    )));
+    assert!(
+        !find_node(&normal.root, "settings.particle_preview.time_scale.row")
+            .expect("time scale row")
+            .hidden
+    );
+
+    let filtered = super::build_settings_surface_with_state_and_api_keys(
+        palette,
+        &EngineSettings::default(),
+        SettingsSection::Performance,
+        rect,
+        "",
+        None,
+        &[],
+        "",
+        false,
+        true,
+    );
+    assert!(find_node(&filtered.root, "settings.performance-filter")
+        .expect("performance filter")
+        .classes
+        .iter()
+        .any(|class| class == "settings-impact-filter-active"));
+    assert!(
+        !find_node(&filtered.root, "settings.quality.row")
+            .expect("quality row")
+            .hidden
+    );
+    assert!(
+        find_node(&filtered.root, "settings.particle_preview.time_scale.row")
+            .expect("time scale row")
+            .hidden
+    );
+    assert!(
+        find_node(&filtered.root, "settings.particle_preview.wind_x.row")
+            .expect("wind row")
+            .hidden
+    );
+
+    // A section without performance rows shows the empty state, but keeps the
+    // active filter control visible so the user can always turn it off.
+    let ai = super::build_settings_surface_with_state_and_api_keys(
+        palette,
+        &EngineSettings::default(),
+        SettingsSection::Ai,
+        rect,
+        "",
+        None,
+        &[],
+        "",
+        false,
+        true,
+    );
+    assert!(find_node(&ai.root, "settings.performance-filter")
+        .expect("active filter remains available in empty sections")
+        .classes
+        .iter()
+        .any(|class| class == "settings-impact-filter-active"));
+    assert!(find_node(&ai.root, "settings.ai-persist-credentials.row").is_none());
+    assert!(find_node(&ai.root, "settings.ai-provider.openrouter").is_none());
+    assert_eq!(
+        find_node(&ai.root, "settings.no-results")
+            .expect("empty performance section message")
+            .text_key
+            .as_deref(),
+        Some("settings.impact.no_results")
+    );
+}
+
+#[test]
+fn impact_badges_and_filter_stay_inside_the_settings_header_and_title_line() {
+    let palette = StudioUiPalette::IndustrialDark;
+    for (width, height, language) in [
+        (1080.0, 720.0, Language::English),
+        (720.0, 520.0, Language::English),
+        (720.0, 520.0, Language::Spanish),
+    ] {
+        let surface = super::build_settings_surface_with_state_and_api_keys(
+            palette,
+            &EngineSettings::default(),
+            SettingsSection::Performance,
+            UiRect::new(0.0, 0.0, width, height),
+            "",
+            None,
+            &[],
+            "",
+            false,
+            false,
+        );
+        let mut session = UiSurfaceSession::default();
+        let frame = session.build_frame_with_resolved_text(
+            &surface,
+            width as u32,
+            height as u32,
+            [0, 0, 0, 255],
+            |key| raf_core::i18n::t(key, language),
+        );
+
+        let header = layout_rect(&frame, "settings.workspace.header-content");
+        let header_copy = layout_rect(&frame, "settings.workspace.header-copy");
+        let filter = layout_rect(&frame, "settings.performance-filter");
+        let summary = layout_rect(&frame, "settings.impact.summary");
+        assert!(header_copy.right() <= filter.x + 0.01);
+        assert!(summary.right() <= header_copy.right() + 0.01);
+        assert!(summary.bottom() <= header_copy.bottom() + 0.01);
+        assert!(filter.right() <= header.right() + 0.01);
+        assert!(filter.bottom() <= header.bottom() + 0.01);
+
+        let copy = layout_rect(&frame, "settings.quality.copy");
+        let label = layout_rect(&frame, "settings.quality.label");
+        let badge = layout_rect(&frame, "settings.quality.impact.performance");
+        let visual = layout_rect(&frame, "settings.quality.impact.visual");
+        assert!(badge.y >= label.bottom() - 0.01);
+        assert!(badge.right() <= copy.right() + 0.01);
+        assert!(visual.right() <= copy.right() + 0.01);
+        assert!(visual.bottom() <= copy.bottom() + 0.01);
+    }
 }

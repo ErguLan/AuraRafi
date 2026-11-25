@@ -1,4 +1,219 @@
 use super::*;
+
+#[test]
+fn animation_action_uses_an_available_variant_and_keeps_held_items() {
+    let (mut scene, owner, head) = rig();
+    let cup = scene.add_root("Cup");
+    let cup = scene.get(cup).unwrap().uuid;
+    let controller = scene.add_root("Controller");
+    let controller = scene.get(controller).unwrap().uuid;
+    let actor = scene.get_mut(owner).unwrap();
+    let rig = actor.animation.as_mut().unwrap();
+    rig.layers[1].start = 0.0;
+    rig.layers[1].fade_in = 0.0;
+    rig.layers[1].fade_out = 0.0;
+    rig.layers[1].action = Some(serde_json::from_value(serde_json::json!({"request":"switch","free_slots":["left_hand","right_hand"],"priority":2,"interruptible":true})).unwrap());
+    let mut elbow = rig.layers[1].clone();
+    elbow.name = "Elbow".into();
+    elbow.tracks[0].keys[0].value.x = 2.0;
+    let action = elbow.action.as_mut().unwrap();
+    action.priority = 1;
+    action.free_slots.clear();
+    rig.layers.push(elbow);
+    actor.set_variable(
+        "animation_action",
+        raf_core::scene::VariableValue::Text("switch".into()),
+    );
+    actor.set_variable(
+        "left_hand",
+        raf_core::scene::VariableValue::Entity(Some(cup)),
+    );
+    actor.set_variable("right_hand", raf_core::scene::VariableValue::Entity(Some(controller)));
+    let mut playback = AnimationPlayback::prepare(&scene).unwrap();
+    playback.tick(&mut scene, 0.0, 0.0, &[], None);
+    assert_eq!(scene.get(head).unwrap().position.x, 2.0);
+    assert_eq!(
+        scene.get(owner).unwrap().get_variable("left_hand"),
+        Some(&raf_core::scene::VariableValue::Entity(Some(cup)))
+    );
+    assert_eq!(scene.get(owner).unwrap().get_variable("right_hand"), Some(&raf_core::scene::VariableValue::Entity(Some(controller))));
+}
+
+#[test]
+fn animation_contact_does_not_cross_a_wall_on_the_first_step() {
+    let mut scene = SceneGraph::new();
+    let actor = scene.add_root("Actor");
+    let upper = scene.add_child(actor, "Upper");
+    let mid = scene.add_child(upper, "Mid");
+    let tip = scene.add_child(mid, "Tip");
+    scene.get_mut(mid).unwrap().position = Vec3::new(0.3, 0.3, 0.0);
+    scene.get_mut(tip).unwrap().position = Vec3::new(0.1, -0.2, 0.0);
+    let trigger = scene.add_root("Switch");
+    scene.get_mut(trigger).unwrap().position = Vec3::X * 0.6;
+    let goal = scene.get(trigger).unwrap().uuid;
+    let wall = scene.add_root("Wall");
+    let wall = scene.get_mut(wall).unwrap();
+    wall.collider.collider_type = ColliderType::Aabb;
+    wall.collider.aabb = Aabb { min: Vec3::new(0.5,-1.0,-1.0), max: Vec3::new(0.53,1.0,1.0) };
+    scene.get_mut(actor).unwrap().animation = Some(serde_json::from_value(serde_json::json!({"layers":[],"contacts":[{
+        "chain":[["Upper"],["Upper","Mid"],["Upper","Mid","Tip"]],"goal":{"target":{"entity":goal,"offset":[0,0,0]}},
+        "pole":[0,1,0],"radius":0.03
+    }]})).unwrap());
+    let mut playback = AnimationPlayback::prepare(&scene).unwrap();
+    let mut physics = crate::physics::PhysicsWorld::prepare(&scene).unwrap();
+    physics.step(&mut scene, 1.0 / 60.0).unwrap();
+    playback.solve_contacts(&mut scene, &mut physics, -Vec3::Y);
+    let x = scene.world_matrix(tip).w_axis.x;
+    assert!((0.46..0.471).contains(&x), "tip crossed obstacle or did not reach it: {x}");
+}
+
+#[test]
+fn animation_motion_matching_selects_the_requested_planar_direction() {
+    let (mut scene, owner, head) = rig();
+    let actor = scene.get_mut(owner).unwrap();
+    actor.rigid_body.enabled = true;
+    actor.rigid_body.body_type = raf_core::scene::RigidBodyType::Kinematic;
+    actor.rigid_body.velocity = Vec3::X * 2.0;
+    let rig = actor.animation.as_mut().unwrap();
+    rig.layers.truncate(1);
+    rig.layers[0].looping = true;
+    rig.layers[0].motion_speed = Some(2.0);
+    let mut strafe = rig.layers[0].clone();
+    strafe.name = "Strafe".into();
+    strafe.motion_heading_degrees = -90.0;
+    strafe.tracks[0].keys[0].value.x = 2.0;
+    rig.layers.push(strafe);
+    rig.motion_match = Some(
+        serde_json::from_value(
+            serde_json::json!({"pose_path":["Head"],"lookahead":0.5,"pose_weight":0.0}),
+        )
+        .unwrap(),
+    );
+    let mut playback = AnimationPlayback::prepare(&scene).unwrap();
+    playback.tick(&mut scene, 0.0, 0.0, &[], Some(-Vec3::Y));
+    assert_eq!(scene.get(head).unwrap().position.x, 2.0);
+}
+
+#[test]
+fn animation_motion_matching_keeps_phase_when_feature_values_tie() {
+    let (mut scene, owner, head) = rig();
+    let actor = scene.get_mut(owner).unwrap();
+    let rig = actor.animation.as_mut().unwrap();
+    rig.layers.truncate(1);
+    let layer = &mut rig.layers[0];
+    layer.looping = true;
+    layer.motion_speed = Some(0.0);
+    layer.tracks[0].keys.truncate(1);
+    layer.tracks.push(serde_json::from_value(serde_json::json!({"path":["Head"],"channel":"rotation","keys":[
+        {"time":0.0,"value":[0,0,0]}, {"time":1.0,"value":[0,0,90]}]})).unwrap());
+    rig.motion_match = Some(serde_json::from_value(serde_json::json!({"pose_path":["Head"],"lookahead":0.5,"pose_weight":1.0})).unwrap());
+    let mut playback = AnimationPlayback::prepare(&scene).unwrap();
+    playback.tick(&mut scene, 0.0, 0.0, &[], None);
+    for tick in 1..=40 { playback.tick(&mut scene, f64::from(tick) / 60.0, 1.0 / 60.0, &[], None); }
+    assert!((scene.get(head).unwrap().rotation.z - 60.0).abs() < 1e-3);
+}
+
+#[test]
+fn animation_ground_contact_places_tip_against_solid_geometry() {
+    let mut scene = SceneGraph::new();
+    let owner = scene.add_root("Character");
+    let leg = scene.add_child(owner, "Leg");
+    let knee = scene.add_child(leg, "Knee");
+    let foot = scene.add_child(knee, "Foot");
+    scene.get_mut(leg).unwrap().position.y = 1.38;
+    scene.get_mut(knee).unwrap().position = Vec3::new(0.0, -0.7, 0.3);
+    scene.get_mut(foot).unwrap().position = Vec3::new(0.0, -0.5, -0.3);
+    let floor = scene.add_root("Floor");
+    let floor = scene.get_mut(floor).unwrap();
+    floor.collider.collider_type = ColliderType::Aabb;
+    floor.collider.aabb = raf_core::scene::Aabb {
+        min: Vec3::new(-3.0, -1.0, -3.0),
+        max: Vec3::new(3.0, 0.0, 3.0),
+    };
+    scene.get_mut(owner).unwrap().animation = Some(serde_json::from_value(serde_json::json!({"layers":[],"contacts":[{
+        "chain":[["Leg"],["Leg","Knee"],["Leg","Knee","Foot"]],
+        "goal":{"ground":{"above":0.1,"below":0.35,"minimum_alignment":0.5}},"pole":[0,0,1],"radius":0.07
+    }]})).unwrap());
+    let mut physics = crate::physics::PhysicsWorld::prepare(&scene).unwrap();
+    let mut playback = AnimationPlayback::prepare(&scene).unwrap();
+    physics.step(&mut scene, 1.0 / 60.0).unwrap();
+    playback.solve_contacts(&mut scene, &mut physics, -Vec3::Y);
+    assert!((scene.world_matrix(foot).w_axis.y - 0.07).abs() < 0.01);
+}
+
+#[test]
+fn animation_physics_follow_blends_joint_and_bounds_motor_torque() {
+    let (mut scene, owner, head) = rig();
+    let body_id = scene.add_root("ExternalBody");
+    let body = scene.get_mut(body_id).unwrap();
+    body.position.x = 2.0;
+    body.rotation.z = 45.0;
+    body.rigid_body.enabled = true;
+    body.rigid_body.body_type = RigidBodyType::Dynamic;
+    let uuid = body.uuid;
+    let rig = scene.get_mut(owner).unwrap().animation.as_mut().unwrap();
+    rig.physics_follow.push(
+        serde_json::from_value(serde_json::json!({"path":["Head"],"body":uuid,
+        "weight":0.5,"stiffness":100.0,"damping":0.5,"max_torque":3.0}))
+        .unwrap(),
+    );
+    let mut playback = AnimationPlayback::prepare(&scene).unwrap();
+    playback.tick(&mut scene, 0.0, 0.0, &[], Some(-Vec3::Y));
+    playback.blend_physics(&mut scene);
+    assert!(scene
+        .get(head)
+        .unwrap()
+        .position
+        .abs_diff_eq(Vec3::new(1.0, 0.5, 0.0), 1e-5));
+    playback.drive_bodies(&mut scene);
+    assert!((scene.get(body_id).unwrap().rigid_body.torque.z + 3.0).abs() < 1e-4);
+}
+
+#[test]
+fn animation_motion_matching_character_scale_fixture() {
+    let (template, owner, _) = rig();
+    let mut library = template.get(owner).unwrap().animation.clone().unwrap();
+    library.layers.truncate(1);
+    library.layers[0].looping = true;
+    library.layers[0].motion_speed = Some(0.0);
+    let mut walk = library.layers[0].clone();
+    walk.name = "Walk".into();
+    walk.motion_speed = Some(3.0);
+    library.layers.push(walk);
+    library.motion_match = Some(
+        serde_json::from_value(
+            serde_json::json!({"pose_path":["Head"],"lookahead":0.5,"pose_weight":1.0}),
+        )
+        .unwrap(),
+    );
+    for count in [1, 20, 100] {
+        let mut scene = SceneGraph::new();
+        for index in 0..count {
+            let owner = scene.add_root(&format!("Actor {index}"));
+            scene.add_child(owner, "Head");
+            scene.get_mut(owner).unwrap().animation = Some(library.clone());
+        }
+        let mut playback = AnimationPlayback::prepare(&scene).unwrap();
+        let mut elapsed = Vec::new();
+        for tick in 0..120 {
+            let started = std::time::Instant::now();
+            playback.tick(
+                &mut scene,
+                f64::from(tick) / 60.0,
+                1.0 / 60.0,
+                &[],
+                Some(-Vec3::Y),
+            );
+            elapsed.push(started.elapsed().as_micros());
+        }
+        elapsed.sort_unstable();
+        assert_eq!(playback.sample(0.0, 0.0).unwrap().count(), count);
+        eprintln!(
+            "motion matching actors={count} p50_us={} p95_us={}",
+            elapsed[60], elapsed[113]
+        );
+    }
+}
 use raf_core::config::ScriptExecutionMode;
 use raf_core::project::ProjectSettings;
 use raf_core::runtime_config::RuntimePreferences;

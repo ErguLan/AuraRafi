@@ -21,6 +21,10 @@ pub fn primitive_name(primitive: Primitive) -> &'static str {
         Primitive::Cylinder => "Cylinder",
         Primitive::Capsule => "Capsule",
         Primitive::Plane => "Plane",
+        Primitive::Wedge => "Wedge",
+        Primitive::Torus => "Torus",
+        Primitive::Prism => "Prism",
+        Primitive::Sphere2D => "Sphere 2D",
         Primitive::Empty => "Entity",
     }
 }

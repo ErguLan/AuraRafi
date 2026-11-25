@@ -28,8 +28,8 @@ impl AgentParsedExecutor<'_> {
             self.project.map(|project| project.root.clone()),
         );
         if crate::commands::ui::supports(&command.name) {
-            let assets=self.project.map(|p|p.root.join("assets"));
-            return crate::commands::ui::execute(command,assets.as_deref(),false);
+            let assets = self.project.map(|p| p.root.join("assets"));
+            return crate::commands::ui::execute(command, assets.as_deref(), false);
         }
         if command.name.starts_with("lighting.") {
             return crate::commands::lighting::execute(command, self.scene);
@@ -54,7 +54,9 @@ impl AgentParsedExecutor<'_> {
         } else if let Some(output) = scripting::execute(
             command,
             self.scene,
-            self.project.map(|project| project.root.join("assets")).as_deref(),
+            self.project
+                .map(|project| project.root.join("assets"))
+                .as_deref(),
         ) {
             output
         } else {
@@ -98,8 +100,8 @@ impl ParsedCommandExecutor for AgentParsedExecutor<'_> {
             self.project.map(|project| project.root.clone()),
         );
         if crate::commands::ui::supports(&command.name) {
-            let assets=self.project.map(|p|p.root.join("assets"));
-            return crate::commands::ui::execute(command,assets.as_deref(),true);
+            let assets = self.project.map(|p| p.root.join("assets"));
+            return crate::commands::ui::execute(command, assets.as_deref(), true);
         }
         if command.name.starts_with("lighting.") {
             return crate::commands::lighting::execute(command, &mut self.scene.clone());
@@ -107,7 +109,9 @@ impl ParsedCommandExecutor for AgentParsedExecutor<'_> {
         if let Some(output) = scripting::preview(
             command,
             self.scene,
-            self.project.map(|project| project.root.join("assets")).as_deref(),
+            self.project
+                .map(|project| project.root.join("assets"))
+                .as_deref(),
         ) {
             return output;
         }

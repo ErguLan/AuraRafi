@@ -130,7 +130,12 @@ impl AiProvider {
 
     /// Providers with a verified editor transport in the current release.
     pub fn editor_supported() -> &'static [AiProvider] {
-        &[AiProvider::OpenRouter, AiProvider::OpenAI, AiProvider::OpenCode, AiProvider::OpenCodeGo]
+        &[
+            AiProvider::OpenRouter,
+            AiProvider::OpenAI,
+            AiProvider::OpenCode,
+            AiProvider::OpenCodeGo,
+        ]
     }
 
     pub fn is_editor_supported(self) -> bool {

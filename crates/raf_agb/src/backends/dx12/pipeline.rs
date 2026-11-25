@@ -25,22 +25,36 @@ pub(super) const ROOT_SHADOW_CONSTANTS: u32 = 2;
 pub(super) const ROOT_SHADOW_TABLE: u32 = 3;
 pub(super) const SHADOW_UNIFORM_WORDS: u32 = (size_of::<ShadowFrame>() / size_of::<u32>()) as u32;
 
-/// Pipeline family selected for one batch. Only scene batches are shadow receivers.
+/// Pipeline family selected for one batch. Scene batches use a shadow-receiver
+/// variant while the directional shadow map is active; the cull/depth state is
+/// preserved by each variant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Stage {
     Scene,
+    SceneTwoSided,
+    SceneTransparent,
+    SceneTransparentTwoSided,
     ShadowScene,
+    ShadowSceneTwoSided,
+    ShadowSceneTransparent,
+    ShadowSceneTransparentTwoSided,
     ReadDepth,
     Overlay,
 }
 
 impl Stage {
     pub(super) fn select(mode: DrawMode, shadow: bool) -> Self {
-        match mode {
-            DrawMode::Scene if shadow => Self::ShadowScene,
-            DrawMode::Scene => Self::Scene,
-            DrawMode::DepthReadOnly => Self::ReadDepth,
-            DrawMode::Overlay | DrawMode::SceneNoDepth => Self::Overlay,
+        match (mode, shadow) {
+            (DrawMode::Scene, true) => Self::ShadowScene,
+            (DrawMode::SceneTwoSided, true) => Self::ShadowSceneTwoSided,
+            (DrawMode::SceneTransparent, true) => Self::ShadowSceneTransparent,
+            (DrawMode::SceneTransparentTwoSided, true) => Self::ShadowSceneTransparentTwoSided,
+            (DrawMode::Scene, false) => Self::Scene,
+            (DrawMode::SceneTwoSided, false) => Self::SceneTwoSided,
+            (DrawMode::SceneTransparent, false) => Self::SceneTransparent,
+            (DrawMode::SceneTransparentTwoSided, false) => Self::SceneTransparentTwoSided,
+            (DrawMode::DepthReadOnly, _) => Self::ReadDepth,
+            (DrawMode::Overlay | DrawMode::SceneNoDepth, _) => Self::Overlay,
         }
     }
 }
@@ -58,11 +72,15 @@ pub(super) struct RasterState {
     pub depth_write: bool,
     pub vertex_stream: bool,
     pub blend: bool,
+    pub cull: D3D12_CULL_MODE,
 }
 
 pub(super) struct Pipelines {
     root: ID3D12RootSignature,
     scene: ID3D12PipelineState,
+    scene_two_sided: ID3D12PipelineState,
+    scene_transparent: ID3D12PipelineState,
+    scene_transparent_two_sided: ID3D12PipelineState,
     read_depth: ID3D12PipelineState,
     overlay: ID3D12PipelineState,
 }
@@ -84,9 +102,44 @@ impl Pipelines {
             depth_write: true,
             vertex_stream: true,
             blend: true,
+            cull: D3D12_CULL_MODE_BACK,
         };
         Ok(Self {
             scene: raster_pipeline(device, &root, &scene, &paint, formats, scene_state)?,
+            scene_two_sided: raster_pipeline(
+                device,
+                &root,
+                &scene,
+                &paint,
+                formats,
+                RasterState {
+                    cull: D3D12_CULL_MODE_NONE,
+                    ..scene_state
+                },
+            )?,
+            scene_transparent: raster_pipeline(
+                device,
+                &root,
+                &scene,
+                &paint,
+                formats,
+                RasterState {
+                    depth_write: false,
+                    ..scene_state
+                },
+            )?,
+            scene_transparent_two_sided: raster_pipeline(
+                device,
+                &root,
+                &scene,
+                &paint,
+                formats,
+                RasterState {
+                    depth_write: false,
+                    cull: D3D12_CULL_MODE_NONE,
+                    ..scene_state
+                },
+            )?,
             read_depth: raster_pipeline(
                 device,
                 &root,
@@ -95,6 +148,7 @@ impl Pipelines {
                 formats,
                 RasterState {
                     depth_write: false,
+                    cull: D3D12_CULL_MODE_NONE,
                     ..scene_state
                 },
             )?,
@@ -107,6 +161,7 @@ impl Pipelines {
                 RasterState {
                     depth_test: false,
                     depth_write: false,
+                    cull: D3D12_CULL_MODE_NONE,
                     ..scene_state
                 },
             )?,
@@ -120,6 +175,18 @@ impl Pipelines {
 
     pub fn scene(&self) -> &ID3D12PipelineState {
         &self.scene
+    }
+
+    pub fn scene_two_sided(&self) -> &ID3D12PipelineState {
+        &self.scene_two_sided
+    }
+
+    pub fn scene_transparent(&self) -> &ID3D12PipelineState {
+        &self.scene_transparent
+    }
+
+    pub fn scene_transparent_two_sided(&self) -> &ID3D12PipelineState {
+        &self.scene_transparent_two_sided
     }
 
     pub fn read_depth(&self) -> &ID3D12PipelineState {
@@ -397,7 +464,8 @@ pub(super) fn raster_pipeline(
         SampleMask: u32::MAX,
         RasterizerState: D3D12_RASTERIZER_DESC {
             FillMode: D3D12_FILL_MODE_SOLID,
-            CullMode: D3D12_CULL_MODE_NONE,
+            CullMode: state.cull,
+            FrontCounterClockwise: true.into(),
             DepthClipEnable: true.into(),
             ..Default::default()
         },
@@ -505,6 +573,30 @@ mod tests {
     fn stage_selection_keeps_only_scene_batches_on_the_shadow_pipeline() {
         assert_eq!(Stage::select(DrawMode::Scene, true), Stage::ShadowScene);
         assert_eq!(Stage::select(DrawMode::Scene, false), Stage::Scene);
+        assert_eq!(
+            Stage::select(DrawMode::SceneTwoSided, true),
+            Stage::ShadowSceneTwoSided
+        );
+        assert_eq!(
+            Stage::select(DrawMode::SceneTwoSided, false),
+            Stage::SceneTwoSided
+        );
+        assert_eq!(
+            Stage::select(DrawMode::SceneTransparent, true),
+            Stage::ShadowSceneTransparent
+        );
+        assert_eq!(
+            Stage::select(DrawMode::SceneTransparent, false),
+            Stage::SceneTransparent
+        );
+        assert_eq!(
+            Stage::select(DrawMode::SceneTransparentTwoSided, true),
+            Stage::ShadowSceneTransparentTwoSided
+        );
+        assert_eq!(
+            Stage::select(DrawMode::SceneTransparentTwoSided, false),
+            Stage::SceneTransparentTwoSided
+        );
         assert_eq!(
             Stage::select(DrawMode::DepthReadOnly, true),
             Stage::ReadDepth

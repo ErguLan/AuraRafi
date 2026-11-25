@@ -15,7 +15,8 @@ use std::collections::{BTreeMap, HashSet};
 /// Create a bounded semantic fingerprint for document-level change tracking.
 /// It intentionally uses UUIDs instead of flat slot IDs, skips deleted slots,
 /// and keeps only fields that matter to authoring, references and verification.
-/// Renderer caches and mesh payloads never participate in this fingerprint.
+/// Mesh payloads participate through a revision/count summary rather than the
+/// full vertex array, keeping the fingerprint small.
 pub fn scene_fingerprint(scene: &SceneGraph) -> BTreeMap<String, Value> {
     let mut fingerprint: BTreeMap<String, Value> = scene
         .iter()
@@ -48,7 +49,21 @@ pub fn scene_fingerprint(scene: &SceneGraph) -> BTreeMap<String, Value> {
                     "semantic_role": node.semantic_role,
                     "stable_key": node.stable_key,
                     "tags": node.tags,
-                    "agent_origin": node.agent_origin
+                    "agent_origin": node.agent_origin,
+                    "editable_mesh": node.editable_mesh.as_ref().map(|mesh| {
+                        let (min, max) = mesh.bounds().unwrap_or((Vec3::ZERO, Vec3::ZERO));
+                        json!({
+                            "revision": mesh.revision,
+                            "vertices": mesh.vertices.len(),
+                            "faces": mesh.face_count(),
+                            "bounds_min": [min.x, min.y, min.z],
+                            "bounds_max": [max.x, max.y, max.z],
+                        })
+                    }),
+                    "surface": node.surface,
+                    "pivot": node.pivot.slug(),
+                    "spawn_marker": node.spawn_marker,
+                    "linked_assembly": node.linked_assembly,
                 }),
             )
         })

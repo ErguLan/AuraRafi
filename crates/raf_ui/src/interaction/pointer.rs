@@ -122,6 +122,9 @@ impl UiInteractionState {
         {
             return UiCursorIcon::ResizeHorizontal;
         }
+        if node.classes.iter().any(|class| class == "ui-number-scrub") {
+            return UiCursorIcon::ResizeHorizontal;
+        }
         if node
             .classes
             .iter()

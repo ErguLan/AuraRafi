@@ -54,6 +54,9 @@ pub(super) struct ShadowPass {
     dsv: D3D12_CPU_DESCRIPTOR_HANDLE,
     caster: ID3D12PipelineState,
     scene: ID3D12PipelineState,
+    scene_two_sided: ID3D12PipelineState,
+    scene_transparent: ID3D12PipelineState,
+    scene_transparent_two_sided: ID3D12PipelineState,
     parameters: ShadowFrame,
     last: Option<ShadowFrame>,
 }
@@ -100,22 +103,32 @@ impl ShadowPass {
                 depth_write: true,
                 vertex_stream: true,
                 blend: false,
+                cull: D3D12_CULL_MODE_NONE,
             },
         )?;
-        let scene = pipeline::raster_pipeline(
-            device,
-            root,
-            &source.blob("shadow_scene", c"vs_5_1")?,
-            &source.blob("shadow_paint", c"ps_5_1")?,
-            formats,
-            RasterState {
-                color: true,
-                depth_test: true,
-                depth_write: true,
-                vertex_stream: true,
-                blend: true,
-            },
-        )?;
+        let scene_vertex = source.blob("shadow_scene", c"vs_5_1")?;
+        let scene_pixel = source.blob("shadow_paint", c"ps_5_1")?;
+        let receiver = |cull, depth_write| {
+            pipeline::raster_pipeline(
+                device,
+                root,
+                &scene_vertex,
+                &scene_pixel,
+                formats,
+                RasterState {
+                    color: true,
+                    depth_test: true,
+                    depth_write,
+                    vertex_stream: true,
+                    blend: true,
+                    cull,
+                },
+            )
+        };
+        let scene = receiver(D3D12_CULL_MODE_BACK, true)?;
+        let scene_two_sided = receiver(D3D12_CULL_MODE_NONE, true)?;
+        let scene_transparent = receiver(D3D12_CULL_MODE_BACK, false)?;
+        let scene_transparent_two_sided = receiver(D3D12_CULL_MODE_NONE, false)?;
         Ok(Self {
             side,
             depth_key: None,
@@ -124,6 +137,9 @@ impl ShadowPass {
             _dsv_heap: dsv_heap,
             caster,
             scene,
+            scene_two_sided,
+            scene_transparent,
+            scene_transparent_two_sided,
             parameters: ShadowFrame::zeroed(),
             last: None,
         })
@@ -131,6 +147,18 @@ impl ShadowPass {
 
     pub fn scene(&self) -> &ID3D12PipelineState {
         &self.scene
+    }
+
+    pub fn scene_two_sided(&self) -> &ID3D12PipelineState {
+        &self.scene_two_sided
+    }
+
+    pub fn scene_transparent(&self) -> &ID3D12PipelineState {
+        &self.scene_transparent
+    }
+
+    pub fn scene_transparent_two_sided(&self) -> &ID3D12PipelineState {
+        &self.scene_transparent_two_sided
     }
 
     /// Writes the map view into the resident material heap. Direct3D 12 allows

@@ -582,12 +582,26 @@ mod tests {
     fn release_reaches_captured_consumer_before_finish_frame_retires_it() {
         let owner = InputOwner::ElectronicsCanvas;
         let mut router = InputRouter::default();
-        assert!(router.try_capture_pointer(PointerButton::Primary, owner, CaptureMode::Exclusive, [10.0,10.0], 1.0));
+        assert!(router.try_capture_pointer(
+            PointerButton::Primary,
+            owner,
+            CaptureMode::Exclusive,
+            [10.0, 10.0],
+            1.0
+        ));
         let mut release = InputSnapshot::default();
-        release.pointer_released_buttons.insert(PointerButton::Primary);
+        release
+            .pointer_released_buttons
+            .insert(PointerButton::Primary);
         router.reconcile_input(&release);
         assert_eq!(router.pointer_owner(PointerButton::Primary), Some(owner));
-        assert_eq!(router.pointer_capture(PointerButton::Primary).unwrap().origin, [10.0,10.0]);
+        assert_eq!(
+            router
+                .pointer_capture(PointerButton::Primary)
+                .unwrap()
+                .origin,
+            [10.0, 10.0]
+        );
         router.finish_frame(&release);
         assert!(!router.has_pointer_capture());
     }
@@ -595,7 +609,13 @@ mod tests {
     #[test]
     fn missing_release_still_retires_stale_capture_before_dispatch() {
         let mut router = InputRouter::default();
-        router.try_capture_pointer(PointerButton::Primary, InputOwner::ElectronicsCanvas, CaptureMode::Exclusive, [0.0,0.0], 1.0);
+        router.try_capture_pointer(
+            PointerButton::Primary,
+            InputOwner::ElectronicsCanvas,
+            CaptureMode::Exclusive,
+            [0.0, 0.0],
+            1.0,
+        );
         router.reconcile_input(&InputSnapshot::default());
         assert!(!router.has_pointer_capture());
     }

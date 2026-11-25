@@ -1,7 +1,7 @@
 //! Project rail and project residency rows.
 
-use super::*;
 use super::layout::label;
+use super::*;
 
 pub(super) fn projects_rail(
     tokens: &UiTokens,

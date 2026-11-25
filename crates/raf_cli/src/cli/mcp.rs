@@ -6,7 +6,10 @@ use crate::attached::AttachedClient;
 use crate::cli::commands::engine::HeadlessEngine;
 use crate::cli::output::clean_path_string;
 use crate::cli::{CliResult, PROTOCOL_VERSION};
-use raf_core::{CommandEndpoint, CommandSource, EngineCommandRequest, MAX_COMMAND_FRAME_BYTES};
+use raf_core::{
+    CommandEndpoint, CommandSource, EngineCommandRequest, EngineCommandResponse,
+    MAX_COMMAND_FRAME_BYTES,
+};
 use self::schemas::{budget_schema, mcp_semantic_tools, mcp_tool, schema};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
@@ -38,6 +41,21 @@ pub(super) trait McpCommandHost: CommandEndpoint {
     fn attached(&self) -> bool {
         false
     }
+    /// True when the host is not bound to a fixed project and can attach to a
+    /// live editor on demand.
+    fn dynamic(&self) -> bool {
+        false
+    }
+    fn list_editors(&self) -> CliResult<Value> {
+        Ok(editors_report())
+    }
+    fn attach_project(&mut self, _project: Option<&str>) -> CliResult<Value> {
+        Err(
+            "This MCP server is bound to a fixed project. Start `raf mcp serve` without \
+             --attach to attach dynamically."
+                .to_string(),
+        )
+    }
 }
 
 impl McpCommandHost for HeadlessEngine {
@@ -62,6 +80,149 @@ impl McpCommandHost for AttachedClient {
     fn attached(&self) -> bool {
         true
     }
+
+    fn dynamic(&self) -> bool {
+        false
+    }
+}
+
+/// MCP host with no project bound at startup. It attaches lazily to the live
+/// editor the user or agent selects, and never launches or opens a project.
+pub(super) enum McpHost {
+    Attached(AttachedClient),
+    Unattached,
+}
+
+impl McpHost {
+    pub(super) fn unattached() -> Self {
+        Self::Unattached
+    }
+
+    fn is_attached(&self) -> bool {
+        matches!(self, Self::Attached(_))
+    }
+
+    /// Auto-attaches only when exactly one editor is live. Zero or several
+    /// editors remain a caller decision instead of a guess.
+    fn ensure_attached(&mut self) -> Result<(), String> {
+        if self.is_attached() {
+            return Ok(());
+        }
+        let editor = crate::discovery::pick_single_live(None).map_err(|error| {
+            format!(
+                "{error} Call raf_editors to list projects, then raf_attach with an explicit project path."
+            )
+        })?;
+        self.attach_to(&editor.project_path)
+    }
+
+    fn attach_to(&mut self, project: &Path) -> Result<(), String> {
+        let canonical = project
+            .canonicalize()
+            .unwrap_or_else(|_| project.to_path_buf());
+        let editor = crate::discovery::discover_editors(Some(project))
+            .into_iter()
+            .find(|editor| {
+                editor.alive
+                    && editor
+                        .project_path
+                        .canonicalize()
+                        .unwrap_or_else(|_| editor.project_path.clone())
+                        == canonical
+            })
+            .ok_or_else(|| {
+                format!(
+                    "No live editor is open for {}. Open the project in the editor first; \
+                     the MCP never launches or opens projects automatically.",
+                    project.display()
+                )
+            })?;
+        let client = AttachedClient::connect(&editor.project_path, "raf-mcp")?;
+        *self = Self::Attached(client);
+        Ok(())
+    }
+
+    fn attach(&mut self, project: Option<&str>) -> Result<Value, String> {
+        let path = match project {
+            Some(value) if !value.trim().is_empty() => Path::new(value).to_path_buf(),
+            _ => crate::discovery::pick_single_live(None)
+                .map_err(|error| format!("{error} Pass an explicit project path to raf_attach."))?
+                .project_path,
+        };
+        if !path.is_dir() {
+            return Err(format!(
+                "Project path does not exist or is not a directory: {}",
+                path.display()
+            ));
+        }
+        self.attach_to(&path)?;
+        let status = self.resource("raf://status")?;
+        Ok(json!({"attached": true, "project": status}))
+    }
+}
+
+impl McpCommandHost for McpHost {
+    fn resource(&self, uri: &str) -> CliResult<Value> {
+        match self {
+            Self::Attached(client) => client.resource(uri),
+            Self::Unattached => match uri {
+                "raf://status" => Ok(json!({
+                    "attached": false,
+                    "hint": "No editor is attached. Call raf_editors, then raf_attach with the project path.",
+                    "editors": editors_report(),
+                })),
+                _ => Err(
+                    "No editor is attached. Call raf_editors and then raf_attach with a project path."
+                        .to_string(),
+                ),
+            },
+        }
+    }
+
+    fn project_root(&self) -> Option<&Path> {
+        match self {
+            Self::Attached(client) => Some(client.project_path()),
+            Self::Unattached => None,
+        }
+    }
+
+    fn attached(&self) -> bool {
+        self.is_attached()
+    }
+
+    fn dynamic(&self) -> bool {
+        true
+    }
+
+    fn attach_project(&mut self, project: Option<&str>) -> CliResult<Value> {
+        McpHost::attach(self, project)
+    }
+}
+
+impl CommandEndpoint for McpHost {
+    fn execute(&mut self, request: EngineCommandRequest) -> EngineCommandResponse {
+        if let Err(error) = self.ensure_attached() {
+            return EngineCommandResponse::error(request.id, "Attached transport", error);
+        }
+        match self {
+            Self::Attached(client) => client.execute(request),
+            Self::Unattached => EngineCommandResponse::error(
+                request.id,
+                "Attached transport",
+                "No editor is attached.",
+            ),
+        }
+    }
+}
+
+fn editors_report() -> Value {
+    let editors = crate::discovery::discover_editors(None);
+    let live = editors.iter().filter(|editor| editor.alive).count();
+    json!({
+        "count": editors.len(),
+        "live_count": live,
+        "editors": editors.iter().map(|editor| editor.to_json()).collect::<Vec<_>>(),
+    })
 }
 
 fn mcp_mode() -> &'static str {
@@ -87,7 +248,7 @@ fn set_mcp_mode(value: &str) -> Result<&'static str, String> {
     Ok(mcp_mode())
 }
 
-fn mcp_command_is_mutation(name: &str) -> bool {
+pub(crate) fn mcp_command_is_mutation(name: &str) -> bool {
     matches!(
         name,
         "game.add"
@@ -130,6 +291,8 @@ fn mcp_command_is_mutation(name: &str) -> bool {
             | "project.create"
             | "project.close"
             | "project.save"
+            | "transaction.undo"
+            | "transaction.redo"
             | "undo"
             | "redo"
             | "__generic__"
@@ -225,6 +388,8 @@ pub(super) fn handle_mcp_message<H: McpCommandHost>(engine: &mut H, message: &Va
     }
     let instructions = if engine.attached() {
         "AuraRafi attached editor surface. Inspect, preview, confirm and verify. Mutations use the live document and its real undo history. Never expose Play or Runtime."
+    } else if engine.dynamic() {
+        "AuraRafi editor surface with no project bound yet. Call raf_editors to list live projects, then raf_attach to connect one. This server never launches or opens projects automatically. Mutations use the live document and its real undo history."
     } else {
         "AuraRafi headless command surface. Only headless-supported inspection and project lifecycle tools are advertised. Mutations require an attached editor and never expose Play or Runtime."
     };
@@ -245,7 +410,7 @@ pub(super) fn handle_mcp_message<H: McpCommandHost>(engine: &mut H, message: &Va
         "ping" => Some(jsonrpc_result(&id, json!({}))),
         "tools/list" => Some(jsonrpc_result(
             &id,
-            json!({"tools": mcp_tools(engine.attached())}),
+            json!({"tools": mcp_tools(engine.attached() || engine.dynamic())}),
         )),
         "resources/list" => Some(jsonrpc_result(
             &id,
@@ -303,6 +468,65 @@ fn handle_mcp_tool_call<H: McpCommandHost>(
         .pointer("/params/arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    if name == "raf_editors" {
+        return Some(match engine.list_editors() {
+            Ok(report) => {
+                let live = report.get("live_count").and_then(Value::as_u64).unwrap_or(0);
+                let total = report.get("count").and_then(Value::as_u64).unwrap_or(0);
+                jsonrpc_result(
+                    id,
+                    json!({
+                        "isError": false,
+                        "content": [{
+                            "type": "text",
+                            "text": format!("{total} known project(s); {live} live editor(s)."),
+                        }],
+                        "structuredContent": report,
+                    }),
+                )
+            }
+            Err(error) => jsonrpc_result(
+                id,
+                json!({
+                    "isError": true,
+                    "content": [{"type": "text", "text": error}],
+                    "structuredContent": {"ok": false, "error": "editors_unavailable"},
+                }),
+            ),
+        });
+    }
+    if name == "raf_attach" {
+        let project = arguments.get("project").and_then(Value::as_str);
+        return Some(match engine.attach_project(project) {
+            Ok(report) => {
+                let path = report
+                    .pointer("/project/project_path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let text = if path.is_empty() {
+                    "Attached to the live editor.".to_string()
+                } else {
+                    format!("Attached to {path}.")
+                };
+                jsonrpc_result(
+                    id,
+                    json!({
+                        "isError": false,
+                        "content": [{"type": "text", "text": text}],
+                        "structuredContent": report,
+                    }),
+                )
+            }
+            Err(error) => jsonrpc_result(
+                id,
+                json!({
+                    "isError": true,
+                    "content": [{"type": "text", "text": error}],
+                    "structuredContent": {"ok": false, "error": "attach_failed"},
+                }),
+            ),
+        });
+    }
     if name == "raf_project_path" {
         let Some(root) = engine.project_root() else {
             return Some(jsonrpc_result(
@@ -712,6 +936,16 @@ pub(super) fn mcp_tools(attached: bool) -> Vec<Value> {
             ),
         ),
         mcp_tool(
+            "raf_editors",
+            "List known AuraRafi projects and which editor processes are live right now. Use this before raf_attach when the target project is not obvious.",
+            json!({"type":"object","properties":{}}),
+        ),
+        mcp_tool(
+            "raf_attach",
+            "Attach this MCP server to a live editor project. Never launches or opens projects automatically: the project must already be open in an editor.",
+            json!({"type":"object","properties":{"project":{"type":"string","description":"Project root path already open in a live editor. Omit to auto-attach when exactly one editor is live."}}}),
+        ),
+        mcp_tool(
             "raf_status",
             "Read headless engine and project status.",
             json!({"type":"object","properties":{}}),
@@ -814,6 +1048,7 @@ fn headless_mcp_tool_supported(name: &str) -> bool {
     matches!(
         name,
         "raf_set_mode"
+            | "raf_editors"
             | "raf_status"
             | "raf_context"
             | "raf_doctor"

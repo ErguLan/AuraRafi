@@ -15,13 +15,29 @@ use super::menus::{menu_item, overlay_menu_root, overlay_popover_root, overlay_s
 pub fn build_assets_create_menu_surface(palette: StudioUiPalette) -> UiSurface {
     let mut root = overlay_menu_root(palette, "assets.create-menu", "app.assets_create");
     for (id, icon, label_key, command) in [
-        ("interface",UiIconId::Frame,"ui.designer.title","assets.create-interface"),
-        ("animation",UiIconId::Play,"animation.tab","animations.open"),
+        (
+            "interface",
+            UiIconId::Frame,
+            "ui.designer.title",
+            "assets.create-interface",
+        ),
+        (
+            "animation",
+            UiIconId::Play,
+            "animation.tab",
+            "animations.open",
+        ),
         (
             "script",
             UiIconId::Script,
             "app.create_script",
             "assets.create-script",
+        ),
+        (
+            "particle",
+            UiIconId::Sun,
+            "app.create_particle",
+            "assets.create-particle",
         ),
         (
             "primitive",
@@ -148,6 +164,84 @@ pub fn build_assets_script_popover_surface(
     overlay_surface("editor.assets.script-popover", palette, root)
 }
 
+pub fn build_assets_particle_popover_surface(
+    palette: StudioUiPalette,
+    particle_name: &str,
+) -> UiSurface {
+    let tokens = palette.tokens();
+    let mut templates = UiNode::new("assets.particle-popover.templates", UiNodeKind::Toolbar)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            compact: raf_ui::UiCompactMode::Wrap,
+            align_items: UiAlign::Center,
+            gap: 5.0,
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        });
+    for (slug, key) in [
+        ("blank", "app.particle_template.blank"),
+        ("fire", "app.particle_template.fire"),
+        ("smoke", "app.particle_template.smoke"),
+        ("sparks", "app.particle_template.sparks"),
+        ("rain", "app.particle_template.rain"),
+        ("dust", "app.particle_template.dust"),
+        ("magic", "app.particle_template.magic"),
+    ] {
+        templates = templates.with_child(
+            UiNode::new(format!("assets.particle.{slug}"), UiNodeKind::Button)
+                .with_class("asset-script-template")
+                .with_text_key(key)
+                .with_text_style(UiTextStyle::button(tokens.text))
+                .with_layout(UiLayout::fit_content().with_text_safe_area(true))
+                .focusable()
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    format!("assets.particle.create:{slug}"),
+                )),
+        );
+    }
+    let root = overlay_popover_root(palette, "assets.particle-popover", "app.create_particle")
+        .with_child(
+            UiNode::text_input(
+                "assets.particle-name",
+                raf_ui::UiTextInput {
+                    value_key: "assets.particle-name".to_string(),
+                    placeholder_key: Some("app.particle_name".to_string()),
+                    max_length: 64,
+                    multiline: false,
+                    password: false,
+                    submit_command: Some("assets.particle.create:blank".to_string()),
+                },
+            )
+            .with_class("asset-script-name")
+            .with_accessibility_label_key("app.particle_name")
+            .with_layout(UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill))
+            .with_text_value(particle_name.to_string())
+            .with_event(UiEventBinding::command(
+                UiEventKind::KeyPress("escape".to_string()),
+                "assets.particle.cancel",
+            )),
+        )
+        .with_child(
+            UiNode::new("assets.particle-popover.hint", UiNodeKind::Label)
+                .with_text_key("app.particle_template_hint")
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(templates)
+        .with_child(
+            UiNode::new("assets.particle.cancel", UiNodeKind::Button)
+                .with_class("asset-script-cancel")
+                .with_text_key("app.cancel")
+                .with_layout(UiLayout::fit_content().with_text_safe_area(true))
+                .focusable()
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    "assets.particle.cancel",
+                )),
+        );
+    overlay_surface("editor.assets.particle-popover", palette, root)
+}
+
 pub fn build_assets_file_popover_surface(palette: StudioUiPalette, file_name: &str) -> UiSurface {
     let root = overlay_popover_root(palette, "assets.file-popover", "app.create_file")
         .with_child(
@@ -232,7 +326,7 @@ fn asset_primitive_modal_option(
     primitive: raf_core::scene::Primitive,
 ) -> UiNode {
     let tokens = palette.tokens();
-    UiNode::new(
+    let mut option = UiNode::new(
         format!(
             "assets.primitive-popover.option.{}",
             primitive_slug(primitive)
@@ -250,8 +344,12 @@ fn asset_primitive_modal_option(
     })
     .with_icon(
         UiIcon::new(match primitive {
-            raf_core::scene::Primitive::Cube => UiIconId::Cube,
-            raf_core::scene::Primitive::Sphere => UiIconId::Sphere,
+            raf_core::scene::Primitive::Cube
+            | raf_core::scene::Primitive::Wedge
+            | raf_core::scene::Primitive::Prism => UiIconId::Cube,
+            raf_core::scene::Primitive::Sphere
+            | raf_core::scene::Primitive::Torus
+            | raf_core::scene::Primitive::Sphere2D => UiIconId::Sphere,
             raf_core::scene::Primitive::Cylinder => UiIconId::Cylinder,
             raf_core::scene::Primitive::Capsule => UiIconId::Capsule,
             raf_core::scene::Primitive::Plane => UiIconId::Plane,
@@ -259,23 +357,42 @@ fn asset_primitive_modal_option(
         })
         .with_size(UiIconSize::Panel)
         .with_tint(tokens.accent),
-    )
-    .with_text_key(primitive_key(primitive))
-    .with_text_style(UiTextStyle {
-        role: UiTextRole::Label,
-        size_px: 9.0,
-        line_height_px: 11.0,
-        weight: UiFontWeight::Regular,
-        color: tokens.text,
-        inherit_color: false,
-    })
-    .with_text_overflow(UiTextOverflow::Ellipsis)
-    .with_accessibility_label_key(primitive_key(primitive))
-    .focusable()
-    .with_event(UiEventBinding::command(
-        UiEventKind::Click,
-        format!("assets.create-primitive:{}", primitive_slug(primitive)),
-    ))
+    );
+    // Wedge/torus/prism/sphere2d do not have locale entries yet. Keep a
+    // readable literal instead of painting raw `app.primitive_*` keys.
+    let authored_key = primitive_key(primitive);
+    let has_locale_key = !matches!(
+        primitive,
+        raf_core::scene::Primitive::Wedge
+            | raf_core::scene::Primitive::Torus
+            | raf_core::scene::Primitive::Prism
+            | raf_core::scene::Primitive::Sphere2D
+    );
+    if has_locale_key {
+        option = option
+            .with_text_key(authored_key)
+            .with_accessibility_label_key(authored_key);
+    } else {
+        let name = super::primitive_card_name(primitive);
+        option = option
+            .with_text_value(name)
+            .with_accessibility_label_key(name);
+    }
+    option
+        .with_text_style(UiTextStyle {
+            role: UiTextRole::Label,
+            size_px: 9.0,
+            line_height_px: 11.0,
+            weight: UiFontWeight::Regular,
+            color: tokens.text,
+            inherit_color: false,
+        })
+        .with_text_overflow(UiTextOverflow::Ellipsis)
+        .focusable()
+        .with_event(UiEventBinding::command(
+            UiEventKind::Click,
+            format!("assets.create-primitive:{}", primitive_slug(primitive)),
+        ))
 }
 
 fn file_action_button(id: &str, label_key: &str, command: &str) -> UiNode {

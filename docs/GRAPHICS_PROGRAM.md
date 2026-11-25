@@ -133,6 +133,18 @@ Current budgets:
 These are contracts, not measured results for every machine. A budget overrun
 must be reported and degraded, never ignored.
 
+### Retained scene packet policy
+
+Scene packets are reused only when the command stream is camera-independent.
+Opaque and transparent entity order is stable; it never depends on camera
+distance. During editor camera navigation, frustum culling and camera-derived
+LOD are frozen and screen-space manipulators are omitted for those frames. The
+runtime uses the same stable policy for scenes up to 4096 nodes; larger scenes
+keep per-frame frustum culling. Packet revision replacement in AGB still
+re-uploads geometry and textures, so moving object transforms, skinned meshes
+and animated particles remain a known rebuild path until instance/vertex
+patching and retained texture residency are integrated.
+
 ## 4. Quality target
 
 Quality means measured behavior on named fixtures, not a screenshot or a

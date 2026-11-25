@@ -5,9 +5,11 @@
 //! All data lives in simple Vecs - zero GPU overhead.
 
 use glam::Vec3;
+use raf_core::scene::{EditableMeshData, Primitive, SceneNode};
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::mesh_data::MeshData;
+use crate::geometry::primitives;
 
 // ---------------------------------------------------------------------------
 // Vertex / Face primitives
@@ -148,6 +150,150 @@ pub struct EditableMesh {
 }
 
 impl EditableMesh {
+    /// Build an editable copy from any indexed render mesh.
+    pub fn from_mesh_data(mesh: &MeshData) -> Self {
+        let mut editable = Self {
+            vertices: mesh
+                .positions
+                .iter()
+                .zip(mesh.normals.iter())
+                .map(|(position, normal)| Vertex {
+                    position: *position,
+                    normal: *normal,
+                })
+                .collect(),
+            faces: mesh
+                .indices
+                .chunks_exact(3)
+                .map(|triangle| {
+                    Face::new(
+                        triangle[0] as usize,
+                        triangle[1] as usize,
+                        triangle[2] as usize,
+                    )
+                })
+                .collect(),
+            selection: MeshSelection::default(),
+            edit_mode: true,
+        };
+        // Render meshes duplicate positions per UV/normal. Authored topology
+        // needs shared corners so moving a vertex moves every adjacent face.
+        let data = editable.to_scene_data();
+        let mut welded = data;
+        welded.weld_vertices(1e-4);
+        editable = Self::from_scene_data(&welded);
+        editable
+    }
+
+    /// Build from the persisted scene payload.
+    pub fn from_scene_data(data: &EditableMeshData) -> Self {
+        let mut editable = Self {
+            vertices: data
+                .vertices
+                .iter()
+                .map(|position| Vertex::new(Vec3::from_array(*position)))
+                .collect(),
+            faces: data
+                .indices
+                .chunks_exact(3)
+                .map(|triangle| {
+                    Face::new(
+                        triangle[0] as usize,
+                        triangle[1] as usize,
+                        triangle[2] as usize,
+                    )
+                })
+                .collect(),
+            selection: MeshSelection::default(),
+            edit_mode: true,
+        };
+        editable.recalculate_normals();
+        editable
+    }
+
+    /// Build the working mesh for a node. A persisted editable mesh wins over
+    /// the parametric primitive, so Tab Mode always resumes the authored shape.
+    pub fn from_scene_node(node: &SceneNode) -> Self {
+        if let Some(data) = &node.editable_mesh {
+            return Self::from_scene_data(data);
+        }
+        Self::from_primitive(node.primitive)
+    }
+
+    /// Convert a parametric primitive into editable topology.
+    pub fn from_primitive(primitive: Primitive) -> Self {
+        let mesh = match primitive {
+            Primitive::Cube | Primitive::Empty => primitives::cube(1),
+            Primitive::Plane => primitives::plane(1),
+            Primitive::Cylinder => primitives::cylinder(16),
+            Primitive::Capsule => primitives::capsule(16, 4),
+            Primitive::Sphere => primitives::sphere(8, 12),
+            Primitive::Wedge => primitives::wedge(1),
+            Primitive::Torus => primitives::torus(24, 12),
+            Primitive::Prism => primitives::prism(12),
+            Primitive::Sphere2D => primitives::sphere2d(24, 12),
+        };
+        let mut editable = Self::from_mesh_data(&mesh);
+        if primitive == Primitive::Empty {
+            // An empty node has no visible topology yet; start from one cube
+            // so Tab Mode always has something to manipulate.
+            editable = Self::cube();
+        }
+        editable
+    }
+
+    /// Persistable payload for the scene node.
+    pub fn to_scene_data(&self) -> EditableMeshData {
+        EditableMeshData {
+            vertices: self
+                .vertices
+                .iter()
+                .map(|vertex| vertex.position.to_array())
+                .collect(),
+            indices: self
+                .faces
+                .iter()
+                .flat_map(|face| face.indices.map(|index| index as u32))
+                .collect(),
+            revision: 1,
+        }
+    }
+
+    /// Render mesh with flat per-face normals and planar box-projected UVs.
+    ///
+    /// The authored topology keeps shared corners, while the render mesh
+    /// duplicates each triangle so a welded cube still reads as a hard-edged
+    /// block instead of a smoothly shaded blob.
+    pub fn to_mesh_data_uv(&self) -> MeshData {
+        let mut mesh = MeshData::with_capacity(self.vertices.len(), self.faces.len() * 3);
+        for face in &self.faces {
+            let a = self.vertices[face.indices[0]].position;
+            let b = self.vertices[face.indices[1]].position;
+            let c = self.vertices[face.indices[2]].position;
+            let normal = (b - a).cross(c - a).normalize_or_zero();
+            let uv = |position: Vec3| {
+                if normal.x.abs() >= normal.y.abs() && normal.x.abs() >= normal.z.abs() {
+                    [position.z + 0.5, position.y + 0.5]
+                } else if normal.y.abs() >= normal.z.abs() {
+                    [position.x + 0.5, position.z + 0.5]
+                } else {
+                    [position.x + 0.5, position.y + 0.5]
+                }
+            };
+            let base = mesh.positions.len() as u32;
+            mesh.push_vertex_uv(a, normal, uv(a));
+            mesh.push_vertex_uv(b, normal, uv(b));
+            mesh.push_vertex_uv(c, normal, uv(c));
+            mesh.push_triangle(base, base + 1, base + 2);
+        }
+        mesh
+    }
+
+    /// Replace the working topology from a persisted payload.
+    pub fn replace_from_scene_data(&mut self, data: &EditableMeshData) {
+        *self = Self::from_scene_data(data);
+    }
+
     /// Create an empty mesh.
     pub fn new() -> Self {
         Self {
@@ -561,6 +707,15 @@ mod tests {
         let cube = EditableMesh::cube();
         assert_eq!(cube.vertex_count(), 8);
         assert_eq!(cube.face_count(), 12); // 6 sides * 2 triangles
+    }
+
+    #[test]
+    fn primitive_cube_welds_shared_corners_and_renders_flat_faces() {
+        let mesh = EditableMesh::from_primitive(Primitive::Cube);
+        assert_eq!(mesh.vertex_count(), 8);
+        let render = mesh.to_mesh_data_uv();
+        assert_eq!(render.positions.len(), 12 * 3);
+        assert_eq!(render.normals.len(), render.positions.len());
     }
 
     #[test]

@@ -7,6 +7,14 @@ use serde_json::{Map, Value};
 
 use crate::commands::catalog::CommandDefinition;
 
+/// Canonical creatable primitive slugs. Every Agent schema and batch enum must
+/// read this list so a new shape cannot be accepted by one path and rejected by
+/// another.
+pub(super) const PRIMITIVE_KINDS: &[&str] = &[
+    "empty", "cube", "sphere", "plane", "cylinder", "capsule", "wedge", "torus", "prism",
+    "sphere2d",
+];
+
 pub fn sanitize_tool_name(name: &str) -> String {
     let sanitized = name
         .chars()
@@ -71,6 +79,15 @@ pub(super) fn command_to_openai_tool(
                     "maxItems": 4
                 })
             }
+            "array" if command.name == "game.light" && parameter.name == "color" => {
+                serde_json::json!({
+                    "type": "array",
+                    "description": description,
+                    "items": {"type": "integer", "minimum": 0, "maximum": 255},
+                    "minItems": 3,
+                    "maxItems": 3
+                })
+            }
             "array" if parameter.name == "tags" => serde_json::json!({
                 "type": "array",
                 "description": description,
@@ -78,10 +95,43 @@ pub(super) fn command_to_openai_tool(
                 "maxItems": 32
             }),
             "array" => serde_json::json!({"type": "array", "description": description}),
+            "object" if parameter.name == "light" => light_schema(),
+            "object" if parameter.name == "surface" => surface_schema(),
+            "object" if command.name == "game.mesh_asset" && parameter.name == "mesh_asset" => {
+                mesh_asset_reference_schema()
+            }
             "object" => serde_json::json!({"type": "object", "description": description}),
-            "enum" if parameter.name == "primitive" => enum_schema(
+            "string" if parameter.name == "mesh_asset" => mesh_asset_schema(),
+            "enum" if parameter.name == "primitive" => enum_schema(&description, PRIMITIVE_KINDS),
+            "enum" if parameter.name == "pivot" => pivot_schema(),
+            "enum" if command.name == "game.light" && parameter.name == "kind" => {
+                enum_schema(&description, &["point", "spot"])
+            }
+            "enum" if command.name == "game.light" && parameter.name == "action" => {
+                enum_schema(&description, &["create", "update", "remove"])
+            }
+            "enum" if command.name == "game.mesh_asset" && parameter.name == "action" => {
+                enum_schema(
+                    &description,
+                    &["import", "inspect", "place", "rig", "remove"],
+                )
+            }
+            "enum" if command.name == "game.camera" && parameter.name == "action" => enum_schema(
                 &description,
-                &["empty", "cube", "sphere", "plane", "cylinder", "capsule"],
+                &["create", "add", "set", "remove", "activate", "look_through"],
+            ),
+            "enum" if parameter.name == "light_kind" => {
+                enum_schema(&description, &["point", "spot"])
+            }
+            "enum" if parameter.name == "light_action" => {
+                enum_schema(&description, &["create", "update", "remove"])
+            }
+            "enum" if parameter.name == "mesh_action" => {
+                enum_schema(&description, &["inspect", "place"])
+            }
+            "enum" if parameter.name == "camera_action" => enum_schema(
+                &description,
+                &["create", "add", "set", "remove", "activate", "look_through"],
             ),
             "enum" if parameter.name == "design_profile" => enum_schema(
                 &description,
@@ -110,7 +160,7 @@ pub(super) fn command_to_openai_tool(
             ]});
         }
         if command.name == "ui.document.apply" && parameter.name == "edits" {
-            schema=serde_json::json!({"type":"array","description":description,"maxItems":128,
+            schema = serde_json::json!({"type":"array","description":description,"maxItems":128,
                 "items":{"type":"object","properties":{
                     "op":{"type":"string","enum":["insert","add","patch","remove","rename","reparent","mount","bind"]},
                     "parent":{"type":"string"},"id":{"type":"string"},"node":{},"kind":{"type":"string","enum":["frame","label","image","button","input"]},
@@ -146,9 +196,14 @@ fn localized_tool_description(command: &CommandDefinition, language: Language) -
     description
 }
 
-pub(super) fn localized_native_tool_description(name: &str, fallback: &str, language: Language) -> String {
+pub(super) fn localized_native_tool_description(
+    name: &str,
+    fallback: &str,
+    language: Language,
+) -> String {
     let key = match name {
         "asset_generate_local_png" => Some("commands.asset_generate_local_png.desc"),
+        "particles_generate" => Some("commands.particles_generate.desc"),
         "asset_generate_image" => Some("commands.asset_generate_image_native.desc"),
         "external_studio_install" => Some("commands.external_studio_install.desc"),
         "external_studio_generate" => Some("commands.external_studio_generate.desc"),
@@ -160,6 +215,13 @@ pub(super) fn localized_native_tool_description(name: &str, fallback: &str, lang
         "scene_diff" => Some("commands.scene_diff.desc"),
         "scene_design_audit" => Some("commands.scene_design_audit.desc"),
         "scene_inspect" => Some("commands.scene_inspect.desc"),
+        "light_create" => Some("commands.light_create.desc"),
+        "light_update" => Some("commands.light_update.desc"),
+        "mesh_asset_inspect" => Some("commands.mesh_asset_inspect.desc"),
+        "mesh_asset_place" => Some("commands.mesh_asset_place.desc"),
+        "audio_edit" => Some("commands.game_audio.desc"),
+        "mesh_edit" => Some("commands.game_mesh.desc"),
+        "camera_activate" => Some("commands.camera_activate.desc"),
         "selection_get" => Some("commands.selection_get.desc"),
         "viewport_capture" => Some("commands.viewport_capture.desc"),
         "assets_catalog" => Some("commands.assets_catalog.desc"),
@@ -283,8 +345,8 @@ fn scene_entity_schema() -> Value {
             (
                 "kind".to_string(),
                 enum_schema(
-                    "Primitive to create.",
-                    &["empty", "cube", "sphere", "plane", "cylinder", "capsule"],
+                    "Primitive to create. Use empty together with mesh_asset or light for component-only entities.",
+                    PRIMITIVE_KINDS,
                 ),
             ),
             ("name".to_string(), string_schema("Unique entity name.")),
@@ -296,6 +358,22 @@ fn scene_entity_schema() -> Value {
             (
                 "color_rgba".to_string(),
                 color_schema("RGBA channels from 0 to 255."),
+            ),
+            (
+                "light".to_string(),
+                light_schema(),
+            ),
+            (
+                "mesh_asset".to_string(),
+                mesh_asset_schema(),
+            ),
+            (
+                "surface".to_string(),
+                surface_schema(),
+            ),
+            (
+                "pivot".to_string(),
+                pivot_schema(),
             ),
             (
                 "semantic_role".to_string(),
@@ -360,7 +438,7 @@ pub(super) fn scene_build_schema() -> Value {
             },
             "entities": {
                 "type": "array",
-                "description": "Primitive entities to create after groups.",
+                "description": "Primitive, mesh-asset or light entities to create after groups. Imported mesh paths live under assets; lights use the light component.",
                 "items": scene_entity_schema(),
                 "maxItems": 128
             }
@@ -387,16 +465,13 @@ pub(super) fn batch_operation_params_schema() -> Value {
             (
                 "kind".to_string(),
                 enum_schema(
-                    "Primitive to create.",
-                    &["empty", "cube", "sphere", "plane", "cylinder"],
+                    "Primitive to create. Use empty together with mesh_asset or light for component-only entities.",
+                    PRIMITIVE_KINDS,
                 ),
             ),
             (
                 "primitive".to_string(),
-                enum_schema(
-                    "Canonical primitive alias.",
-                    &["empty", "cube", "sphere", "plane", "cylinder"],
-                ),
+                enum_schema("Canonical primitive alias.", PRIMITIVE_KINDS),
             ),
             (
                 "type".to_string(),
@@ -460,6 +535,10 @@ pub(super) fn batch_operation_params_schema() -> Value {
                 "color".to_string(),
                 color_schema("RGBA channels from 0 to 255."),
             ),
+            ("light".to_string(), light_schema()),
+            ("mesh_asset".to_string(), mesh_asset_schema()),
+            ("surface".to_string(), surface_schema()),
+            ("pivot".to_string(), pivot_schema()),
             ("visible".to_string(), boolean_schema("Entity visibility.")),
             ("locked".to_string(), boolean_schema("Editor lock state.")),
             ("animation".to_string(), serde_json::json!({"type":["object","null"],"description":"Replace or remove the transform animation rig on scene_update."})),
@@ -564,6 +643,110 @@ pub(super) fn expected_scene_state_schema() -> Value {
     )
 }
 
+pub(super) fn light_schema() -> Value {
+    serde_json::json!({
+        "type": ["object", "null"],
+        "description": "Entity light component. kind=point or spot, RGB color bytes, intensity, range in metres and optional spot cones. Null removes the light on game.update.",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "description": "Point emits in every direction; spot follows the entity's local -Z axis with inner/outer cones.",
+                "enum": ["point", "spot"]
+            },
+            "color": {
+                "type": "array",
+                "description": "RGB bytes in sRGB space.",
+                "items": {"type": "integer", "minimum": 0, "maximum": 255},
+                "minItems": 3,
+                "maxItems": 3
+            },
+            "intensity": number_schema("Light multiplier, not lux.", 0.0, 64.0),
+            "range": number_schema("Reach in metres; intensity reaches zero at this distance.", 0.05, 10000.0),
+            "inner_cone_degrees": number_schema("Spot inner cone in degrees.", 0.0, 179.0),
+            "outer_cone_degrees": number_schema("Spot outer cone in degrees; must exceed the inner cone.", 0.0, 179.0),
+            "enabled": boolean_schema("Light enabled state.")
+        },
+        "additionalProperties": false
+    })
+}
+
+pub(super) fn light_color_schema() -> Value {
+    serde_json::json!({
+        "type": "array",
+        "description": "RGB bytes in sRGB space.",
+        "items": {"type": "integer", "minimum": 0, "maximum": 255},
+        "minItems": 3,
+        "maxItems": 3
+    })
+}
+
+pub(super) fn surface_schema() -> Value {
+    serde_json::json!({
+        "type": ["object", "null"],
+        "description": "Base-color surface. texture is project-relative under assets; tiling is [u,v]; unlit skips scene lighting; double_sided disables back-face culling; opacity is 0..1. Null restores the default surface.",
+        "properties": {
+            "texture": string_schema("Base-color texture path such as assets/generated/wall.png."),
+            "tiling": {
+                "type": "array",
+                "description": "Texture repeat on U and V.",
+                "items": {"type": "number"},
+                "minItems": 2,
+                "maxItems": 2
+            },
+            "unlit": boolean_schema("Render without scene lighting."),
+            "double_sided": boolean_schema("Render both faces."),
+            "opacity": number_schema("Surface opacity.", 0.0, 1.0)
+        },
+        "additionalProperties": false
+    })
+}
+
+pub(super) fn mesh_asset_reference_schema() -> Value {
+    object_schema(
+        Map::from_iter([
+            (
+                "path".to_string(),
+                string_schema("Mesh path under assets, for example models/shelf.glb."),
+            ),
+            (
+                "node".to_string(),
+                integer_schema(
+                    "Optional source node index inside the glTF document.",
+                    0,
+                    65535,
+                ),
+            ),
+            (
+                "import_scale".to_string(),
+                number_schema(
+                    "Uniform import scale applied after the node transform.",
+                    0.0001,
+                    10000.0,
+                ),
+            ),
+            (
+                "content_hash".to_string(),
+                string_schema("Optional cached content hash; usually supplied by the importer."),
+            ),
+        ]),
+        &["path"],
+    )
+}
+
+pub(super) fn mesh_asset_schema() -> Value {
+    serde_json::json!({
+        "type": ["string", "null"],
+        "description": "Static mesh asset path relative to the project assets directory, for example models/shelf.glb. Supports .glb and .gltf; null unlinks it on game.update."
+    })
+}
+
+pub(super) fn pivot_schema() -> Value {
+    enum_schema(
+        "Local pivot used for placement and scaling: geometric center, base, or one of the lower corners.",
+        &["center", "base", "corner"],
+    )
+}
+
 pub(super) fn string_schema(description: &str) -> Value {
     serde_json::json!({"type": "string", "description": description})
 }
@@ -581,7 +764,11 @@ pub(super) fn number_schema(description: &str, minimum: f64, maximum: f64) -> Va
     })
 }
 
-pub(super) fn integer_schema(description: &str, minimum: impl Into<i64>, maximum: impl Into<i64>) -> Value {
+pub(super) fn integer_schema(
+    description: &str,
+    minimum: impl Into<i64>,
+    maximum: impl Into<i64>,
+) -> Value {
     serde_json::json!({
         "type": "integer",
         "description": description,

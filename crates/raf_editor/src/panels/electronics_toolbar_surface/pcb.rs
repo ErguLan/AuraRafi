@@ -1,12 +1,8 @@
 //! PCB tools and desktop preview controls of the Electronics toolbar band.
 
 use raf_electronics::CadSurfaceKind;
-use raf_render::api_graphic_basic::ui_surface::{
-    UiAccessibilityRole, UiIcon, UiIconId,
-};
-use raf_ui::{
-    UiEventBinding, UiEventKind, UiLayout, UiNode, UiNodeKind, UiTextStyle, UiTokens,
-};
+use raf_render::api_graphic_basic::ui_surface::{UiAccessibilityRole, UiIcon, UiIconId};
+use raf_ui::{UiEventBinding, UiEventKind, UiLayout, UiNode, UiNodeKind, UiTextStyle, UiTokens};
 
 use super::{separator, ToolbarControl, CLASS_BUTTON};
 
@@ -29,8 +25,12 @@ pub(super) fn document_tools(controls: &mut Vec<ToolbarControl>) {
         UiIconId::CadRoute,
         Some("electronics.toolbar.route"),
     ));
-    controls.push(ToolbarControl::command("electronics.pcb.via", UiIconId::CadVia,
-        Some("electronics.pcb.via_label"), true));
+    controls.push(ToolbarControl::command(
+        "electronics.pcb.via",
+        UiIconId::CadVia,
+        Some("electronics.pcb.via_label"),
+        true,
+    ));
     controls.push(ToolbarControl::tool(
         "electronics.board-outline",
         UiIconId::CadOutline,
@@ -52,8 +52,12 @@ pub(super) fn document_tools(controls: &mut Vec<ToolbarControl>) {
         None,
         true,
     ));
-    controls.push(ToolbarControl::command("electronics.pcb.menu:rules", UiIconId::Settings,
-        None, true));
+    controls.push(ToolbarControl::command(
+        "electronics.pcb.menu:rules",
+        UiIconId::Settings,
+        None,
+        true,
+    ));
 }
 
 /// PCB-only preview, layers, export and 3D controls of the wide ribbon.

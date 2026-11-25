@@ -211,7 +211,12 @@ pub(super) fn review_chip(palette: StudioUiPalette, panel: &AgentPanel, width: f
         ))
 }
 
-pub(super) fn status_label(palette: StudioUiPalette, id: &str, key: &str, icon: UiIconId) -> UiNode {
+pub(super) fn status_label(
+    palette: StudioUiPalette,
+    id: &str,
+    key: &str,
+    icon: UiIconId,
+) -> UiNode {
     let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     UiNode::new(id, UiNodeKind::Label)
         .with_class("agent-status")

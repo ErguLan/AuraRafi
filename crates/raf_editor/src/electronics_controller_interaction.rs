@@ -135,7 +135,9 @@ impl NativeElectronicsEditor {
     }
 
     pub fn undo(&mut self) -> bool {
-        if self.undo_route_point() {return true;}
+        if self.undo_route_point() {
+            return true;
+        }
         if !self.history.undo(&mut self.schematic, &mut self.pcb) {
             return false;
         }

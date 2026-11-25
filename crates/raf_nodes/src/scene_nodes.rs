@@ -66,6 +66,13 @@ pub const SCENE_NODES: &[(&str, &str, bool)] = &[
     ("set-parent", "Set Parent", true),
     ("detach-parent", "Detach Parent", true),
     ("send-event", "Send Event", true),
+    ("particles-play", "Play Particles", true),
+    ("particles-pause", "Pause Particles", true),
+    ("particles-stop", "Stop Particles", true),
+    ("particles-freeze", "Freeze Particles", true),
+    ("particles-emit", "Emit Particles", true),
+    ("particles-set-rate", "Set Particle Rate", true),
+    ("particles-set-time-scale", "Set Particle Time Scale", true),
     ("get-velocity", "Get Velocity", false),
     ("set-velocity", "Set Velocity", true),
     ("add-velocity", "Add Velocity", true),
@@ -175,6 +182,8 @@ pub fn create(slug: &str) -> Option<Node> {
             pin("Aim Offset", K::Input, T::Vec3);
             pin("Sharpness", K::Input, T::Float);
         }
+        "particles-emit" => pin("Count", K::Input, T::Int),
+        "particles-set-rate" | "particles-set-time-scale" => pin("Scale", K::Input, T::Float),
         _ => {}
     }
     let mut property = |key: &str, value: &str| {
@@ -216,6 +225,8 @@ pub fn create(slug: &str) -> Option<Node> {
         }
         "set-parent" | "detach-parent" => property("keep_world", "true"),
         "set-local-position" | "set-rotation" => property("value", "0,0,0"),
+        "particles-emit" => property("count", "16"),
+        "particles-set-rate" | "particles-set-time-scale" => property("scale", "1"),
         "send-event" => {
             property("value", "");
             property("broadcast", "false");

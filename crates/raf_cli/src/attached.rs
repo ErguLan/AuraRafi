@@ -14,8 +14,6 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Loopback connect fails fast so stale descriptors do not stall the CLI.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// The editor queues attached commands onto its frame loop, so the Welcome
 /// and command responses stay patient even while the editor is busy.
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -24,6 +22,7 @@ pub struct AttachedClient {
     stream: TcpStream,
     welcome: AttachWelcome,
     project_path: PathBuf,
+    client_name: String,
     last_context: Option<Value>,
 }
 
@@ -49,7 +48,23 @@ impl AttachedClient {
         } else {
             project_path.to_path_buf()
         };
-        let descriptor = EndpointDescriptor::load_from_project(&project_path)?;
+        let (stream, welcome) = Self::open_transport(&project_path, client_name)?;
+        Ok(Self {
+            stream,
+            welcome,
+            project_path,
+            client_name: client_name.to_string(),
+            last_context: None,
+        })
+    }
+
+    /// Opens one authenticated loopback transport. Connect and reconnect share
+    /// this path so a recovered adapter is byte-identical to a fresh one.
+    fn open_transport(
+        project_path: &Path,
+        client_name: &str,
+    ) -> Result<(TcpStream, AttachWelcome), String> {
+        let descriptor = EndpointDescriptor::load_from_project(project_path)?;
         if descriptor.transport != "tcp_loopback" {
             return Err(format!(
                 "Unsupported attached transport '{}'. This build supports tcp_loopback.",
@@ -110,12 +125,49 @@ impl AttachedClient {
             }
             welcome
         };
-        Ok(Self {
-            stream,
-            welcome,
-            project_path,
-            last_context: None,
-        })
+        Ok((stream, welcome))
+    }
+
+    /// Re-reads the project descriptor and re-authenticates after the editor
+    /// restarted. The project path is stable; the port and token are not.
+    fn reconnect(&mut self) -> Result<(), String> {
+        let (stream, welcome) = Self::open_transport(&self.project_path, &self.client_name)?;
+        self.stream = stream;
+        self.welcome = welcome;
+        // The editor may have reopened a different revision or document, so a
+        // cached context from the previous connection must not be served.
+        self.last_context = None;
+        Ok(())
+    }
+
+    /// Sends one command and reads its response. `Err` always means the
+    /// transport failed; editor-sent protocol errors are returned as normal
+    /// command responses.
+    fn exchange(&mut self, request: &EngineCommandRequest) -> Result<EngineCommandResponse, String> {
+        {
+            let mut writer: &TcpStream = &self.stream;
+            write_frame(&mut writer, IpcFrame::Command(request.clone()))?;
+        }
+        let frame = {
+            let mut reader: &TcpStream = &self.stream;
+            read_frame(&mut reader)?
+        };
+        match frame {
+            IpcFrame::Response(response) => {
+                self.refresh_from_response(&response);
+                Ok(response)
+            }
+            IpcFrame::Error { message } => Ok(EngineCommandResponse::error(
+                request.id,
+                "Attached transport",
+                message,
+            )),
+            _ => Ok(EngineCommandResponse::error(
+                request.id,
+                "Attached transport",
+                "The editor returned an unexpected frame.",
+            )),
+        }
     }
 
     pub fn resource(&self, uri: &str) -> Result<Value, String> {
@@ -258,25 +310,43 @@ impl CommandEndpoint for AttachedClient {
             CommandSource::Mcp => CommandSource::Mcp,
             _ => CommandSource::Cli,
         };
-        let mut writer: &TcpStream = &self.stream;
-        let mut reader: &TcpStream = &self.stream;
-        if let Err(error) = write_frame(&mut writer, IpcFrame::Command(request.clone())) {
-            return EngineCommandResponse::error(request.id, "Attached transport", error);
-        }
-        match read_frame(&mut reader) {
-            Ok(IpcFrame::Response(response)) => {
-                self.refresh_from_response(&response);
-                response
+        match self.exchange(&request) {
+            Ok(response) => response,
+            Err(error) => {
+                // The editor may have restarted between calls, which replaces
+                // the descriptor port and token. Re-authenticate once so the
+                // adapter survives editor restarts instead of staying dead.
+                if let Err(reconnect) = self.reconnect() {
+                    return EngineCommandResponse::error(
+                        request.id,
+                        "Attached transport",
+                        format!("{error} Reconnect failed: {reconnect}"),
+                    );
+                }
+                let read_only = !crate::cli::mcp_command_is_mutation(&request.name);
+                if read_only {
+                    // Reads have no side effects, so replaying one on the new
+                    // transport is always safe.
+                    return match self.exchange(&request) {
+                        Ok(response) => response,
+                        Err(retry) => EngineCommandResponse::error(
+                            request.id,
+                            "Attached transport",
+                            format!(
+                                "{error} The editor connection was re-established, but the read retry failed: {retry}"
+                            ),
+                        ),
+                    };
+                }
+                EngineCommandResponse::error(
+                    request.id,
+                    "Attached transport",
+                    format!(
+                        "{error} The editor connection was re-established, but this mutation was \
+                         not replayed because it may already have executed. Verify the scene before retrying."
+                    ),
+                )
             }
-            Ok(IpcFrame::Error { message }) => {
-                EngineCommandResponse::error(request.id, "Attached transport", message)
-            }
-            Ok(_) => EngineCommandResponse::error(
-                request.id,
-                "Attached transport",
-                "The editor returned an unexpected frame.",
-            ),
-            Err(error) => EngineCommandResponse::error(request.id, "Attached transport", error),
         }
     }
 }

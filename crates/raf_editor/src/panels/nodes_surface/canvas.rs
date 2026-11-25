@@ -1,8 +1,8 @@
 //! Graph canvas and node card rendering for the Nodes authoring surface.
 
-use super::*;
 use super::links::pin_button;
 use super::toolbar::{build_graph_header, stat_label};
+use super::*;
 
 // ----------------------------------------------------------------------------
 // CENTER PANEL: Graph Canvas + Floating HUD + Wire Rendering

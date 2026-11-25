@@ -845,12 +845,7 @@ fn application_bar_style_sheet(palette: StudioUiPalette) -> raf_ui::UiStyleSheet
             raf_ui::UiStyleRule::new(
                 raf_ui::UiStyleSelector::Class("application-bar-window-button-close".to_string()),
                 raf_ui::UiStylePatch {
-                    fill: Some([
-                        tokens.danger[0],
-                        tokens.danger[1],
-                        tokens.danger[2],
-                        96,
-                    ]),
+                    fill: Some([tokens.danger[0], tokens.danger[1], tokens.danger[2], 96]),
                     border: Some(tokens.danger),
                     border_width: Some(1.0),
                     ..raf_ui::UiStylePatch::default()

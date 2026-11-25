@@ -1,0 +1,211 @@
+{
+  "version": 1,
+  "name": "Sparks",
+  "budget": {
+    "max_particles": 1800,
+    "max_sprites": 1800
+  },
+  "emitters": [
+    {
+      "name": "sparks",
+      "texture": "particles/textures/spark.png",
+      "enabled": true,
+      "max_particles": 1400,
+      "rate": 220.0,
+      "burst": 70,
+      "lifetime": [
+        0.22,
+        0.7
+      ],
+      "speed": [
+        3.5,
+        8.5
+      ],
+      "spread": [
+        30.0,
+        38.0
+      ],
+      "direction": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "gravity": [
+        0.0,
+        -9.81,
+        0.0
+      ],
+      "drag": 0.04,
+      "size": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.075
+          },
+          {
+            "t": 0.35,
+            "value": 0.05
+          },
+          {
+            "t": 1.0,
+            "value": 0.018
+          }
+        ]
+      },
+      "opacity": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 1.0
+          },
+          {
+            "t": 0.7,
+            "value": 0.85
+          },
+          {
+            "t": 1.0,
+            "value": 0.0
+          }
+        ]
+      },
+      "color": {
+        "keys": [
+          {
+            "t": 0.0,
+            "color": [
+              255,
+              255,
+              230,
+              255
+            ]
+          },
+          {
+            "t": 0.25,
+            "color": [
+              255,
+              220,
+              120,
+              255
+            ]
+          },
+          {
+            "t": 0.6,
+            "color": [
+              255,
+              130,
+              40,
+              220
+            ]
+          },
+          {
+            "t": 1.0,
+            "color": [
+              150,
+              35,
+              10,
+              0
+            ]
+          }
+        ]
+      },
+      "shape": {
+        "type": "point"
+      },
+      "flipbook": null,
+      "collision": {
+        "ground_y": 0.0,
+        "bounce": 0.35,
+        "kill": true
+      },
+      "wind_affects_drag": false
+    },
+    {
+      "name": "glow",
+      "texture": "particles/textures/soft.png",
+      "enabled": true,
+      "max_particles": 320,
+      "rate": 28.0,
+      "burst": 10,
+      "lifetime": [
+        0.15,
+        0.4
+      ],
+      "speed": [
+        0.4,
+        1.4
+      ],
+      "spread": [
+        80.0,
+        80.0
+      ],
+      "direction": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "gravity": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "drag": 2.0,
+      "size": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.14
+          },
+          {
+            "t": 0.5,
+            "value": 0.28
+          },
+          {
+            "t": 1.0,
+            "value": 0.06
+          }
+        ]
+      },
+      "opacity": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.45
+          },
+          {
+            "t": 1.0,
+            "value": 0.0
+          }
+        ]
+      },
+      "color": {
+        "keys": [
+          {
+            "t": 0.0,
+            "color": [
+              255,
+              220,
+              150,
+              220
+            ]
+          },
+          {
+            "t": 1.0,
+            "color": [
+              255,
+              120,
+              30,
+              0
+            ]
+          }
+        ]
+      },
+      "shape": {
+        "type": "sphere",
+        "radius": 0.07
+      },
+      "flipbook": null,
+      "collision": null,
+      "wind_affects_drag": true
+    }
+  ]
+}

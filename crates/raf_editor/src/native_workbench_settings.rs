@@ -47,6 +47,9 @@ pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, va
         "settings.external_studio.enabled" => settings.external_asset_studio.enabled = value,
         "settings.hierarchy_show_icons" => settings.hierarchy_show_icons = value,
         "settings.hierarchy_show_script_links" => settings.hierarchy_show_script_links = value,
+        "settings.hierarchy_show_script_indicators" => {
+            settings.hierarchy_show_script_indicators = value
+        }
         "settings.hierarchy_show_visibility" => settings.hierarchy_show_visibility = value,
         "settings.hierarchy_show_locked" => settings.hierarchy_show_locked = value,
         "settings.hierarchy_show_hidden" => settings.hierarchy_show_hidden = value,
@@ -71,6 +74,10 @@ pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, va
         "settings.script_runtime_enabled" => settings.script_runtime_enabled = value,
         "settings.runtime.hot_reload" => settings.runtime.hot_reload = value,
         "settings.runtime.diagnostics" => settings.runtime.diagnostics = value,
+        "settings.particle_preview.enabled" => settings.particle_preview.enabled = value,
+        "settings.particle_preview.paused" => settings.particle_preview.paused = value,
+        "settings.particle_preview.frozen" => settings.particle_preview.frozen = value,
+        "settings.particle_preview.stopped" => settings.particle_preview.stopped = value,
         "settings.script_hot_reload" => settings.script_hot_reload = value,
         "settings.agent_streaming_enabled" => settings.agent_streaming_enabled = value,
         "settings.agent_tool_call_limit_enabled" => settings.agent_tool_call_limit_enabled = value,
@@ -85,19 +92,15 @@ pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, va
         }
         "settings.quality.potato" if value => {
             settings.render_quality = raf_core::config::RenderQuality::Potato;
-            settings.render_preset = raf_core::config::RenderPreset::Potato;
         }
         "settings.quality.low" if value => {
             settings.render_quality = raf_core::config::RenderQuality::Low;
-            settings.render_preset = raf_core::config::RenderPreset::Low;
         }
         "settings.quality.medium" if value => {
             settings.render_quality = raf_core::config::RenderQuality::Medium;
-            settings.render_preset = raf_core::config::RenderPreset::Medium;
         }
         "settings.quality.high" if value => {
             settings.render_quality = raf_core::config::RenderQuality::High;
-            settings.render_preset = raf_core::config::RenderPreset::High;
         }
         "settings.render_execution_policy.auto" if value => {
             settings.render_execution_policy = raf_core::config::RenderExecutionPolicy::Auto
@@ -450,22 +453,10 @@ pub(crate) fn apply_settings_select(settings: &mut EngineSettings, key: &str, va
         }
         "settings.quality" => {
             settings.render_quality = match value {
-                "potato" => {
-                    settings.render_preset = raf_core::config::RenderPreset::Potato;
-                    raf_core::config::RenderQuality::Potato
-                }
-                "low" => {
-                    settings.render_preset = raf_core::config::RenderPreset::Low;
-                    raf_core::config::RenderQuality::Low
-                }
-                "medium" => {
-                    settings.render_preset = raf_core::config::RenderPreset::Medium;
-                    raf_core::config::RenderQuality::Medium
-                }
-                "high" => {
-                    settings.render_preset = raf_core::config::RenderPreset::High;
-                    raf_core::config::RenderQuality::High
-                }
+                "potato" => raf_core::config::RenderQuality::Potato,
+                "low" => raf_core::config::RenderQuality::Low,
+                "medium" => raf_core::config::RenderQuality::Medium,
+                "high" => raf_core::config::RenderQuality::High,
                 _ => return false,
             };
         }
@@ -553,6 +544,21 @@ pub(crate) fn apply_settings_range(settings: &mut EngineSettings, key: &str, val
         "settings.font_size" => settings.font_size = value.clamp(10.0, 24.0),
         "settings.ui_scale" => settings.ui_scale = value.clamp(0.5, 3.0),
         "settings.fps_limit" => settings.fps_limit = value.round().clamp(15.0, 240.0) as u32,
+        "settings.particle_preview.max_sprites" => {
+            settings.particle_preview.max_sprites = value.round().clamp(0.0, 100_000.0) as u32
+        }
+        "settings.particle_preview.time_scale" => {
+            settings.particle_preview.time_scale = value.clamp(0.0, 4.0)
+        }
+        "settings.particle_preview.wind_x" => {
+            settings.particle_preview.wind[0] = value.clamp(-20.0, 20.0)
+        }
+        "settings.particle_preview.wind_y" => {
+            settings.particle_preview.wind[1] = value.clamp(-20.0, 20.0)
+        }
+        "settings.particle_preview.wind_z" => {
+            settings.particle_preview.wind[2] = value.clamp(-20.0, 20.0)
+        }
         "settings.grid_size" => settings.grid_size = value.clamp(0.1, 10.0),
         "settings.grid_load_distance" => settings.grid_load_distance = value.clamp(0.0, 500.0),
         "settings.electronics_grid_step_mm" => {
@@ -615,6 +621,11 @@ pub(crate) fn is_settings_numeric_text_key(key: &str) -> bool {
             | "settings.font_size"
             | "settings.ui_scale"
             | "settings.fps_limit"
+            | "settings.particle_preview.max_sprites"
+            | "settings.particle_preview.time_scale"
+            | "settings.particle_preview.wind_x"
+            | "settings.particle_preview.wind_y"
+            | "settings.particle_preview.wind_z"
             | "settings.grid_size"
             | "settings.grid_load_distance"
             | "settings.electronics_grid_step_mm"

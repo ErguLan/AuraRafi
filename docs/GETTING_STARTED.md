@@ -13,7 +13,7 @@ This guide walks you through setting up and using AuraRafi for the first time.
 
 2. Clone and build:
    ```bash
-   git clone https://github.com/AuraRafi/AuraRafi.git
+   git clone https://github.com/ErguLan/AuraRafi.git
    cd AuraRafi
    cargo check -p raf_editor
    ```
@@ -243,7 +243,12 @@ Additional persisted documents depend on project type:
 | E | Rotate tool |
 | R | Scale tool / Rotate component (schematic) |
 | Z | Cycle render style (Solid / Wire / Fill) |
-| Tab | Toggle Object / Vertex edit mode |
+| Tab | Enter/apply the focused Tab Mesh Editor for the selected block |
+| 1 / 2 / 3 | Vertex / edge / face selection inside Tab Mode |
+| A / Backspace | Select all / clear mesh selection inside Tab Mode |
+| E / I / Ctrl+R | Extrude / inset / subdivide selected faces inside Tab Mode |
+| X or Delete | Delete selected faces inside Tab Mode |
+| Double right-click | Add a movable point on a face inside Tab Mode |
 | Ctrl+S | Save current project/document |
 | Ctrl+Z / Ctrl+Y | Undo / Redo |
 | Delete | Remove selected entity/node/component/wire |

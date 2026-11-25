@@ -240,19 +240,20 @@ impl AgentPanel {
         if settings.agent_openai_use_plan && settings.default_ai_provider == AiProvider::OpenAI {
             raf_ai::chatgpt_auth::ensure_models_requested();
         }
-        if let Some(provider) =
-            settings
-                .ai_providers
-                .iter()
-                .find(|p| p.provider == settings.default_ai_provider && p.enabled)
+        if let Some(provider) = settings
+            .ai_providers
+            .iter()
+            .find(|p| p.provider == settings.default_ai_provider && p.enabled)
         {
-            if !(provider.provider == AiProvider::OpenAI && settings.agent_openai_use_plan) && matches!(
-                provider.provider,
-                AiProvider::OpenRouter
-                    | AiProvider::OpenAI
-                    | AiProvider::OpenCode
-                    | AiProvider::OpenCodeGo
-            ) {
+            if !(provider.provider == AiProvider::OpenAI && settings.agent_openai_use_plan)
+                && matches!(
+                    provider.provider,
+                    AiProvider::OpenRouter
+                        | AiProvider::OpenAI
+                        | AiProvider::OpenCode
+                        | AiProvider::OpenCodeGo
+                )
+            {
                 // OpenCode services keep their dedicated catalog endpoints; the
                 // generic gateways fetch from the configured base URL.
                 let base_url = match provider.provider {
@@ -272,14 +273,31 @@ impl AgentPanel {
             {
                 None
             }
-            AiProvider::OpenAI if settings.agent_openai_use_plan => raf_ai::chatgpt_auth::snapshot()
-                .map(|view| (view.busy, format!("{:?}{:?}{}", view.models, view.message, view.busy))),
+            AiProvider::OpenAI if settings.agent_openai_use_plan => {
+                raf_ai::chatgpt_auth::snapshot().map(|view| {
+                    (
+                        view.busy,
+                        format!("{:?}{:?}{}", view.models, view.message, view.busy),
+                    )
+                })
+            }
             AiProvider::OpenRouter
             | AiProvider::OpenAI
             | AiProvider::OpenCode
             | AiProvider::OpenCodeGo => {
-                let view = self.effective_provider(settings).map(|p| raf_ai::provider_catalog::snapshot_for(p.provider, &p.base_url, &p.api_key)).unwrap_or_default();
-                Some((view.loading, format!("{:?}{:?}{}{}", view.models, view.error, view.loading, view.fetched)))
+                let view = self
+                    .effective_provider(settings)
+                    .map(|p| {
+                        raf_ai::provider_catalog::snapshot_for(p.provider, &p.base_url, &p.api_key)
+                    })
+                    .unwrap_or_default();
+                Some((
+                    view.loading,
+                    format!(
+                        "{:?}{:?}{}{}",
+                        view.models, view.error, view.loading, view.fetched
+                    ),
+                ))
             }
             _ => Some((false, String::new())),
         };
@@ -414,19 +432,29 @@ impl AgentPanel {
         if !provider.enabled {
             return AgentReadiness::ProviderDisabled;
         }
-        if provider.provider == AiProvider::OpenAI && settings.agent_openai_use_plan
-            && !raf_ai::chatgpt_auth::active_connected() {
+        if provider.provider == AiProvider::OpenAI
+            && settings.agent_openai_use_plan
+            && !raf_ai::chatgpt_auth::active_connected()
+        {
             return AgentReadiness::AdapterRequired;
         }
         let model = self.effective_model(provider);
         if model.trim().is_empty() {
             return AgentReadiness::ModelMissing;
         }
-        if provider.provider == AiProvider::OpenAI && settings.agent_openai_use_plan
-            && !crate::panels::ai_model_options::selection_allowed(settings, provider.provider, &format!("account:{model}")) {
+        if provider.provider == AiProvider::OpenAI
+            && settings.agent_openai_use_plan
+            && !crate::panels::ai_model_options::selection_allowed(
+                settings,
+                provider.provider,
+                &format!("account:{model}"),
+            )
+        {
             return AgentReadiness::ModelMissing;
         }
-        if provider.base_url.trim().is_empty() && !(provider.provider == AiProvider::OpenAI && settings.agent_openai_use_plan) {
+        if provider.base_url.trim().is_empty()
+            && !(provider.provider == AiProvider::OpenAI && settings.agent_openai_use_plan)
+        {
             return AgentReadiness::AdapterRequired;
         }
         AgentReadiness::Ready
@@ -461,21 +489,34 @@ impl AgentPanel {
             AgentAction::PasteImage => self.paste_image(settings),
             AgentAction::RefreshModelCatalog => {
                 match settings.default_ai_provider {
-                    AiProvider::OpenAI if settings.agent_openai_use_plan => { let _ = raf_ai::chatgpt_auth::begin_model_refresh(); }
-                    AiProvider::OpenRouter | AiProvider::OpenAI | AiProvider::OpenCode | AiProvider::OpenCodeGo => {
+                    AiProvider::OpenAI if settings.agent_openai_use_plan => {
+                        let _ = raf_ai::chatgpt_auth::begin_model_refresh();
+                    }
+                    AiProvider::OpenRouter
+                    | AiProvider::OpenAI
+                    | AiProvider::OpenCode
+                    | AiProvider::OpenCodeGo => {
                         if let Some(provider) = self.effective_provider(settings) {
                             let base_url = match provider.provider {
-                                AiProvider::OpenRouter | AiProvider::OpenAI => provider.base_url.clone(),
+                                AiProvider::OpenRouter | AiProvider::OpenAI => {
+                                    provider.base_url.clone()
+                                }
                                 _ => String::new(),
                             };
-                            raf_ai::provider_catalog::refresh(provider.provider, &base_url, &provider.api_key);
+                            raf_ai::provider_catalog::refresh(
+                                provider.provider,
+                                &base_url,
+                                &provider.api_key,
+                            );
                         }
                     }
                     _ => {}
                 }
                 self.visual_revision = self.visual_revision.wrapping_add(1);
             }
-            AgentAction::OpenPlanUsage => { crate::script_support::open_url("https://chatgpt.com/settings/usage"); }
+            AgentAction::OpenPlanUsage => {
+                crate::script_support::open_url("https://chatgpt.com/settings/usage");
+            }
             AgentAction::AttachFiles(files) => self.attach_files(files, settings),
             AgentAction::CycleReasoning => {
                 if !self.runtime.status.blocks_input() {
@@ -528,21 +569,26 @@ impl AgentPanel {
                     settings.default_ai_provider
                 };
                 let validated_model_id = if prefix == "account" {
-                    let available = raf_ai::chatgpt_auth::snapshot().is_some_and(|view| {
-                        view.models.iter().any(|model| model.slug == model_id)
-                    });
+                    let available = raf_ai::chatgpt_auth::snapshot()
+                        .is_some_and(|view| view.models.iter().any(|model| model.slug == model_id));
                     if available {
                         Some(model_id)
                     } else {
                         None
                     }
-                } else if !crate::panels::ai_model_options::selection_allowed(settings, target_provider, &model_id) {
+                } else if !crate::panels::ai_model_options::selection_allowed(
+                    settings,
+                    target_provider,
+                    &model_id,
+                ) {
                     None
                 } else {
                     Some(model_id)
                 };
                 if let Some(model_id) = validated_model_id {
-                    if prefix == "account" { settings.agent_openai_use_plan = true; }
+                    if prefix == "account" {
+                        settings.agent_openai_use_plan = true;
+                    }
                     let (mut changed, mut provider_switched) = (false, false);
                     if let Some(config) = settings
                         .ai_providers
@@ -634,8 +680,7 @@ impl AgentPanel {
                 // pins it, so "easier adding" is literally one field.
                 let model_id = self.new_model_id.trim().to_string();
                 if model_id.is_empty() {
-                    self.new_model_error =
-                        Some(t("app.agent_add_model_missing_id", self.language));
+                    self.new_model_error = Some(t("app.agent_add_model_missing_id", self.language));
                     self.visual_revision = self.visual_revision.wrapping_add(1);
                     return;
                 }
@@ -694,8 +739,8 @@ impl AgentPanel {
             AgentAction::DenyCall(id) => self.decision = Some(AgentDecision::Deny(id)),
             AgentAction::ApplyPlan(id) => {
                 self.dismissed_plans.remove(&id);
-                self.input_text = t("app.agent_plan_apply_prompt", self.language)
-                    .replace("{plan}", &id);
+                self.input_text =
+                    t("app.agent_plan_apply_prompt", self.language).replace("{plan}", &id);
                 self.visual_revision = self.visual_revision.wrapping_add(1);
                 self.queue_submission(settings);
             }
@@ -951,20 +996,17 @@ impl AgentPanel {
                     if path.starts_with(&root) {
                         if let Ok((width, height)) = image::image_dimensions(&path) {
                             if let Some(session) = self.history.active_session_mut() {
-                                if session.draft_images.len()
-                                    < raf_ai::chat_media::MAX_IMAGES
+                                if session.draft_images.len() < raf_ai::chat_media::MAX_IMAGES
                                     && !session
                                         .draft_images
                                         .iter()
                                         .any(|image| image.file == pinned)
                                 {
-                                    session.draft_images.push(
-                                        raf_ai::chat_media::ChatImage {
-                                            file: pinned,
-                                            width,
-                                            height,
-                                        },
-                                    );
+                                    session.draft_images.push(raf_ai::chat_media::ChatImage {
+                                        file: pinned,
+                                        width,
+                                        height,
+                                    });
                                 }
                             }
                         }
@@ -1040,9 +1082,17 @@ impl AgentPanel {
             },
             reasoning_effort: settings.agent_reasoning_effort.clone(),
             chatgpt_plan: provider.provider == AiProvider::OpenAI && settings.agent_openai_use_plan,
-            chatgpt_registration: if provider.provider == AiProvider::OpenAI && settings.agent_openai_use_plan {
-                raf_ai::chatgpt_auth::active_registration().or_else(|| self.runtime_key.as_ref().and_then(|key| key.chatgpt_registration.clone()))
-            } else { None },
+            chatgpt_registration: if provider.provider == AiProvider::OpenAI
+                && settings.agent_openai_use_plan
+            {
+                raf_ai::chatgpt_auth::active_registration().or_else(|| {
+                    self.runtime_key
+                        .as_ref()
+                        .and_then(|key| key.chatgpt_registration.clone())
+                })
+            } else {
+                None
+            },
             tool_call_limit_enabled: settings.agent_tool_call_limit_enabled,
             max_tool_calls: settings.agent_max_tool_calls,
         };
@@ -1052,9 +1102,17 @@ impl AgentPanel {
         let messages = self.runtime.messages.clone();
         self.runtime.cancel();
         self.runtime = AgentRuntime::new(OpenAiConfig {
-            base_url: if key.chatgpt_plan { "https://api.openai.com/v1".into() } else { key.base_url.clone() },
+            base_url: if key.chatgpt_plan {
+                "https://api.openai.com/v1".into()
+            } else {
+                key.base_url.clone()
+            },
             model: key.model.clone(),
-            api_key: if key.chatgpt_plan { String::new() } else { key.api_key.clone() },
+            api_key: if key.chatgpt_plan {
+                String::new()
+            } else {
+                key.api_key.clone()
+            },
             max_tokens: key.max_tokens,
             reasoning_effort: key.reasoning_effort.clone(),
             chatgpt_plan: key.chatgpt_plan,
@@ -1550,18 +1608,14 @@ mod tests {
             AgentAction::CancelPlan("plan_demo_1234567890".to_string()),
             &mut settings,
         );
-        assert!(panel
-            .dismissed_plans
-            .contains("plan_demo_1234567890"));
+        assert!(panel.dismissed_plans.contains("plan_demo_1234567890"));
         assert!(panel.pending_submission.is_none());
 
         panel.apply_action(
             AgentAction::ApplyPlan("plan_demo_1234567890".to_string()),
             &mut settings,
         );
-        assert!(!panel
-            .dismissed_plans
-            .contains("plan_demo_1234567890"));
+        assert!(!panel.dismissed_plans.contains("plan_demo_1234567890"));
         let prompt = panel
             .pending_submission
             .as_deref()
@@ -1578,17 +1632,12 @@ mod tests {
             ".aura_rafi/agent_artifacts/viewport-a.png",
             ".aura_rafi/agent_artifacts/top-down-b.png",
         ] {
-            panel.apply_action(
-                AgentAction::SelectEvidence(uri.to_string()),
-                &mut settings,
-            );
+            panel.apply_action(AgentAction::SelectEvidence(uri.to_string()), &mut settings);
         }
         assert_eq!(panel.evidence_selected.len(), 2);
         assert!(panel.evidence_compare);
         panel.apply_action(
-            AgentAction::SelectEvidence(
-                ".aura_rafi/agent_artifacts/contact-c.png".to_string(),
-            ),
+            AgentAction::SelectEvidence(".aura_rafi/agent_artifacts/contact-c.png".to_string()),
             &mut settings,
         );
         assert_eq!(
@@ -1789,7 +1838,10 @@ mod tests {
             .iter()
             .find(|provider| provider.provider == AiProvider::OpenRouter)
             .expect("OpenRouter provider");
-        assert_eq!(panel.effective_model(provider), "anthropic/claude-sonnet-4.5");
+        assert_eq!(
+            panel.effective_model(provider),
+            "anthropic/claude-sonnet-4.5"
+        );
         assert!(panel.selected_model == MODEL_SENTINEL);
         assert!(panel.settings_changed);
     }

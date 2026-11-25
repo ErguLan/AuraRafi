@@ -36,12 +36,12 @@ use crate::commands::gateway::CommandGateway;
 use crate::electronics_controller::NativeElectronicsEditor;
 use raf_render::bridge::RenderRuntime;
 
+use self::image::visual_review_tool_result;
 use evidence::{
     expects_observable_scene_change, live_scene_entity_count, request_preview,
     response_to_tool_result,
 };
 use execution::AgentParsedExecutor;
-use self::image::visual_review_tool_result;
 use world_build::translate_arguments;
 
 pub use schemas::sanitize_tool_name;
@@ -127,11 +127,20 @@ impl AgentToolExecutor<'_> {
         arguments: &Value,
         mode: ToolExecutionMode,
     ) -> Result<AgentToolResult, String> {
-        let editor = self.electronics.as_deref_mut().ok_or("Electronics document is not mounted.")?;
+        let editor = self
+            .electronics
+            .as_deref_mut()
+            .ok_or("Electronics document is not mounted.")?;
         match name {
             "electronics_lab_simulate" => {
-                editor.start_lab_simulation(Some(call_id.to_owned()), mode == ToolExecutionMode::Apply)?;
-                Ok(AgentToolResult::success("DC analysis queued.", serde_json::json!({"state":"queued"})))
+                editor.start_lab_simulation(
+                    Some(call_id.to_owned()),
+                    mode == ToolExecutionMode::Apply,
+                )?;
+                Ok(AgentToolResult::success(
+                    "DC analysis queued.",
+                    serde_json::json!({"state":"queued"}),
+                ))
             }
             "electronics_lab_probe" => {
                 let run = editor.lab.run().ok_or("Run a DC analysis first.")?;
@@ -140,14 +149,20 @@ impl AgentToolExecutor<'_> {
             _ => {
                 editor.poll_lab(false);
                 let Some(serial) = editor.lab.serial.as_ref() else {
-                    return Ok(AgentToolResult::success("No connected serial device.", serde_json::json!({"connected":false})));
+                    return Ok(AgentToolResult::success(
+                        "No connected serial device.",
+                        serde_json::json!({"connected":false}),
+                    ));
                 };
                 let channels: Vec<_> = serial.latest.values().take(16).collect();
-                Ok(AgentToolResult::success("Latest serial measurements.", serde_json::json!({
-                    "source":"measured", "connected":serial.state == raf_hardware::serial_session::LinkState::Open,
-                    "device":serial.device.as_ref().map(|device| &device.board), "port":editor.lab.port,
-                    "received":serial.received, "invalid":serial.invalid, "evicted":serial.evicted, "channels":channels,
-                })))
+                Ok(AgentToolResult::success(
+                    "Latest serial measurements.",
+                    serde_json::json!({
+                        "source":"measured", "connected":serial.state == raf_hardware::serial_session::LinkState::Open,
+                        "device":serial.device.as_ref().map(|device| &device.board), "port":editor.lab.port,
+                        "received":serial.received, "invalid":serial.invalid, "evicted":serial.evicted, "channels":channels,
+                    }),
+                ))
             }
         }
     }
@@ -219,7 +234,10 @@ impl AgentToolExecutor<'_> {
             let is_game_mutation = command_name.starts_with("game.")
                 || command_name.starts_with("behavior.")
                 || matches!(command_name, "lighting.set" | "lighting.reset")
-                || command_name == "prefab.instantiate";
+                || command_name == "prefab.instantiate"
+                || command_name == "assembly.revert"
+                || command_name == "assembly.update"
+                || command_name == "assembly.make_unique";
             let scene_changed =
                 observed_scene_change && is_game_mutation && mode == ToolExecutionMode::Apply;
             if is_game_mutation {
@@ -347,22 +365,27 @@ impl ToolExecutor for AgentToolExecutor<'_> {
     fn is_pending(&self, call_id: &str) -> bool {
         raf_ai::vision_bridge::is_review_pending(call_id)
             || self.asset_tools.is_pending(call_id)
-            || self.electronics.as_deref()
+            || self
+                .electronics
+                .as_deref()
                 .is_some_and(|editor| editor.lab.pending_dc_tool(call_id))
     }
 
     fn poll_pending(&mut self, call_id: &str) -> Option<Result<AgentToolResult, String>> {
         if raf_ai::vision_bridge::is_review_pending(call_id) {
             let data = raf_ai::vision_bridge::poll_review(call_id)?;
-            return Some(Ok(visual_review_tool_result(
-                data,
-                self.ledger.revision(),
-            )));
+            return Some(Ok(visual_review_tool_result(data, self.ledger.revision())));
         }
-        if let Some(editor) = self.electronics.as_deref_mut().filter(|editor| editor.lab.pending_dc_tool(call_id)) {
+        if let Some(editor) = self
+            .electronics
+            .as_deref_mut()
+            .filter(|editor| editor.lab.pending_dc_tool(call_id))
+        {
             editor.poll_lab(false);
             let result = editor.lab.take_dc_tool(call_id)?;
-            return Some(result.map(|run| laboratory_probe(&run, editor.lab_fingerprint(), &Value::Null)));
+            return Some(
+                result.map(|run| laboratory_probe(&run, editor.lab_fingerprint(), &Value::Null)),
+            );
         }
         self.asset_tools.poll(call_id, self.language)
     }
@@ -393,7 +416,10 @@ impl ToolExecutor for AgentToolExecutor<'_> {
         if route.kind == AgentToolKind::Mutation && mode == ToolExecutionMode::Inspect {
             return Err(format!("Tool '{name}' is unavailable in Inspect mode."));
         }
-        if matches!(name, "electronics_lab_simulate" | "electronics_lab_probe" | "electronics_lab_signals") {
+        if matches!(
+            name,
+            "electronics_lab_simulate" | "electronics_lab_probe" | "electronics_lab_signals"
+        ) {
             return self.execute_electronics_lab(call_id, name, &arguments, mode);
         }
 
@@ -403,6 +429,7 @@ impl ToolExecutor for AgentToolExecutor<'_> {
                 | "asset_generate_image"
                 | "external_studio_install"
                 | "external_studio_generate"
+                | "particles_generate"
         ) {
             return self.execute_asset_generation(call_id, name, &arguments, mode);
         }
@@ -486,25 +513,50 @@ impl ToolExecutor for AgentToolExecutor<'_> {
     }
 }
 
-fn laboratory_probe(run: &crate::electronics_lab::DcRun, fingerprint: u64, args: &Value) -> AgentToolResult {
+fn laboratory_probe(
+    run: &crate::electronics_lab::DcRun,
+    fingerprint: u64,
+    args: &Value,
+) -> AgentToolResult {
     let component = args.get("component").and_then(Value::as_str);
     let uuid = component.and_then(|target| uuid::Uuid::parse_str(target).ok());
-    let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0).min(512) as usize;
-    let mut page = run.values.iter().filter(|value| component.is_none_or(|target| {
-        value.designator.eq_ignore_ascii_case(target) || uuid == Some(value.component)
-    })).skip(offset).take(17).collect::<Vec<_>>();
+    let offset = args
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(512) as usize;
+    let mut page = run
+        .values
+        .iter()
+        .filter(|value| {
+            component.is_none_or(|target| {
+                value.designator.eq_ignore_ascii_case(target) || uuid == Some(value.component)
+            })
+        })
+        .skip(offset)
+        .take(17)
+        .collect::<Vec<_>>();
     let more = page.len() > 16;
     page.truncate(16);
     let stale = run.fingerprint != fingerprint;
-    let mut result = AgentToolResult::success(if run.converged { "DC analysis converged." } else { "DC analysis did not converge." },
+    let mut result = AgentToolResult::success(
+        if run.converged {
+            "DC analysis converged."
+        } else {
+            "DC analysis did not converge."
+        },
         serde_json::json!({
             "source":"simulated", "analysis":"dc", "run":run.id, "revision":format!("{:016x}",run.fingerprint),
             "stale":stale, "converged":run.converged, "kcl_residual_a":run.kcl_residual_a,
             "power_residual_w":run.power_residual_w, "warnings":run.messages, "values":page,
             "values_truncated":run.values_truncated, "next_offset":more.then_some(offset + 16),
-        }));
+        }),
+    );
     result.ok = run.converged && !stale;
-    result.references = page.iter().map(|value| value.component.to_string()).collect();
+    result.references = page
+        .iter()
+        .map(|value| value.component.to_string())
+        .collect();
     result.references.sort_unstable();
     result.references.dedup();
     result

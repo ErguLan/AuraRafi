@@ -5,6 +5,71 @@ All notable changes to Rafi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Tab Mesh Editor v1**: focused Tab Mode with persisted `EditableMeshData`,
+  vertex/edge/face selection, direct vertex dragging, extrude with side walls,
+  inset, subdivide, delete, axis locks, Accept/Cancel and scene-history undo.
+  The viewport dims the rest of the scene and draws orange handles and
+  wireframe over the edited block.
+- **Tab mesh interaction fixes**: pointer dragging now follows screen-right and
+  screen-up instead of the inverted mapping. Double right-click on a face
+  inserts a new movable point and splits that triangle into three. Editable and
+  imported static meshes render two-sided with abs(N dot L) lighting and a
+  visibility floor, so a face moved through its own plane cannot turn black or
+  disappear.
+- **Asset placement fixes**: a plain `.gltf`/`.glb` copied into `assets/` is
+  placeable even without the optional import sidecar. Double-click or Enter on
+  a model or Assembly card starts placement instead of opening it as a text
+  document, and the selection action reads Insert with an Add icon.
+- **Mesh authoring API**: `game.mesh` actions `inspect`, `enter`, `set`, `move`,
+  `scale`, `extrude`, `inset`, `subdivide`, `delete`, `revert` and `apply`.
+  The Agent exposes the same surface through `mesh_edit`, and Rhai adds
+  `mesh_vertex_count`, `mesh_face_count`, `mesh_vertex`, `mesh_set_vertex`,
+  `mesh_move_vertex`, `mesh_extrude`, `mesh_inset`, `mesh_subdivide`,
+  `mesh_delete_face` and `mesh_reset`.
+- **Spawn and trigger authoring**: `game.spawn` and `game.trigger` create real
+  `SpawnMarker` and trigger-volume components; Hierarchy classifies them as
+  `spawn` and `trigger` types.
+- **Opt-in script indicator**: Hierarchy rows can show a compact script icon
+  when the entity has attached scripts. It is derived from `SceneNode.scripts`
+  with no file analysis and stays off by default.
+- **Real look-through**: `game.camera action=look_through` renders the viewport
+  through the selected Game camera, draws a 90% safe frame and rule-of-thirds
+  guides, and Escape or `action=editor_view` restores the editor camera.
+- **Linked Assemblies v1**: instances store source, version and FNV-1a source
+  hash. `assembly.revert`, `assembly.update` and `assembly.make_unique` reload,
+  refresh or detach an instance with cycle validation, an 8-level depth limit,
+  a 4096-node dependency budget and scene-slot reuse. Product naming is
+  Assembly/Ensamblaje; legacy `.prefab.ron` files remain readable.
+- **Surface and pivot controls**: texture tiling, unlit and double-sided reach
+  the renderer; Center/Base/Corner pivots are applied as a render-space offset
+  with matching bounds and picking. Inspector controls expose all three.
+- **GPU pipeline split**: DX12, Vulkan, Metal and WebGPU now use backface
+  culling with explicit CCW front faces, separate opaque, two-sided and
+  transparent scene pipelines, and depth-read-only transparent draws. Shadow
+  and overlay passes keep their own state.
+- **Welded editable topology**: primitive conversion welds duplicated
+  UV/normal vertices, so dragging a cube corner moves every adjacent face.
+  Editable meshes render with flat per-face normals and scale-aware UVs.
+
+### Changed
+
+- **Editor vs game quality**: Settings > Quality is now an editor/startup profile
+  only. It no longer writes a runtime preset. The game's graphics quality lives
+  in Project Settings > Game Graphics.
+- **Play Host**: window size, max instances, launch mode, diagnostics and
+  script budgets stay in the global Play Host section. The presentation FPS cap
+  moved to Project Settings > Runtime so each game owns its pacing.
+- **Project Settings order**: Game Graphics, Runtime and Lighting are grouped
+  together. Lighting keeps its authored controls in the Lighting tab and links
+  back from the project page.
+- **Runtime scripting quality**: Rhai can read and change the per-instance
+  viewport resolution, mesh detail and texture quality without mutating the
+  project or global settings.
+
 ## [0.12.0] - 2026-11-22 - Engine Closure: Runtime, Lighting and Layers
 
 ### Added

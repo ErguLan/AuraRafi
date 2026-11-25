@@ -196,6 +196,9 @@ pub(super) struct Pipelines {
     pub render_pass: vk::RenderPass,
     pub bindings: Rc<Bindings>,
     scene: vk::Pipeline,
+    scene_two_sided: vk::Pipeline,
+    scene_transparent: vk::Pipeline,
+    scene_transparent_two_sided: vk::Pipeline,
     read_depth: vk::Pipeline,
     overlay: vk::Pipeline,
     cache: vk::PipelineCache,
@@ -211,6 +214,9 @@ impl Pipelines {
             bindings,
             format,
             scene: vk::Pipeline::null(),
+            scene_two_sided: vk::Pipeline::null(),
+            scene_transparent: vk::Pipeline::null(),
+            scene_transparent_two_sided: vk::Pipeline::null(),
             read_depth: vk::Pipeline::null(),
             overlay: vk::Pipeline::null(),
             cache: vk::PipelineCache::null(),
@@ -224,9 +230,54 @@ impl Pipelines {
         let pixel = Shader::new(gpu, &module, &info, "paint", naga::ShaderStage::Fragment)?;
         let scene = Shader::new(gpu, &module, &info, "scene", naga::ShaderStage::Vertex)?;
         let overlay = Shader::new(gpu, &module, &info, "overlay", naga::ShaderStage::Vertex)?;
-        pipelines.scene = pipelines.create(&scene, c"scene", &pixel, true, true)?;
-        pipelines.read_depth = pipelines.create(&scene, c"scene", &pixel, true, false)?;
-        pipelines.overlay = pipelines.create(&overlay, c"overlay", &pixel, false, false)?;
+        pipelines.scene = pipelines.create(
+            &scene,
+            c"scene",
+            &pixel,
+            true,
+            true,
+            vk::CullModeFlags::BACK,
+        )?;
+        pipelines.scene_two_sided = pipelines.create(
+            &scene,
+            c"scene",
+            &pixel,
+            true,
+            true,
+            vk::CullModeFlags::NONE,
+        )?;
+        pipelines.scene_transparent = pipelines.create(
+            &scene,
+            c"scene",
+            &pixel,
+            true,
+            false,
+            vk::CullModeFlags::BACK,
+        )?;
+        pipelines.scene_transparent_two_sided = pipelines.create(
+            &scene,
+            c"scene",
+            &pixel,
+            true,
+            false,
+            vk::CullModeFlags::NONE,
+        )?;
+        pipelines.read_depth = pipelines.create(
+            &scene,
+            c"scene",
+            &pixel,
+            true,
+            false,
+            vk::CullModeFlags::NONE,
+        )?;
+        pipelines.overlay = pipelines.create(
+            &overlay,
+            c"overlay",
+            &pixel,
+            false,
+            false,
+            vk::CullModeFlags::NONE,
+        )?;
         Ok(pipelines)
     }
 
@@ -237,6 +288,7 @@ impl Pipelines {
         fragment: &Shader,
         depth: bool,
         depth_write: bool,
+        cull: vk::CullModeFlags,
     ) -> Result<vk::Pipeline> {
         self.create_for(
             vertex,
@@ -250,6 +302,7 @@ impl Pipelines {
                 depth_write,
                 vertex_stream: true,
                 blend: true,
+                cull,
             },
         )
     }
@@ -339,6 +392,8 @@ impl Pipelines {
             .scissor_count(1);
         let raster = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
+            .cull_mode(target.cull)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .line_width(1.);
         let samples = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
@@ -475,11 +530,18 @@ impl Pipelines {
                     for batch in batches {
                         if bound != Some(batch.mode) {
                             bound = Some(batch.mode);
-                            let pipeline = match batch.mode {
-                                DrawMode::Scene => shadow.map_or(self.scene, |shadow| shadow.scene),
-                                DrawMode::DepthReadOnly => self.read_depth,
-                                DrawMode::Overlay | DrawMode::SceneNoDepth => self.overlay,
-                            };
+                            let pipeline = shadow
+                                .and_then(|shadow| shadow.scene_for(batch.mode))
+                                .unwrap_or(match batch.mode {
+                                    DrawMode::Scene => self.scene,
+                                    DrawMode::SceneTwoSided => self.scene_two_sided,
+                                    DrawMode::SceneTransparent => self.scene_transparent,
+                                    DrawMode::SceneTransparentTwoSided => {
+                                        self.scene_transparent_two_sided
+                                    }
+                                    DrawMode::DepthReadOnly => self.read_depth,
+                                    DrawMode::Overlay | DrawMode::SceneNoDepth => self.overlay,
+                                });
                             device.cmd_bind_pipeline(
                                 cmd,
                                 vk::PipelineBindPoint::GRAPHICS,
@@ -515,6 +577,15 @@ impl Drop for Pipelines {
         unsafe {
             if self.scene != vk::Pipeline::null() {
                 device.destroy_pipeline(self.scene, None);
+            }
+            if self.scene_two_sided != vk::Pipeline::null() {
+                device.destroy_pipeline(self.scene_two_sided, None);
+            }
+            if self.scene_transparent != vk::Pipeline::null() {
+                device.destroy_pipeline(self.scene_transparent, None);
+            }
+            if self.scene_transparent_two_sided != vk::Pipeline::null() {
+                device.destroy_pipeline(self.scene_transparent_two_sided, None);
             }
             if self.read_depth != vk::Pipeline::null() {
                 device.destroy_pipeline(self.read_depth, None);
@@ -589,6 +660,7 @@ pub(super) struct RasterTarget {
     pub depth_write: bool,
     pub vertex_stream: bool,
     pub blend: bool,
+    pub cull: vk::CullModeFlags,
 }
 
 pub(super) unsafe fn bind_geometry(

@@ -161,6 +161,9 @@ pub struct ProjectRuntimeSettings {
     /// Only this configured camera is used. Missing references never select another node.
     pub active_camera: Option<Uuid>,
     pub fixed_hz: u32,
+    /// Presentation frame cap for Play in this project. The editor keeps its
+    /// own frame cap in the global editor settings.
+    pub fps_limit: u32,
     /// Enables full dynamic simulation; basic mode retains character movement.
     pub advanced_physics: bool,
     pub physics_debug_draw: bool,
@@ -175,6 +178,8 @@ pub struct ProjectRuntimeSettings {
     pub input_actions: Vec<RuntimeInputAction>,
     pub input_axes: Vec<RuntimeInputAxis>,
     pub progress: ProgressSettings,
+    #[serde(default)]
+    pub audio: AudioSettings,
 }
 impl Default for ProjectRuntimeSettings {
     fn default() -> Self {
@@ -182,6 +187,7 @@ impl Default for ProjectRuntimeSettings {
             startup_session: None,
             active_camera: None,
             fixed_hz: 60,
+            fps_limit: 60,
             advanced_physics: true,
             physics_debug_draw: false,
             animation_debug_draw: false,
@@ -193,7 +199,70 @@ impl Default for ProjectRuntimeSettings {
             input_actions: Vec::new(),
             input_axes: Vec::new(),
             progress: ProgressSettings::default(),
+            audio: AudioSettings::default(),
         }
+    }
+}
+
+/// Project-scoped audio mix. Values are linear gains in 0..1.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioSettings {
+    pub master_volume: f32,
+    pub music_volume: f32,
+    pub sfx_volume: f32,
+    pub voice_volume: f32,
+    pub ambient_volume: f32,
+    pub spatial_audio: bool,
+    pub max_voices: u8,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            master_volume: 0.9,
+            music_volume: 0.7,
+            sfx_volume: 0.9,
+            voice_volume: 1.0,
+            ambient_volume: 0.8,
+            spatial_audio: true,
+            max_voices: 8,
+        }
+    }
+}
+
+impl AudioSettings {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        for value in [
+            self.master_volume,
+            self.music_volume,
+            self.sfx_volume,
+            self.voice_volume,
+            self.ambient_volume,
+        ] {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return Err("Audio bus volumes must be within 0..1.");
+            }
+        }
+        if !(1..=32).contains(&self.max_voices) {
+            return Err("Audio max_voices must be within 1..32.");
+        }
+        Ok(())
+    }
+
+    pub fn bus_volume(&self, bus: crate::scene::AudioBus) -> f32 {
+        use crate::scene::AudioBus;
+        match bus {
+            AudioBus::Master => 1.0,
+            AudioBus::Music => self.music_volume,
+            AudioBus::Sfx => self.sfx_volume,
+            AudioBus::Voice => self.voice_volume,
+            AudioBus::Ambient => self.ambient_volume,
+        }
+    }
+
+    pub fn gain(&self, bus: crate::scene::AudioBus) -> f32 {
+        self.master_volume * self.bus_volume(bus)
     }
 }
 impl ProjectRuntimeSettings {
@@ -201,6 +270,9 @@ impl ProjectRuntimeSettings {
         if !self.gravity.is_finite() || self.gravity.abs().max_element() > 1000.0 {
             return Err("runtime.invalid_gravity".into());
         }
+        self.audio
+            .validate()
+            .map_err(|error| format!("runtime.invalid_audio: {error}"))?;
         if !self.character_jump_height.is_finite()
             || !(0.0..=20.0).contains(&self.character_jump_height)
             || !self.character_speed.is_finite()

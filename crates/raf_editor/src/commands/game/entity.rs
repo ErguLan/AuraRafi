@@ -136,7 +136,10 @@ fn validate_semantic_metadata(
     Ok(())
 }
 
-pub(super) fn create_group(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn create_group(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let Some(name) = text_argument(command, "name") else {
         return CommandOutput::error("Create scene group", "Missing name for the group.");
     };
@@ -250,7 +253,11 @@ fn apply_scene_components(
         if !audio.clip.trim().is_empty() {
             audio.clip =
                 validate_component_asset_path(&audio.clip, label, &["mp3", "ogg", "wav", "flac"])?;
+            audio.clip = raf_core::scene::normalize_reference(audio.clip);
         }
+        audio
+            .validate()
+            .map_err(|error| format!("{label}.audio is invalid: {error}"))?;
         node.audio_source = audio;
     }
     if let Some(value) = structured_or_json_value(command, "camera", &format!("{label}.camera"))? {
@@ -260,6 +267,124 @@ fn apply_scene_components(
             .validate()
             .map_err(|error| format!("{label}.camera is invalid: {error}"))?;
         node.game_camera = Some(camera);
+    }
+    if let Some(value) = structured_or_json_value(command, "light", &format!("{label}.light"))? {
+        if value.is_null() {
+            node.light = None;
+        } else {
+            let light: raf_core::scene::SceneLight = serde_json::from_value(value)
+                .map_err(|error| format!("{label}.light is invalid: {error}"))?;
+            light
+                .validate()
+                .map_err(|error| format!("{label}.light is invalid: {error}"))?;
+            node.light = Some(light);
+        }
+    }
+    if let Some(value) = component_text(command, "mesh_asset") {
+        let reference = raf_core::scene::MeshAssetRef::new(value);
+        reference
+            .validate()
+            .map_err(|error| format!("{label}.mesh_asset is invalid: {error}"))?;
+        node.skin = None;
+        node.mesh_asset = Some(reference);
+    }
+    let surface_value = if let Some(value) = command.structured_arg("surface") {
+        Some(value.clone())
+    } else {
+        command
+            .arg("surface")
+            .map(|raw| parse_json_argument(raw, &format!("{label}.surface")))
+            .transpose()?
+    };
+    let tiling_argument = surface_tiling_argument(command, "tiling", &format!("{label}.tiling"))?;
+    let unlit_argument = surface_bool_argument(command, "unlit", &format!("{label}.unlit"))?;
+    let double_sided_argument =
+        surface_bool_argument(command, "double_sided", &format!("{label}.double_sided"))?;
+    if surface_value.is_some()
+        || tiling_argument.is_some()
+        || unlit_argument.is_some()
+        || double_sided_argument.is_some()
+    {
+        let mut surface = node.surface;
+        if let Some(value) = surface_value {
+            if let Some(texture) = value.get("texture").and_then(Value::as_str) {
+                node.base_color_texture = validate_component_texture(texture, label)?;
+            }
+            if let Some(opacity) = value.get("opacity").and_then(Value::as_f64) {
+                if opacity.is_finite() {
+                    node.color.a = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+            }
+            match &value {
+                Value::Null => surface = raf_core::scene::SurfaceStyle::default(),
+                Value::Object(object) => {
+                    if let Some(tiling) = object.get("tiling") {
+                        surface.texture_tiling = parse_surface_tiling(
+                            tiling,
+                            &format!("{label}.surface.tiling"),
+                        )?;
+                    }
+                    if let Some(unlit) = object.get("unlit") {
+                        surface.unlit =
+                            parse_surface_bool(unlit, &format!("{label}.surface.unlit"))?;
+                    }
+                    if let Some(double_sided) = object.get("double_sided") {
+                        surface.double_sided = parse_surface_bool(
+                            double_sided,
+                            &format!("{label}.surface.double_sided"),
+                        )?;
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "{label}.surface must be an object with texture, opacity, tiling, unlit and double_sided; received {}.",
+                        json_kind(other)
+                    ))
+                }
+            }
+        }
+        // Console-style calls may pass these next to `surface` instead of
+        // nesting them. They win over the object so an explicit argument is
+        // never silently ignored.
+        if let Some(tiling) = tiling_argument {
+            surface.texture_tiling = tiling;
+        }
+        if let Some(unlit) = unlit_argument {
+            surface.unlit = unlit;
+        }
+        if let Some(double_sided) = double_sided_argument {
+            surface.double_sided = double_sided;
+        }
+        surface
+            .validate()
+            .map_err(|error| format!("{label}.surface is invalid: {error}"))?;
+        node.surface = surface;
+    }
+    let pivot_value = if let Some(value) = command.structured_arg("pivot") {
+        Some(value.clone())
+    } else {
+        command.arg("pivot").map(|raw| {
+            serde_json::from_str::<Value>(raw)
+                .unwrap_or_else(|_| Value::String(raw.trim().to_string()))
+        })
+    };
+    if let Some(value) = pivot_value {
+        // Pivot presets are authoring metadata. The renderer compensates the
+        // mesh geometry matrix instead of baking the offset into the node
+        // transform, so gizmos, scripts and children stay on the node origin.
+        let pivot = match &value {
+            Value::Null => raf_core::scene::PivotMode::Center,
+            Value::String(raw) => raf_core::scene::PivotMode::from_slug(raw).ok_or_else(|| {
+                format!("{label}.pivot must be center, base or corner; received '{raw}'.")
+            })?,
+            other => {
+                return Err(format!(
+                    "{label}.pivot must be center, base or corner; received {}.",
+                    json_kind(other)
+                ))
+            }
+        };
+        node.pivot = pivot;
     }
     if let Some(value) = structured_or_json_value(command, "scripts", &format!("{label}.scripts"))?
     {
@@ -384,7 +509,117 @@ fn finite_component_vec3(value: Vec3, label: &str) -> Result<Vec3, String> {
     Ok(value)
 }
 
-pub(super) fn add_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+fn parse_surface_tiling(value: &Value, label: &str) -> Result<[f32; 2], String> {
+    match value {
+        Value::Array(values) => {
+            if values.len() != 2 {
+                return Err(format!(
+                    "{label} expected [u, v] with exactly two numbers; received an array with {} values.",
+                    values.len()
+                ));
+            }
+            Ok([
+                parse_surface_f32(&values[0], &format!("{label}[0]"))?,
+                parse_surface_f32(&values[1], &format!("{label}[1]"))?,
+            ])
+        }
+        Value::String(raw) => {
+            let raw = raw.trim();
+            if raw.starts_with('[') {
+                let parsed: Value = serde_json::from_str(raw)
+                    .map_err(|error| format!("{label} must be [u, v] or \"u,v\": {error}."))?;
+                return parse_surface_tiling(&parsed, label);
+            }
+            let mut parts = raw.split(',');
+            let (Some(u), Some(v), None) = (parts.next(), parts.next(), parts.next()) else {
+                return Err(format!(
+                    "{label} must be [u, v] or \"u,v\" with two values."
+                ));
+            };
+            let u = u
+                .trim()
+                .parse::<f32>()
+                .map_err(|_| format!("{label} must contain two finite positive numbers."))?;
+            let v = v
+                .trim()
+                .parse::<f32>()
+                .map_err(|_| format!("{label} must contain two finite positive numbers."))?;
+            if !u.is_finite() || !v.is_finite() {
+                return Err(format!("{label} must contain two finite positive numbers."));
+            }
+            Ok([u, v])
+        }
+        other => Err(format!(
+            "{label} must be [u, v] or \"u,v\"; received {}.",
+            json_kind(other)
+        )),
+    }
+}
+
+fn parse_surface_tiling_text(raw: &str, label: &str) -> Result<[f32; 2], String> {
+    let raw = raw.trim();
+    let value = if raw.starts_with('[') {
+        serde_json::from_str::<Value>(raw)
+            .map_err(|error| format!("{label} must be [u, v] or \"u,v\": {error}."))?
+    } else {
+        Value::String(raw.to_string())
+    };
+    parse_surface_tiling(&value, label)
+}
+
+fn parse_surface_f32(value: &Value, label: &str) -> Result<f32, String> {
+    let value = value
+        .as_f64()
+        .ok_or_else(|| format!("{label} must be a number."))? as f32;
+    if !value.is_finite() {
+        return Err(format!("{label} must be finite."));
+    }
+    Ok(value)
+}
+
+fn parse_surface_bool(value: &Value, label: &str) -> Result<bool, String> {
+    match value {
+        Value::Bool(value) => Ok(*value),
+        Value::String(raw) => parse_bool_literal(raw, label),
+        other => Err(format!(
+            "{label} must be true or false; received {}.",
+            json_kind(other)
+        )),
+    }
+}
+
+fn surface_tiling_argument(
+    command: &ParsedCommand,
+    name: &str,
+    label: &str,
+) -> Result<Option<[f32; 2]>, String> {
+    if let Some(value) = command.structured_arg(name) {
+        return parse_surface_tiling(value, label).map(Some);
+    }
+    command
+        .arg(name)
+        .map(|raw| parse_surface_tiling_text(raw, label))
+        .transpose()
+}
+
+fn surface_bool_argument(
+    command: &ParsedCommand,
+    name: &str,
+    label: &str,
+) -> Result<Option<bool>, String> {
+    if let Some(value) = command.structured_arg(name) {
+        return parse_surface_bool(value, label).map(Some);
+    }
+    command
+        .arg(name)
+        .map(|raw| parse_bool_literal(raw, label))
+        .transpose()
+}
+
+pub(super) fn add_entity(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let primitive = match primitive_arg(command) {
         Some(primitive) => primitive,
         None if primitive_argument(command).is_none() => Primitive::Cube,
@@ -482,13 +717,20 @@ fn primitive_asset_source(primitive: Primitive) -> Option<&'static str> {
         Primitive::Cube => Some("builtin://primitive/cube"),
         Primitive::Sphere => Some("builtin://primitive/sphere"),
         Primitive::Capsule => Some("builtin://primitive/capsule"),
+        Primitive::Wedge => Some("builtin://primitive/wedge"),
+        Primitive::Torus => Some("builtin://primitive/torus"),
+        Primitive::Prism => Some("builtin://primitive/prism"),
+        Primitive::Sphere2D => Some("builtin://primitive/sphere2d"),
         Primitive::Cylinder => Some("builtin://primitive/cylinder"),
         Primitive::Plane => Some("builtin://primitive/plane"),
         Primitive::Empty => None,
     }
 }
 
-pub(super) fn select_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn select_entity(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Select entity", "Target not found.");
     };
@@ -501,7 +743,10 @@ pub(super) fn select_entity(command: &ParsedCommand, ctx: &mut GameCommandContex
     )
 }
 
-pub(super) fn rename_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn rename_entity(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Rename entity", "Target not found.");
     };
@@ -524,7 +769,10 @@ pub(super) fn rename_entity(command: &ParsedCommand, ctx: &mut GameCommandContex
     )
 }
 
-pub(super) fn delete_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn delete_entity(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Delete entity", "Target not found.");
     };
@@ -550,7 +798,10 @@ pub(super) fn delete_entity(command: &ParsedCommand, ctx: &mut GameCommandContex
     )
 }
 
-pub(super) fn duplicate_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn duplicate_entity(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Duplicate entity", "Target not found.");
     };
@@ -662,7 +913,10 @@ pub(super) fn duplicate_entity(command: &ParsedCommand, ctx: &mut GameCommandCon
     )
 }
 
-pub(super) fn update_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn update_entity(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Update entity", "Target not found.");
     };
@@ -750,6 +1004,8 @@ pub(super) fn update_entity(command: &ParsedCommand, ctx: &mut GameCommandContex
     }
     apply_semantic_metadata(node, &metadata);
     node.base_color_texture = staged_components.base_color_texture;
+    node.surface = staged_components.surface;
+    node.pivot = staged_components.pivot;
     node.collider = staged_components.collider;
     node.rigid_body = staged_components.rigid_body;
     node.audio_source = staged_components.audio_source;
@@ -769,7 +1025,10 @@ pub(super) fn update_entity(command: &ParsedCommand, ctx: &mut GameCommandContex
     )
 }
 
-pub(super) fn focus_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn focus_entity(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Focus entity", "Target not found.");
     };
@@ -806,4 +1065,113 @@ fn primitive_argument(command: &ParsedCommand) -> Option<&str> {
         .or_else(|| command.arg("kind"))
         .or_else(|| command.arg("shape"))
         .or_else(|| command.first_positional())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raf_core::scene::graph::SceneNode;
+    use raf_core::scene::{PivotMode, SurfaceStyle};
+    use std::collections::BTreeMap;
+
+    fn structured_command(payload: serde_json::Value) -> ParsedCommand {
+        ParsedCommand {
+            raw: "/game.add".to_string(),
+            name: "game.add".to_string(),
+            args: BTreeMap::new(),
+            positional: Vec::new(),
+            structured_args: Some(payload),
+        }
+    }
+
+    #[test]
+    fn surface_component_assigns_rendering_fields_and_pivot() {
+        let command = structured_command(serde_json::json!({
+            "surface": {
+                "tiling": "2,3",
+                "unlit": true,
+                "double_sided": true
+            },
+            "pivot": "base"
+        }));
+        let mut node = SceneNode::new("Surface");
+        apply_scene_components(&command, &mut node, "game.add").expect("surface should parse");
+
+        assert_eq!(node.surface.texture_tiling, [2.0, 3.0]);
+        assert!(node.surface.unlit);
+        assert!(node.surface.double_sided);
+        assert_eq!(node.pivot, PivotMode::Base);
+    }
+
+    #[test]
+    fn surface_component_accepts_json_arrays_and_overrides() {
+        let command = structured_command(serde_json::json!({
+            "surface": {
+                "tiling": [0.5, 4.0],
+                "unlit": false
+            },
+            "double_sided": true,
+            "pivot": "corner"
+        }));
+        let mut node = SceneNode::new("Surface");
+        apply_scene_components(&command, &mut node, "game.update").expect("surface should parse");
+
+        assert_eq!(node.surface.texture_tiling, [0.5, 4.0]);
+        assert!(!node.surface.unlit);
+        assert!(node.surface.double_sided);
+        assert_eq!(node.pivot, PivotMode::Corner);
+    }
+
+    #[test]
+    fn surface_component_accepts_standalone_tiling_and_flags() {
+        let command = structured_command(serde_json::json!({
+            "tiling": "2,4",
+            "unlit": true,
+            "double_sided": true
+        }));
+        let mut node = SceneNode::new("Surface");
+        apply_scene_components(&command, &mut node, "game.update").expect("surface should parse");
+
+        assert_eq!(node.surface.texture_tiling, [2.0, 4.0]);
+        assert!(node.surface.unlit);
+        assert!(node.surface.double_sided);
+    }
+
+    #[test]
+    fn surface_component_null_restores_the_default_style() {
+        let command = structured_command(serde_json::json!({"surface": null}));
+        let mut node = SceneNode::new("Surface");
+        node.surface = SurfaceStyle {
+            texture_tiling: [4.0, 4.0],
+            unlit: true,
+            double_sided: true,
+        };
+        apply_scene_components(&command, &mut node, "game.update").expect("surface should reset");
+
+        assert_eq!(node.surface, SurfaceStyle::default());
+    }
+
+    #[test]
+    fn surface_component_rejects_invalid_tiling() {
+        let command = structured_command(serde_json::json!({
+            "surface": {"tiling": [0.0, 2.0]}
+        }));
+        let mut node = SceneNode::new("Surface");
+        let error = apply_scene_components(&command, &mut node, "game.add")
+            .expect_err("zero tiling must fail validation");
+
+        assert!(error.contains("surface"));
+        assert_eq!(node.surface, SurfaceStyle::default());
+    }
+
+    #[test]
+    fn surface_component_rejects_invalid_pivot() {
+        let command = structured_command(serde_json::json!({"pivot": "middle"}));
+        let mut node = SceneNode::new("Surface");
+        let error = apply_scene_components(&command, &mut node, "game.add")
+            .expect_err("unknown pivot must fail");
+
+        assert!(error.contains("pivot"));
+        assert_eq!(node.pivot, PivotMode::Center);
+    }
 }

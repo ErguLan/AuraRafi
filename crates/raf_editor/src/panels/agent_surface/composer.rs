@@ -115,20 +115,29 @@ pub(super) fn build_composer(
                     )
                     .disabled(running || panel.media_pending()),
                 )
-                .with_child(if settings.agent_openai_use_plan
-                    && settings.default_ai_provider == raf_ai::provider::AiProvider::OpenAI
-                    && raf_ai::chatgpt_auth::active_connected() {
-                    UiNode::new("agent.account.usage", UiNodeKind::Button)
-                        .with_class("agent-button")
-                        .with_text_key("agent.account.using_plan")
-                        .with_tooltip_key("settings.account.usage")
-                        .with_accessibility_role(UiAccessibilityRole::Button)
-                        .with_text_overflow(UiTextOverflow::Ellipsis)
-                        .with_layout(UiLayout::fixed(120.0, 30.0))
-                        .focusable().with_event(UiEventBinding::command(UiEventKind::Click, "agent.account.usage"))
-                } else {
-                    UiNode::new("agent.account.hidden", UiNodeKind::Panel).with_style(UiStyle::transparent()).with_layout(UiLayout::fixed(0.0, 0.0))
-                })
+                .with_child(
+                    if settings.agent_openai_use_plan
+                        && settings.default_ai_provider == raf_ai::provider::AiProvider::OpenAI
+                        && raf_ai::chatgpt_auth::active_connected()
+                    {
+                        UiNode::new("agent.account.usage", UiNodeKind::Button)
+                            .with_class("agent-button")
+                            .with_text_key("agent.account.using_plan")
+                            .with_tooltip_key("settings.account.usage")
+                            .with_accessibility_role(UiAccessibilityRole::Button)
+                            .with_text_overflow(UiTextOverflow::Ellipsis)
+                            .with_layout(UiLayout::fixed(120.0, 30.0))
+                            .focusable()
+                            .with_event(UiEventBinding::command(
+                                UiEventKind::Click,
+                                "agent.account.usage",
+                            ))
+                    } else {
+                        UiNode::new("agent.account.hidden", UiNodeKind::Panel)
+                            .with_style(UiStyle::transparent())
+                            .with_layout(UiLayout::fixed(0.0, 0.0))
+                    },
+                )
                 .with_child(
                     UiNode::new("agent.reasoning.cycle", UiNodeKind::Button)
                         .with_class("agent-button")
@@ -216,7 +225,11 @@ pub(super) fn composer_media_height(panel: &AgentPanel) -> f32 {
         }
 }
 
-pub(super) fn composer_media(palette: StudioUiPalette, panel: &AgentPanel, running: bool) -> UiNode {
+pub(super) fn composer_media(
+    palette: StudioUiPalette,
+    panel: &AgentPanel,
+    running: bool,
+) -> UiNode {
     let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     let mut list = UiNode::new("agent.composer.media", UiNodeKind::Panel).with_layout(UiLayout {
         flow: UiFlow::Column,

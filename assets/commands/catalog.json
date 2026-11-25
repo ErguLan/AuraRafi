@@ -437,6 +437,10 @@
         {"name": "sz", "kind": "f32", "required": false, "default": "1"},
         {"name": "color", "kind": "color", "required": false, "description_key": "commands.param.color"},
         {"name": "color_rgba", "kind": "array", "required": false, "description_key": "commands.param.color_rgba"},
+        {"name": "light", "kind": "object", "required": false, "description_key": "commands.param.light"},
+        {"name": "mesh_asset", "kind": "string", "required": false, "description_key": "commands.param.mesh_asset"},
+        {"name": "surface", "kind": "object", "required": false, "description_key": "commands.param.surface"},
+        {"name": "pivot", "kind": "enum", "required": false, "description_key": "commands.param.pivot"},
         {"name": "semantic_role", "kind": "string", "required": false, "description_key": "commands.param.semantic_role"},
         {"name": "stable_key", "kind": "string", "required": false, "description_key": "commands.param.stable_key"},
         {"name": "tags", "kind": "array", "required": false, "description_key": "commands.param.tags"},
@@ -491,7 +495,93 @@
         {"name":"orthographic","kind":"bool","required":false,"description_key":"camera.orthographic"},
         {"name":"ortho_scale","kind":"f32","required":false,"description_key":"camera.ortho_scale"}
       ],
-      "examples":["/game.camera action=create name=Camera","/game.camera action=add target=Player","/game.camera target=Camera fov=70 near=0.1 far=500"]
+      "examples":["/game.camera action=create name=Camera","/game.camera action=add target=Player","/game.camera target=Camera fov=70 near=0.1 far=500","/game.camera action=activate target=Camera"]
+    },
+    {
+      "name": "game.mesh_asset",
+      "aliases": ["mesh.asset"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_mesh_asset.desc",
+      "parameters": [
+        {"name": "action", "kind": "enum", "required": false, "default": "inspect", "description_key": "commands.param.mesh_action"},
+        {"name": "clip", "kind": "u32", "required": false},
+        {"name": "target", "kind": "string", "required": false, "description_key": "commands.param.target"},
+        {"name": "path", "kind": "path", "required": false, "description_key": "commands.param.mesh_asset"},
+        {"name": "mesh_asset", "kind": "object", "required": false, "description_key": "commands.param.mesh_asset_reference"},
+        {"name": "name", "kind": "string", "required": false, "description_key": "commands.param.name"},
+        {"name": "parent", "kind": "string", "required": false, "description_key": "commands.param.parent"},
+        {"name": "transform", "kind": "object", "required": false, "description_key": "commands.param.transform"},
+        {"name": "host", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.mesh_host"},
+        {"name": "destination", "kind": "string", "required": false, "description_key": "commands.param.mesh_destination"}
+      ],
+      "examples": ["/game.mesh_asset action=inspect path=models/shelf.glb", "/game.mesh_asset action=import path=models/shelf.glb", "/game.mesh_asset action=place path=models/shelf.glb name=Shelf parent=Store", "/game.mesh_asset action=remove target=Shelf"]
+    },
+    {
+      "name": "game.mesh",
+      "aliases": ["mesh.edit"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_mesh.desc",
+      "parameters": [
+        {"name": "action", "kind": "enum", "required": false, "default": "inspect", "description_key": "commands.param.mesh_edit_action"},
+        {"name": "target", "kind": "string", "required": false, "description_key": "commands.param.target"},
+        {"name": "topology", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.mesh_topology"},
+        {"name": "vertices", "kind": "array", "required": false, "description_key": "commands.param.mesh_vertices"},
+        {"name": "indices", "kind": "array", "required": false, "description_key": "commands.param.mesh_indices"},
+        {"name": "faces", "kind": "array", "required": false, "description_key": "commands.param.mesh_faces"},
+        {"name": "face", "kind": "u32", "required": false, "description_key": "commands.param.mesh_face"},
+        {"name": "delta", "kind": "array", "required": false, "description_key": "commands.param.mesh_delta"},
+        {"name": "factor", "kind": "array", "required": false, "description_key": "commands.param.mesh_factor"},
+        {"name": "center", "kind": "array", "required": false, "description_key": "commands.param.mesh_center"},
+        {"name": "distance", "kind": "f32", "required": false, "description_key": "commands.param.mesh_distance"},
+        {"name": "amount", "kind": "f32", "required": false, "description_key": "commands.param.mesh_amount"}
+      ],
+      "examples": ["/game.mesh action=inspect target=Cube topology=true", "/game.mesh action=enter target=Cube", "/game.mesh action=set target=Cube vertices=[[0,0,0],[1,0,0],[0,1,0]] indices=[0,1,2]", "/game.mesh action=extrude target=Cube faces=[0] distance=0.25"]
+    },
+    {
+      "name": "game.light",
+      "aliases": ["light", "game.light_component"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_light.desc",
+      "parameters": [
+        {"name": "action", "kind": "enum", "required": false, "default": "create", "description_key": "commands.param.light_action"},
+        {"name": "target", "kind": "string", "required": false, "description_key": "commands.param.target"},
+        {"name": "name", "kind": "string", "required": false, "description_key": "commands.param.name"},
+        {"name": "parent", "kind": "string", "required": false, "description_key": "commands.param.parent"},
+        {"name": "transform", "kind": "object", "required": false, "description_key": "commands.param.transform"},
+        {"name": "kind", "kind": "enum", "required": false, "default": "point", "description_key": "commands.param.light_kind"},
+        {"name": "color", "kind": "array", "required": false, "description_key": "commands.param.light_color"},
+        {"name": "intensity", "kind": "f32", "required": false, "description_key": "commands.param.light_intensity"},
+        {"name": "range", "kind": "f32", "required": false, "description_key": "commands.param.light_range"},
+        {"name": "inner_cone_degrees", "kind": "f32", "required": false, "description_key": "commands.param.light_inner_cone"},
+        {"name": "outer_cone_degrees", "kind": "f32", "required": false, "description_key": "commands.param.light_outer_cone"},
+        {"name": "enabled", "kind": "bool", "required": false, "default": "true", "description_key": "commands.param.light_enabled"}
+      ],
+      "examples": ["/game.light action=create name=Lamp kind=point intensity=2 range=6", "/game.light action=update target=Lamp kind=spot outer_cone_degrees=48"]
+    },
+    {
+      "name": "game.audio",
+      "aliases": ["audio", "game.audio_source"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_audio.desc",
+      "parameters": [
+        {"name": "action", "kind": "enum", "required": false, "default": "update", "description_key": "commands.param.audio_action"},
+        {"name": "target", "kind": "string", "required": false, "description_key": "commands.param.target"},
+        {"name": "clip", "kind": "path", "required": false, "description_key": "commands.param.audio_clip"},
+        {"name": "bus", "kind": "enum", "required": false, "default": "sfx", "description_key": "commands.param.audio_bus"},
+        {"name": "volume", "kind": "f32", "required": false, "description_key": "commands.param.audio_volume"},
+        {"name": "looping", "kind": "bool", "required": false, "description_key": "commands.param.audio_looping"},
+        {"name": "autoplay", "kind": "bool", "required": false, "description_key": "commands.param.audio_autoplay"},
+        {"name": "spatial", "kind": "bool", "required": false, "description_key": "commands.param.audio_spatial"},
+        {"name": "min_distance", "kind": "f32", "required": false, "description_key": "commands.param.audio_min_distance"},
+        {"name": "max_distance", "kind": "f32", "required": false, "description_key": "commands.param.audio_max_distance"},
+        {"name": "rolloff", "kind": "f32", "required": false, "description_key": "commands.param.audio_rolloff"},
+        {"name": "enabled", "kind": "bool", "required": false, "default": "true", "description_key": "commands.param.audio_enabled"}
+      ],
+      "examples": ["/game.audio action=attach target=Shelf clip=audio/checkout.wav bus=sfx spatial=true", "/game.audio action=update target=Shelf volume=0.6 looping=true"]
     },
     {
       "name": "game.snap",
@@ -801,6 +891,10 @@
         {"name": "sz", "kind": "f32", "required": false},
         {"name": "color", "kind": "color", "required": false, "description_key": "commands.param.color"},
         {"name": "color_rgba", "kind": "array", "required": false, "description_key": "commands.param.color_rgba"},
+        {"name": "light", "kind": "object", "required": false, "description_key": "commands.param.light"},
+        {"name": "mesh_asset", "kind": "string", "required": false, "description_key": "commands.param.mesh_asset"},
+        {"name": "surface", "kind": "object", "required": false, "description_key": "commands.param.surface"},
+        {"name": "pivot", "kind": "enum", "required": false, "description_key": "commands.param.pivot"},
         {"name": "visible", "kind": "bool", "required": false},
         {"name": "locked", "kind": "bool", "required": false},
         {"name": "semantic_role", "kind": "string", "required": false, "description_key": "commands.param.semantic_role"},
@@ -822,6 +916,30 @@
         {"name": "speed", "kind": "f32", "required": false}
       ],
       "examples": ["/game.animation.sample target=Character time=0.5"]
+    },
+    {
+      "name": "game.animation.bake",
+      "domain": "game",
+      "category": "scene",
+      "risk": "read",
+      "description_key": "commands.game_animation_bake.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": true},
+        {"name": "fps", "kind": "u32", "required": false}
+      ],
+      "examples": ["/game.animation.bake target=Character fps=30"]
+    },
+    {
+      "name": "game.animation.retarget",
+      "domain": "game",
+      "category": "scene",
+      "risk": "read",
+      "description_key": "commands.game_animation_retarget.desc",
+      "parameters": [
+        {"name": "source", "kind": "string", "required": true},
+        {"name": "target", "kind": "string", "required": true},
+        {"name": "bindings", "kind": "array", "required": true}
+      ]
     },
     {
       "name": "game.batch",
@@ -1412,6 +1530,62 @@
         {"name":"parent","kind":"string","required":false,"description_key":"commands.param.target"}
       ],
       "examples": ["/prefab.instantiate file=rig.prefab.ron parent=/World"]
+    },
+    {
+      "name": "assembly.revert",
+      "aliases": [], "domain": "game", "category": "asset",
+      "description_key": "commands.assembly_revert.desc",
+      "parameters": [
+        {"name":"target","kind":"string","required":true,"description_key":"commands.param.target"}
+      ],
+      "examples": ["/assembly.revert target=Shelf"]
+    },
+    {
+      "name": "assembly.update",
+      "aliases": [], "domain": "game", "category": "asset",
+      "description_key": "commands.assembly_update.desc",
+      "parameters": [
+        {"name":"target","kind":"string","required":true,"description_key":"commands.param.target"}
+      ],
+      "examples": ["/assembly.update target=Shelf"]
+    },
+    {
+      "name": "assembly.make_unique",
+      "aliases": [], "domain": "game", "category": "asset",
+      "description_key": "commands.assembly_make_unique.desc",
+      "parameters": [
+        {"name":"target","kind":"string","required":true,"description_key":"commands.param.target"}
+      ],
+      "examples": ["/assembly.make_unique target=Shelf"]
+    },
+    {
+      "name": "game.spawn",
+      "aliases": [], "domain": "game", "category": "scene",
+      "description_key": "commands.game_spawn.desc",
+      "parameters": [
+        {"name":"action","kind":"string","required":true,"description_key":"commands.param.action"},
+        {"name":"target","kind":"string","required":false,"description_key":"commands.param.target"},
+        {"name":"tag","kind":"string","required":false,"description_key":"commands.param.tag"},
+        {"name":"radius","kind":"number","required":false,"description_key":"commands.param.radius"},
+        {"name":"enabled","kind":"bool","required":false,"description_key":"commands.param.enabled"}
+      ],
+      "examples": [
+        "/game.spawn action=attach target=PlayerStart tag=player.start radius=0.8",
+        "/game.spawn action=remove target=PlayerStart"
+      ]
+    },
+    {
+      "name": "game.trigger",
+      "aliases": [], "domain": "game", "category": "scene",
+      "description_key": "commands.game_trigger.desc",
+      "parameters": [
+        {"name":"action","kind":"string","required":true,"description_key":"commands.param.action"},
+        {"name":"target","kind":"string","required":false,"description_key":"commands.param.target"}
+      ],
+      "examples": [
+        "/game.trigger action=attach target=CheckoutZone",
+        "/game.trigger action=remove target=CheckoutZone"
+      ]
     },
     {
       "name": "asset.cancel_image",

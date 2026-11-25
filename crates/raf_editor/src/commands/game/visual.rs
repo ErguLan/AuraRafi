@@ -34,8 +34,12 @@ fn resolve_compare_path(root: &Path, raw: &str, label: &str) -> Result<PathBuf, 
 }
 
 fn load_compare_image(path: &Path, label: &str) -> Result<image::RgbaImage, String> {
-    let image = image::open(path)
-        .map_err(|error| format!("Could not decode {label} image '{}': {error}", path.display()))?;
+    let image = image::open(path).map_err(|error| {
+        format!(
+            "Could not decode {label} image '{}': {error}",
+            path.display()
+        )
+    })?;
     let rgba = image.to_rgba8();
     let pixels = u64::from(rgba.width()) * u64::from(rgba.height());
     if pixels == 0 {
@@ -55,7 +59,12 @@ fn save_flag(request: &ParsedCommand) -> bool {
     }
     request
         .arg("save")
-        .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off"))
+        .map(|value| {
+            !matches!(
+                value.to_ascii_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            )
+        })
         .unwrap_or(true)
 }
 
@@ -114,12 +123,9 @@ pub(crate) fn execute_visual_diff(request: &ParsedCommand) -> CommandOutput {
                 if f64::from(pixel_delta) > threshold {
                     changed_pixels += 1;
                     bounds = Some(match bounds {
-                        Some((min_x, min_y, max_x, max_y)) => (
-                            min_x.min(x),
-                            min_y.min(y),
-                            max_x.max(x),
-                            max_y.max(y),
-                        ),
+                        Some((min_x, min_y, max_x, max_y)) => {
+                            (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+                        }
                         None => (x, y, x, y),
                     });
                     diff.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
@@ -149,10 +155,8 @@ pub(crate) fn execute_visual_diff(request: &ParsedCommand) -> CommandOutput {
                 };
                 candidate.with_extension("png")
             } else {
-                world_artifact_directory(&root).join(format!(
-                    "visual-diff-{}.png",
-                    Uuid::new_v4().simple()
-                ))
+                world_artifact_directory(&root)
+                    .join(format!("visual-diff-{}.png", Uuid::new_v4().simple()))
             };
             let canonical_root = root
                 .canonicalize()
@@ -234,10 +238,8 @@ mod tests {
 
     #[test]
     fn visual_diff_reports_changed_pixels_and_writes_an_artifact() {
-        let root = std::env::temp_dir().join(format!(
-            "raf-visual-diff-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("raf-visual-diff-{}", uuid::Uuid::new_v4().simple()));
         let artifacts = root.join(".aura_rafi/agent_artifacts");
         std::fs::create_dir_all(&artifacts).unwrap();
         let _guard = crate::commands::game::bind_project_root(Some(root.clone()));
@@ -256,10 +258,7 @@ mod tests {
             }),
         ));
         assert!(
-            !matches!(
-                output.level,
-                crate::commands::output::CommandLevel::Error
-            ),
+            !matches!(output.level, crate::commands::output::CommandLevel::Error),
             "{:?}",
             output.lines
         );

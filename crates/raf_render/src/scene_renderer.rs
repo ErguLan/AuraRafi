@@ -15,6 +15,8 @@
 //! This module lives in raf_render and has no UI dependency.
 //! The editor's viewport host consumes its scene output directly.
 
+mod skinning;
+
 use glam::{Mat4, Vec3, Vec4};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -31,6 +33,7 @@ use crate::geometry::primitives;
 use crate::math::clip::{clip_triangle_to_near, ClipVertex};
 use crate::math::frustum::Frustum;
 use crate::math::transform;
+use crate::particles::{ParticleRenderOptions, ParticleRenderer};
 use crate::render_pipeline::framebuffer::Framebuffer;
 use crate::render_pipeline::rasterizer::{self, ScreenVertex};
 use crate::scene_visibility::{
@@ -40,6 +43,7 @@ use crate::texture::CpuTexture;
 
 use raf_assets::ingress::TextureDecodeLimits;
 use raf_core::project::{GeometryDetailMode, TextureQualityMode};
+use raf_core::scene::geometry::node_geometry_matrix;
 use raf_core::scene::graph::{Primitive, SceneGraph, SceneNodeId};
 use raf_core::scene::WorldTransformCache;
 
@@ -95,6 +99,20 @@ pub struct RenderOptions {
     pub geometry_detail: GeometryDetailMode,
     /// Hard CPU/GPU cache policy for project-owned base-color textures.
     pub texture_quality: TextureQualityMode,
+    /// Particle preview/runtime controls and budgets.
+    pub particles: ParticleRenderOptions,
+    /// Frame delta used by the particle simulation. Clamped by the renderer.
+    pub particle_dt: f32,
+    /// True while the editor camera is navigating. Geometry selection and LOD
+    /// stay frozen so the retained scene packet can be reused instead of
+    /// re-uploading every texture and mesh on each orbit/pan frame.
+    pub camera_navigation: bool,
+    /// Keep camera-independent command streams for moderate scenes. When set,
+    /// frustum culling and camera-derived LOD are skipped so orbit/pan frames
+    /// reuse the retained packet. Huge scenes keep per-frame culling.
+    pub stable_scene_packet: bool,
+    /// Tab Mode focus: every other scene node is dimmed instead of hidden.
+    pub focus_node: Option<u64>,
 }
 
 impl Default for RenderOptions {
@@ -118,6 +136,11 @@ impl Default for RenderOptions {
             world_stream_load_radius: 3,
             geometry_detail: GeometryDetailMode::Adaptive,
             texture_quality: TextureQualityMode::Adaptive,
+            particles: ParticleRenderOptions::default(),
+            particle_dt: 1.0 / 60.0,
+            camera_navigation: false,
+            stable_scene_packet: false,
+            focus_node: None,
         }
     }
 }
@@ -136,6 +159,14 @@ impl MeshDetailLevel {
             mesh,
         }
     }
+}
+
+/// Cached GPU-ready geometry for one persisted editable mesh.
+struct EditableMeshEntry {
+    revision: u64,
+    mesh: Arc<MeshData>,
+    basic: Arc<BasicMesh>,
+    edges: Arc<Vec<[Vec3; 2]>>,
 }
 
 struct CurvedMeshDetail {
@@ -179,6 +210,14 @@ pub struct SceneRenderer {
     cylinder_local_bounds: (Vec3, Vec3),
     sphere_detail: CurvedMeshDetail,
     sphere_local_bounds: (Vec3, Vec3),
+    wedge_detail: MeshDetailLevel,
+    wedge_local_bounds: (Vec3, Vec3),
+    torus_detail: MeshDetailLevel,
+    torus_local_bounds: (Vec3, Vec3),
+    prism_detail: MeshDetailLevel,
+    prism_local_bounds: (Vec3, Vec3),
+    sphere2d_detail: MeshDetailLevel,
+    sphere2d_local_bounds: (Vec3, Vec3),
     plane_mesh: MeshData,
     plane_basic_mesh: Arc<BasicMesh>,
     plane_edges: Vec<[Vec3; 2]>,
@@ -204,8 +243,20 @@ pub struct SceneRenderer {
     shadow_geometry: Option<Arc<crate::shadow_frame::ShadowGeometry>>,
     shadow_budget_exceeded: bool,
     shadow_geometry_revision: u64,
+    model_mesh_cache: crate::model_mesh_cache::ModelMeshCache,
+    skinning: skinning::SkinCache,
+    model_basic_cache: HashMap<String, Arc<BasicMesh>>,
+    /// Bounded cache of primitives with tiled UVs, keyed by primitive, LOD and
+    /// the authored tiling bits. Texture sampling stays per-instance; only the
+    /// UV attribute is regenerated.
+    primitive_tiling_cache: HashMap<PrimitiveTilingKey, Arc<BasicMesh>>,
+    /// Persisted Tab Mode topology compiled once per authored revision.
+    editable_meshes: HashMap<(uuid::Uuid, u32, u32), EditableMeshEntry>,
+    editable_prune_revision: u64,
     /// Stats from the last frame.
     pub stats: FrameStats,
+    /// Retained per-entity particle simulators and render batches.
+    particles: ParticleRenderer,
 }
 
 #[derive(Debug, Clone)]
@@ -245,9 +296,17 @@ impl SceneRenderer {
             primitives::sphere(16, 24),
             primitives::sphere(24, 36),
         );
+        let wedge_detail = MeshDetailLevel::new(primitives::wedge(1));
+        let torus_detail = MeshDetailLevel::new(primitives::torus(32, 16));
+        let prism_detail = MeshDetailLevel::new(primitives::prism(24));
+        let sphere2d_detail = MeshDetailLevel::new(primitives::sphere2d(32, 16));
         let cube_local_bounds = cube_mesh.aabb();
         let cylinder_local_bounds = cylinder_detail.medium().mesh.aabb();
         let sphere_local_bounds = sphere_detail.medium().mesh.aabb();
+        let wedge_local_bounds = wedge_detail.mesh.aabb();
+        let torus_local_bounds = torus_detail.mesh.aabb();
+        let prism_local_bounds = prism_detail.mesh.aabb();
+        let sphere2d_local_bounds = sphere2d_detail.mesh.aabb();
         let plane_local_bounds = plane_mesh.aabb();
 
         Self {
@@ -261,6 +320,14 @@ impl SceneRenderer {
             cylinder_local_bounds,
             sphere_detail,
             sphere_local_bounds,
+            wedge_detail,
+            wedge_local_bounds,
+            torus_detail,
+            torus_local_bounds,
+            prism_detail,
+            prism_local_bounds,
+            sphere2d_detail,
+            sphere2d_local_bounds,
             plane_basic_mesh: Arc::new(mesh_to_basic(&plane_mesh)),
             plane_edges: primitives::extract_edges(&plane_mesh),
             plane_local_bounds,
@@ -282,8 +349,82 @@ impl SceneRenderer {
             shadow_geometry: None,
             shadow_budget_exceeded: false,
             shadow_geometry_revision: 0,
+            model_mesh_cache: Default::default(),
+            skinning: Default::default(),
+            model_basic_cache: HashMap::new(),
+            primitive_tiling_cache: HashMap::new(),
+            editable_meshes: HashMap::new(),
+            editable_prune_revision: 0,
             stats: FrameStats::default(),
+            particles: ParticleRenderer::new(),
         }
+    }
+
+    /// Read-only particle state for authoring overlays and tests.
+    pub fn particles(&self) -> &ParticleRenderer {
+        &self.particles
+    }
+
+    /// Compile a persisted editable mesh to render geometry, reusing the
+    /// compiled buffers until the authored revision or texture tiling changes.
+    fn editable_geometry_in(
+        cache: &mut HashMap<(uuid::Uuid, u32, u32), EditableMeshEntry>,
+        node: &raf_core::scene::graph::SceneNode,
+        tiling: [f32; 2],
+    ) -> Option<(Arc<MeshData>, Arc<BasicMesh>, Arc<Vec<[Vec3; 2]>>)> {
+        let data = node.editable_mesh.as_ref()?;
+        if data.is_empty() {
+            return None;
+        }
+        let revision = data.revision.max(1);
+        let key = (node.uuid, tiling[0].to_bits(), tiling[1].to_bits());
+        if let Some(entry) = cache.get(&key) {
+            if entry.revision == revision {
+                return Some((
+                    Arc::clone(&entry.mesh),
+                    Arc::clone(&entry.basic),
+                    Arc::clone(&entry.edges),
+                ));
+            }
+        }
+        let editable = crate::editable::EditableMesh::from_scene_data(data);
+        let mut mesh = editable.to_mesh_data_uv();
+        scale_mesh_uvs(&mut mesh, tiling);
+        let mesh = Arc::new(mesh);
+        // Wire edges come from the welded authored topology, not the
+        // per-face render vertices, so the selection outline stays single.
+        let edges = Arc::new(editable.wireframe_edges());
+        let basic = Arc::new(mesh_to_basic(mesh.as_ref()));
+        if cache.len() >= MAX_EDITABLE_MESH_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(
+            key,
+            EditableMeshEntry {
+                revision,
+                mesh: Arc::clone(&mesh),
+                basic: Arc::clone(&basic),
+                edges: Arc::clone(&edges),
+            },
+        );
+        Some((mesh, basic, edges))
+    }
+
+    fn prune_editable_geometry(&mut self, scene: &SceneGraph) {
+        if self.editable_prune_revision == scene.geometry_revision() {
+            return;
+        }
+        self.editable_prune_revision = scene.geometry_revision();
+        if self.editable_meshes.is_empty() {
+            return;
+        }
+        let live = scene
+            .iter()
+            .filter(|(_, node)| node.editable_mesh.is_some())
+            .map(|(_, node)| node.uuid)
+            .collect::<HashSet<_>>();
+        self.editable_meshes
+            .retain(|(uuid, _, _), _| live.contains(uuid));
     }
 
     pub fn set_asset_root(&mut self, assets_root: Option<PathBuf>) {
@@ -291,6 +432,9 @@ impl SceneRenderer {
             self.asset_root = assets_root;
             self.texture_paths.clear();
             self.texture_ingress.clear();
+            self.model_mesh_cache.clear();
+            self.skinning = Default::default();
+            self.model_basic_cache.clear();
         }
     }
 
@@ -335,6 +479,10 @@ impl SceneRenderer {
             Primitive::Capsule => (-Vec3::new(0.5, 1.0, 0.5), Vec3::new(0.5, 1.0, 0.5)),
             Primitive::Cylinder => self.cylinder_local_bounds,
             Primitive::Sphere => self.sphere_local_bounds,
+            Primitive::Wedge => self.wedge_local_bounds,
+            Primitive::Torus => self.torus_local_bounds,
+            Primitive::Prism => self.prism_local_bounds,
+            Primitive::Sphere2D => self.sphere2d_local_bounds,
             Primitive::Plane => self.plane_local_bounds,
             Primitive::Empty => self.cube_local_bounds,
         }
@@ -355,6 +503,7 @@ impl SceneRenderer {
     ) -> (Vec<RenderJob>, FrameStats) {
         self.selected_ids.clear();
         self.selected_ids.extend(selected.iter().copied());
+        self.prune_editable_geometry(scene);
         let scene_revision = scene.geometry_revision();
         if self
             .world_transforms
@@ -400,9 +549,14 @@ impl SceneRenderer {
         jobs.reserve(scene.len());
         let mut stats = FrameStats::default();
         let override_bounds = mesh_override.map(|(override_id, mesh)| (override_id, mesh.aabb()));
+        let asset_root = self.asset_root.clone();
 
         for (id, node) in scene.iter() {
-            if !node.visible || matches!(node.primitive, Primitive::Empty) {
+            if !node.visible
+                || (matches!(node.primitive, Primitive::Empty)
+                    && node.mesh_asset.is_none()
+                    && node.editable_mesh.is_none())
+            {
                 self.stream_visible_ids.remove(&id);
                 if options.geometry_detail == GeometryDetailMode::Adaptive {
                     self.geometry_lod_by_id.remove(&id);
@@ -410,23 +564,73 @@ impl SceneRenderer {
                 continue;
             }
             stats.total_entities += 1;
+            let skinned = node.skin.is_some();
+            let tiling = sanitized_surface_tiling(node.surface.texture_tiling);
+            let editable = Self::editable_geometry_in(&mut self.editable_meshes, node, tiling);
+            let custom_mesh = editable
+                .as_ref()
+                .map(|(mesh, _, _)| Arc::clone(mesh))
+                .or_else(|| {
+                    node.mesh_asset.as_ref().and_then(|reference| {
+                        if let Some(binding) = &node.skin {
+                            self.skinning.mesh(
+                                scene,
+                                transforms,
+                                id,
+                                asset_root.as_deref()?,
+                                reference,
+                                binding,
+                            )
+                        } else {
+                            self.model_mesh_cache
+                                .get(asset_root.as_deref(), reference)
+                                .ok()
+                        }
+                    })
+                });
+            if matches!(node.primitive, Primitive::Empty) && custom_mesh.is_none() {
+                continue;
+            }
 
             let model = transforms
                 .world_matrix(id)
                 .unwrap_or_else(|| node.local_matrix());
+            // Sphere2D is a camera-facing disc: compose a billboard rotation
+            // around the node's world pivot so it keeps its position.
+            let model = if node.primitive == Primitive::Sphere2D {
+                billboard_model(model, camera_position)
+            } else {
+                model
+            };
+            // The pivot only compensates the drawn geometry. The authored node
+            // transform, gizmos, scripts and children stay on the node origin.
+            let geometry_model = node_geometry_matrix(model, node);
             let (local_min, local_max) = override_bounds
                 .and_then(|(override_id, bounds)| (override_id == id).then_some(bounds))
+                .or_else(|| custom_mesh.as_ref().map(|mesh| mesh.aabb()))
                 .unwrap_or_else(|| self.local_bounds_for_primitive(node.primitive));
-            let bounds = SceneObjectBounds::from_local_aabb(local_min, local_max, model);
+            let bounds = SceneObjectBounds::from_local_aabb(local_min, local_max, geometry_model);
 
             let previously_in_stream =
                 options.world_streaming_enabled && self.stream_visible_ids.contains(&id);
-            match visibility.classify_with_hysteresis(
-                frustum,
-                camera_position,
-                bounds,
-                previously_in_stream,
-            ) {
+            let classification = if options.camera_navigation || options.stable_scene_packet {
+                // A stable packet must not depend on which objects the moving
+                // camera happens to keep inside the exact frustum. World
+                // streaming still decides which regions are resident.
+                if visibility.stream_allows(camera_position, bounds, previously_in_stream) {
+                    SceneVisibility::Visible
+                } else {
+                    SceneVisibility::OutsideStream
+                }
+            } else {
+                visibility.classify_with_hysteresis(
+                    frustum,
+                    camera_position,
+                    bounds,
+                    previously_in_stream,
+                )
+            };
+            match classification {
                 SceneVisibility::Visible => {
                     if options.world_streaming_enabled {
                         self.stream_visible_ids.insert(id);
@@ -451,8 +655,17 @@ impl SceneRenderer {
             if options.solid_xray_mode {
                 base_color[3] = base_color[3].min(120);
             }
+            if options.focus_node.is_some_and(|focus| focus != id.0 as u64) {
+                for channel in &mut base_color[..3] {
+                    *channel = ((*channel as f32) * 0.34) as u8;
+                }
+            }
             let center = bounds.center();
-            let geometry_lod = if matches!(node.primitive, Primitive::Sphere | Primitive::Cylinder)
+            let geometry_lod = if options.camera_navigation || options.stable_scene_packet {
+                // Freeze LOD while navigating; recomputing it from the moving
+                // projection would change mesh ids and invalidate the packet.
+                self.geometry_lod_by_id.get(&id).copied().unwrap_or(1)
+            } else if matches!(node.primitive, Primitive::Sphere | Primitive::Cylinder)
                 && mesh_override.is_none_or(|(override_id, _)| override_id != id)
             {
                 let lod = match options.geometry_detail {
@@ -486,56 +699,95 @@ impl SceneRenderer {
                 1
             };
 
+            let custom_edges = editable.as_ref().map(|(_, _, edges)| Arc::clone(edges));
+            let custom_basic = editable
+                .as_ref()
+                .map(|(_, basic, _)| Arc::clone(basic))
+                .or_else(|| {
+                    custom_mesh.as_ref().map(|mesh| {
+                        if skinned {
+                            return Arc::new(mesh_to_basic_with_tiling(mesh, tiling));
+                        }
+                        let key = node
+                            .mesh_asset
+                            .as_ref()
+                            .map(|reference| {
+                                format!(
+                                    "{}|{}|{}|{}|{}|{}",
+                                    reference.path,
+                                    reference.content_hash.as_deref().unwrap_or(""),
+                                    reference.node.map(|node| node as i64).unwrap_or(-1),
+                                    reference.import_scale.to_bits(),
+                                    tiling[0].to_bits(),
+                                    tiling[1].to_bits()
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                format!("{}|{}", tiling[0].to_bits(), tiling[1].to_bits())
+                            });
+                        if let Some(basic) = self.model_basic_cache.get(&key) {
+                            Arc::clone(basic)
+                        } else {
+                            let basic = Arc::new(mesh_to_basic_with_tiling(mesh, tiling));
+                            if self.model_basic_cache.len() >= 64 {
+                                self.model_basic_cache.clear();
+                            }
+                            self.model_basic_cache.insert(key, Arc::clone(&basic));
+                            basic
+                        }
+                    })
+                });
             jobs.push(RenderJob {
                 id,
                 primitive: node.primitive,
                 geometry_lod,
-                model,
+                model: geometry_model,
                 base_color,
                 is_selected: self.selected_ids.contains(&id),
                 distance_squared: (center - camera_position).length_squared(),
                 is_transparent: base_color[3] < u8::MAX,
                 base_color_texture: node.base_color_texture.clone(),
+                unlit: node.surface.unlit,
+                // Authored topology has no canonical "outside": a face moved
+                // through its own plane must stay visible instead of turning
+                // black or disappearing. Tab Mode and imported static meshes
+                // are always two-sided; the shader uses abs(N dot L) for them.
+                double_sided: node.surface.double_sided
+                    || node.editable_mesh.is_some()
+                    || node.mesh_asset.is_some(),
+                tiling,
+                custom_basic,
+                custom_edges,
+                skinned,
+                custom_key: custom_mesh
+                    .as_ref()
+                    .map(|mesh| Arc::as_ptr(mesh) as *const () as usize as u64)
+                    .unwrap_or(0),
+                custom_mesh,
             });
         }
 
-        let max_opaque_distance_squared = jobs
-            .iter()
-            .filter(|job| !job.is_transparent)
-            .map(|job| job.distance_squared)
-            .fold(0.0_f32, f32::max);
-
-        // Opaque geometry keeps coarse front-to-back buckets for early depth
-        // rejection and groups identical primitive meshes inside each bucket.
-        // That preserves depth correctness while allowing the command list to
-        // turn repeated meshes into one instanced draw. Transparent geometry
-        // remains strictly back-to-front.
+        // Opaque geometry is grouped by identical primitive/mesh/material so
+        // the command list can batch draws. The order is deliberately
+        // camera-independent: camera movement must not invalidate a retained
+        // scene packet, because AGB packet replacement re-uploads geometry and
+        // textures. Transparent geometry is stable by entity id for the same
+        // reason; per-sprite camera sorting belongs in a dedicated pass.
         jobs.sort_by(|a, b| {
-            let order = match (a.is_transparent, b.is_transparent) {
-                (false, true) => std::cmp::Ordering::Less,
-                (true, false) => std::cmp::Ordering::Greater,
-                (false, false) => {
-                    opaque_depth_bucket(a.distance_squared, max_opaque_distance_squared)
-                        .cmp(&opaque_depth_bucket(
-                            b.distance_squared,
-                            max_opaque_distance_squared,
-                        ))
-                        .then_with(|| {
-                            primitive_batch_key(a.primitive).cmp(&primitive_batch_key(b.primitive))
-                        })
-                        .then_with(|| a.geometry_lod.cmp(&b.geometry_lod))
-                        .then_with(|| {
-                            a.distance_squared
-                                .partial_cmp(&b.distance_squared)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                }
-                (true, true) => b
-                    .distance_squared
-                    .partial_cmp(&a.distance_squared)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            };
-            order.then_with(|| a.id.0.cmp(&b.id.0))
+            a.is_transparent
+                .cmp(&b.is_transparent)
+                .then_with(|| {
+                    primitive_batch_key(a.primitive).cmp(&primitive_batch_key(b.primitive))
+                })
+                .then_with(|| a.custom_key.cmp(&b.custom_key))
+                .then_with(|| a.geometry_lod.cmp(&b.geometry_lod))
+                .then_with(|| {
+                    a.tiling[0]
+                        .to_bits()
+                        .cmp(&b.tiling[0].to_bits())
+                        .then_with(|| a.tiling[1].to_bits().cmp(&b.tiling[1].to_bits()))
+                })
+                .then_with(|| a.id.0.cmp(&b.id.0))
         });
 
         (jobs, stats)
@@ -598,19 +850,28 @@ impl SceneRenderer {
             if !node.visible
                 || !node.casts_shadows
                 || node.color.a < 255
-                || node.primitive == Primitive::Empty
+                || (node.primitive == Primitive::Empty
+                    && node.mesh_asset.is_none()
+                    && node.editable_mesh.is_none())
             {
                 continue;
             }
             let model = transforms
                 .world_matrix(id)
                 .unwrap_or_else(|| node.local_matrix());
+            let model = node_geometry_matrix(model, node);
             if !model.is_finite() {
                 continue;
             }
+            let editable = Self::editable_geometry_in(
+                &mut self.editable_meshes,
+                node,
+                sanitized_surface_tiling(node.surface.texture_tiling),
+            );
             let bounds = mesh_override
                 .filter(|(i, _)| *i == id)
                 .map(|(_, m)| m.aabb())
+                .or_else(|| editable.as_ref().map(|(mesh, _, _)| mesh.aabb()))
                 .unwrap_or_else(|| self.local_bounds_for_primitive(node.primitive));
             let mut min = Vec3::splat(f32::INFINITY);
             let mut max = Vec3::splat(f32::NEG_INFINITY);
@@ -648,12 +909,18 @@ impl SceneRenderer {
                     return None;
                 }
                 Arc::new(mesh_to_basic(m))
+            } else if let Some((_, basic, _)) = editable {
+                basic
             } else {
                 match node.primitive {
                     Primitive::Plane => Arc::clone(&self.plane_basic_mesh),
                     Primitive::Capsule => Arc::clone(&self.capsule_detail.basic_mesh),
                     Primitive::Cylinder => Arc::clone(&self.cylinder_detail.level(1).basic_mesh),
                     Primitive::Sphere => Arc::clone(&self.sphere_detail.level(1).basic_mesh),
+                    Primitive::Wedge => Arc::clone(&self.wedge_detail.basic_mesh),
+                    Primitive::Torus => Arc::clone(&self.torus_detail.basic_mesh),
+                    Primitive::Prism => Arc::clone(&self.prism_detail.basic_mesh),
+                    Primitive::Sphere2D => Arc::clone(&self.sphere2d_detail.basic_mesh),
                     _ => Arc::clone(&self.cube_basic_mesh),
                 }
             };
@@ -755,6 +1022,9 @@ impl SceneRenderer {
             .map(|env| env.sun_direction)
             .unwrap_or_else(|| light_dir.normalize());
         let cam_eye = camera.eye();
+        let particle_options = options.particles.clone();
+        let particle_dt = options.particle_dt.clamp(0.0, 0.1);
+        let particle_asset_root = self.asset_root.clone();
         let (jobs, mut stats) = self.collect_render_jobs(
             scene,
             &frustum,
@@ -769,14 +1039,15 @@ impl SceneRenderer {
         );
         let shadows = self.build_shadows(scene, cam_eye, environment, mesh_override);
 
-        // Texture policy is shared with the GPU budget: half of the quality
-        // budget caps long-lived CPU residency and the other half caps new
-        // admissions per frame. Both halves stay inside the project's hard
-        // texture-quality contract.
+        // The residency cache uses the full project texture budget. The
+        // per-frame admission cap only limits newly decoded bytes; resident
+        // hits are free. Splitting the cache in half rejected textures that
+        // were already decoded and caused decode/evict churn in textured
+        // scenes.
         self.texture_frame = self.texture_frame.wrapping_add(1).max(1);
         let texture_frame = self.texture_frame;
         let texture_budget_bytes = options.texture_quality.cache_budget_bytes();
-        let texture_resident_budget = texture_budget_bytes / 2;
+        let texture_resident_budget = texture_budget_bytes.saturating_mul(3) / 4;
         let texture_frame_budget = texture_budget_bytes.saturating_sub(texture_resident_budget);
         let texture_max_dimension = options.texture_quality.max_dimension();
         if texture_max_dimension != self.texture_max_dimension {
@@ -796,6 +1067,10 @@ impl SceneRenderer {
         let capsule_detail = &self.capsule_detail;
         let cylinder_detail = &self.cylinder_detail;
         let sphere_detail = &self.sphere_detail;
+        let wedge_detail = &self.wedge_detail;
+        let torus_detail = &self.torus_detail;
+        let prism_detail = &self.prism_detail;
+        let sphere2d_detail = &self.sphere2d_detail;
         let plane_mesh = &self.plane_mesh;
         let plane_basic_mesh = Arc::clone(&self.plane_basic_mesh);
         let plane_edges = self.plane_edges.as_slice();
@@ -815,6 +1090,7 @@ impl SceneRenderer {
             == raf_core::environment::LightingTechnology::OptimizedImproved;
         commands.shadows = shadows;
         commands.shadow_budget_exceeded = self.shadow_budget_exceeded;
+        commands.entity_lights = crate::entity_lights_frame::collect_entity_lights(scene, cam_eye);
 
         let use_tonality = options.solid_face_tonality;
         let mut grid_drawn = false;
@@ -836,33 +1112,56 @@ impl SceneRenderer {
                 (override_id == job.id).then_some(override_mesh)
             });
 
-            let (mesh, basic_mesh): (&MeshData, Arc<BasicMesh>) =
-                if let Some(job_override_mesh) = job_override_mesh {
-                    (
-                        job_override_mesh,
-                        override_basic_mesh
-                            .as_ref()
-                            .map(Arc::clone)
-                            .unwrap_or_else(|| Arc::new(mesh_to_basic(job_override_mesh))),
-                    )
+            let (mesh, basic_mesh): (&MeshData, Arc<BasicMesh>) = if let Some(job_override_mesh) =
+                job_override_mesh
+            {
+                let basic = if job.tiling == [1.0, 1.0] {
+                    override_basic_mesh
+                        .as_ref()
+                        .map(Arc::clone)
+                        .unwrap_or_else(|| Arc::new(mesh_to_basic(job_override_mesh)))
                 } else {
-                    match job.primitive {
-                        Primitive::Capsule => {
-                            (&capsule_detail.mesh, Arc::clone(&capsule_detail.basic_mesh))
-                        }
-                        Primitive::Cube => (cube_mesh, Arc::clone(&cube_basic_mesh)),
-                        Primitive::Cylinder => {
-                            let detail = cylinder_detail.level(job.geometry_lod);
-                            (&detail.mesh, Arc::clone(&detail.basic_mesh))
-                        }
-                        Primitive::Sphere => {
-                            let detail = sphere_detail.level(job.geometry_lod);
-                            (&detail.mesh, Arc::clone(&detail.basic_mesh))
-                        }
-                        Primitive::Plane => (plane_mesh, Arc::clone(&plane_basic_mesh)),
-                        _ => (cube_mesh, Arc::clone(&cube_basic_mesh)),
-                    }
+                    Arc::new(mesh_to_basic_with_tiling(job_override_mesh, job.tiling))
                 };
+                (job_override_mesh, basic)
+            } else if let (Some(custom), Some(basic)) = (&job.custom_mesh, &job.custom_basic) {
+                (custom.as_ref(), Arc::clone(basic))
+            } else {
+                let (mesh, base_basic) = match job.primitive {
+                    Primitive::Capsule => {
+                        (&capsule_detail.mesh, Arc::clone(&capsule_detail.basic_mesh))
+                    }
+                    Primitive::Cube => (cube_mesh, Arc::clone(&cube_basic_mesh)),
+                    Primitive::Cylinder => {
+                        let detail = cylinder_detail.level(job.geometry_lod);
+                        (&detail.mesh, Arc::clone(&detail.basic_mesh))
+                    }
+                    Primitive::Sphere => {
+                        let detail = sphere_detail.level(job.geometry_lod);
+                        (&detail.mesh, Arc::clone(&detail.basic_mesh))
+                    }
+                    Primitive::Wedge => (&wedge_detail.mesh, Arc::clone(&wedge_detail.basic_mesh)),
+                    Primitive::Torus => (&torus_detail.mesh, Arc::clone(&torus_detail.basic_mesh)),
+                    Primitive::Prism => (&prism_detail.mesh, Arc::clone(&prism_detail.basic_mesh)),
+                    Primitive::Sphere2D => (
+                        &sphere2d_detail.mesh,
+                        Arc::clone(&sphere2d_detail.basic_mesh),
+                    ),
+                    Primitive::Plane => (plane_mesh, Arc::clone(&plane_basic_mesh)),
+                    _ => (cube_mesh, Arc::clone(&cube_basic_mesh)),
+                };
+                let basic = tiled_primitive_basic(
+                    &mut self.primitive_tiling_cache,
+                    PrimitiveTilingKey {
+                        primitive: primitive_batch_key(job.primitive),
+                        lod: job.geometry_lod,
+                        tiling: [job.tiling[0].to_bits(), job.tiling[1].to_bits()],
+                    },
+                    &base_basic,
+                    job.tiling,
+                );
+                (mesh, basic)
+            };
 
             let color = if job.is_selected {
                 [
@@ -889,14 +1188,16 @@ impl SceneRenderer {
                 None => None,
             };
 
-            let two_sided = job.primitive == Primitive::Plane;
-            commands.set_pipeline(match (use_tonality, two_sided) {
+            let lit = use_tonality && !job.unlit;
+            let two_sided =
+                job.double_sided || matches!(job.primitive, Primitive::Plane | Primitive::Sphere2D);
+            commands.set_pipeline(match (lit, two_sided) {
                 (true, true) => BasicPipelineKind::PbrLitTwoSided,
                 (true, false) => BasicPipelineKind::PbrLit,
                 (false, true) => BasicPipelineKind::FlatColorTwoSided,
                 (false, false) => BasicPipelineKind::FlatColor,
             });
-            let mesh_id = if job_override_mesh.is_some() {
+            let mesh_id = if job_override_mesh.is_some() || job.skinned {
                 commands.register_transient_mesh(basic_mesh)
             } else {
                 commands.register_mesh(basic_mesh)
@@ -914,7 +1215,9 @@ impl SceneRenderer {
         for job in &jobs {
             let draw_surface_edges = options.solid_show_surface_edges;
             if draw_surface_edges || (options.selection_outline && job.is_selected) {
-                let edges = if mesh_override.is_some_and(|(override_id, _)| override_id == job.id) {
+                let edges = if let Some(custom_edges) = &job.custom_edges {
+                    custom_edges.as_slice()
+                } else if mesh_override.is_some_and(|(override_id, _)| override_id == job.id) {
                     override_edges.as_deref().unwrap_or(&[])
                 } else {
                     match job.primitive {
@@ -924,6 +1227,10 @@ impl SceneRenderer {
                             cylinder_detail.level(job.geometry_lod).edges.as_slice()
                         }
                         Primitive::Sphere => sphere_detail.level(job.geometry_lod).edges.as_slice(),
+                        Primitive::Wedge => wedge_detail.edges.as_slice(),
+                        Primitive::Torus => torus_detail.edges.as_slice(),
+                        Primitive::Prism => prism_detail.edges.as_slice(),
+                        Primitive::Sphere2D => sphere2d_detail.edges.as_slice(),
                         Primitive::Plane => plane_edges,
                         Primitive::Empty => &[],
                     }
@@ -957,6 +1264,15 @@ impl SceneRenderer {
         self.render_jobs = jobs;
         self.render_jobs.clear();
         self.stats = stats.clone();
+
+        self.particles.update_and_draw(
+            scene,
+            camera,
+            particle_asset_root.as_deref(),
+            &particle_options,
+            &mut commands,
+            particle_dt,
+        );
 
         SceneRenderFrame {
             commands,
@@ -1043,12 +1359,20 @@ pub(crate) fn rasterize_basic_scene_frame(frame: &SceneRenderFrame, framebuffer:
                     texture,
                     frame.commands.environment,
                     shadows.filter(|_| receives_shadows),
+                    &frame.commands.entity_lights,
                 );
             }
-            GraphicCommand::DrawMeshBatch { mesh_id, instances } => {
+            GraphicCommand::DrawMeshBatch {
+                mesh_id,
+                texture_id,
+                instances,
+            } => {
                 let Some(mesh) = frame.commands.mesh(*mesh_id) else {
                     continue;
                 };
+                let texture = texture_id
+                    .and_then(|id| frame.commands.texture(id))
+                    .map(Arc::as_ref);
                 for instance in instances {
                     rasterize_mesh_command(
                         framebuffer,
@@ -1060,9 +1384,10 @@ pub(crate) fn rasterize_basic_scene_frame(frame: &SceneRenderFrame, framebuffer:
                         current_pipeline,
                         vp_w,
                         vp_h,
-                        None,
+                        texture,
                         frame.commands.environment,
                         shadows.filter(|_| receives_shadows),
+                        &frame.commands.entity_lights,
                     );
                 }
             }
@@ -1131,15 +1456,69 @@ struct RenderJob {
     distance_squared: f32,
     is_transparent: bool,
     base_color_texture: Option<String>,
+    unlit: bool,
+    double_sided: bool,
+    tiling: [f32; 2],
+    custom_mesh: Option<Arc<MeshData>>,
+    custom_basic: Option<Arc<BasicMesh>>,
+    custom_edges: Option<Arc<Vec<[Vec3; 2]>>>,
+    skinned: bool,
+    custom_key: u64,
 }
 
-const OPAQUE_DEPTH_BUCKET_COUNT: f32 = 32.0;
+/// Identity of a primitive mesh variant with tiled UVs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PrimitiveTilingKey {
+    primitive: u8,
+    lod: u8,
+    tiling: [u32; 2],
+}
+
+const MAX_PRIMITIVE_TILING_CACHE_ENTRIES: usize = 64;
+/// Hard cap for editable topology variants. A node can legitimately change
+/// tiling while editing; clearing the whole cache on overflow keeps memory
+/// bounded without per-frame eviction bookkeeping.
+const MAX_EDITABLE_MESH_CACHE_ENTRIES: usize = 256;
 
 const LOW_TO_MEDIUM_LOD_ENTER_RADIUS_PX: f32 = 18.0;
 const MEDIUM_TO_LOW_LOD_EXIT_RADIUS_PX: f32 = 12.0;
 const MEDIUM_TO_HIGH_LOD_ENTER_RADIUS_PX: f32 = 72.0;
 const HIGH_TO_MEDIUM_LOD_EXIT_RADIUS_PX: f32 = 56.0;
 const MAX_GEOMETRY_LOD_HISTORY_ENTRIES: usize = 16_384;
+
+/// Rotate `model` so its local +Z axis points at the camera, using world up as
+/// the vertical reference. Translation and scale are taken from the node model;
+/// the authored rotation is overridden, as a billboard must always face the
+/// camera, and the node keeps its world position.
+fn billboard_model(model: Mat4, camera_position: Vec3) -> Mat4 {
+    let pivot = model.w_axis.truncate();
+    let forward = (camera_position - pivot).normalize_or_zero();
+    if forward.length_squared() < 0.5 || !forward.is_finite() {
+        return model;
+    }
+    let right = Vec3::Y.cross(forward);
+    let right = if right.length_squared() < 1e-8 {
+        // Camera is directly above or below: pick a stable tangent.
+        Vec3::X
+    } else {
+        right.normalize()
+    };
+    let up = forward.cross(right).normalize_or_zero();
+    if up.length_squared() < 0.5 {
+        return model;
+    }
+    let scale = Vec3::new(
+        model.x_axis.length(),
+        model.y_axis.length(),
+        model.z_axis.length(),
+    );
+    Mat4::from_cols(
+        (right * scale.x).extend(0.0),
+        (up * scale.y).extend(0.0),
+        (forward * scale.z).extend(0.0),
+        pivot.extend(1.0),
+    )
+}
 
 fn projected_radius_pixels(
     bounds: SceneObjectBounds,
@@ -1185,16 +1564,6 @@ fn adaptive_geometry_lod(projected_radius_px: f32, previous_lod: Option<u8>) -> 
 }
 
 #[inline]
-fn opaque_depth_bucket(distance_squared: f32, max_distance_squared: f32) -> u8 {
-    if !distance_squared.is_finite() || max_distance_squared <= f32::EPSILON {
-        return 0;
-    }
-    ((distance_squared.max(0.0) / max_distance_squared) * (OPAQUE_DEPTH_BUCKET_COUNT - 1.0))
-        .floor()
-        .clamp(0.0, OPAQUE_DEPTH_BUCKET_COUNT - 1.0) as u8
-}
-
-#[inline]
 const fn primitive_batch_key(primitive: Primitive) -> u8 {
     match primitive {
         Primitive::Cube => 0,
@@ -1203,6 +1572,10 @@ const fn primitive_batch_key(primitive: Primitive) -> u8 {
         Primitive::Sphere => 2,
         Primitive::Plane => 3,
         Primitive::Empty => 4,
+        Primitive::Wedge => 6,
+        Primitive::Torus => 7,
+        Primitive::Prism => 8,
+        Primitive::Sphere2D => 9,
     }
 }
 
@@ -1221,6 +1594,65 @@ fn mesh_to_basic(mesh: &MeshData) -> BasicMesh {
             .collect(),
         mesh.indices.clone(),
     )
+}
+
+fn mesh_to_basic_with_tiling(mesh: &MeshData, tiling: [f32; 2]) -> BasicMesh {
+    let mut basic = mesh_to_basic(mesh);
+    if tiling != [1.0, 1.0] {
+        for vertex in &mut basic.vertices {
+            vertex.uv[0] *= tiling[0];
+            vertex.uv[1] *= tiling[1];
+        }
+    }
+    basic
+}
+
+fn scale_mesh_uvs(mesh: &mut MeshData, tiling: [f32; 2]) {
+    if tiling == [1.0, 1.0] {
+        return;
+    }
+    for uv in &mut mesh.uvs {
+        uv[0] *= tiling[0];
+        uv[1] *= tiling[1];
+    }
+}
+
+/// The authored surface may come from a hand-edited document. Keep the
+/// renderer total: invalid tiling falls back to the identity repeat.
+fn sanitized_surface_tiling(tiling: [f32; 2]) -> [f32; 2] {
+    let axis = |value: f32| {
+        if value.is_finite() && value > 0.0 {
+            value.clamp(0.001, 128.0)
+        } else {
+            1.0
+        }
+    };
+    [axis(tiling[0]), axis(tiling[1])]
+}
+
+fn tiled_primitive_basic(
+    cache: &mut HashMap<PrimitiveTilingKey, Arc<BasicMesh>>,
+    key: PrimitiveTilingKey,
+    base: &Arc<BasicMesh>,
+    tiling: [f32; 2],
+) -> Arc<BasicMesh> {
+    if tiling == [1.0, 1.0] {
+        return Arc::clone(base);
+    }
+    if let Some(mesh) = cache.get(&key) {
+        return Arc::clone(mesh);
+    }
+    let mut vertices = base.vertices.clone();
+    for vertex in &mut vertices {
+        vertex.uv[0] *= tiling[0];
+        vertex.uv[1] *= tiling[1];
+    }
+    let mesh = Arc::new(BasicMesh::new(vertices, base.indices.clone()));
+    if cache.len() >= MAX_PRIMITIVE_TILING_CACHE_ENTRIES {
+        cache.clear();
+    }
+    cache.insert(key, Arc::clone(&mesh));
+    mesh
 }
 
 fn record_wireframe_overlay(
@@ -1418,16 +1850,34 @@ fn rasterize_mesh_command(
     texture: Option<&crate::texture::CpuTexture>,
     environment: Option<crate::environment_frame::EnvironmentFrame>,
     shadows: Option<&crate::shadow_frame::ShadowFrame>,
+    entity_lights: &crate::entity_lights_frame::EntityLightFrame,
 ) {
     let mvp = *view_proj * *model;
     let normal_mat = transform::normal_matrix(model);
     let shaded = pipeline.is_lit();
+    let two_sided = matches!(
+        pipeline,
+        BasicPipelineKind::FlatColorTwoSided
+            | BasicPipelineKind::PbrLitTwoSided
+            | BasicPipelineKind::Particle
+    );
+    let diffuse = |normal: Vec3| {
+        let value = normal.dot(light_dir);
+        if two_sided {
+            value.abs()
+        } else {
+            value.max(0.0)
+        }
+    };
     let authored_ui = matches!(
         pipeline,
         BasicPipelineKind::UiSurface | BasicPipelineKind::UiSurfaceOverlay
     );
     if authored_ui {
         fb.set_depth_policy(pipeline != BasicPipelineKind::UiSurfaceOverlay, false);
+    } else if pipeline == BasicPipelineKind::Particle {
+        // Particle billboards read scene depth but never write it.
+        fb.set_depth_policy(true, false);
     }
 
     for tri_idx in (0..mesh.indices.len()).step_by(3) {
@@ -1444,38 +1894,40 @@ fn rasterize_mesh_command(
         let c2 = mvp * Vec4::new(p2.x, p2.y, p2.z, 1.0);
 
         let shade0 = if shaded {
-            0.3 + 0.7
-                * transform::transform_normal(mesh.vertices[i0].normal, &normal_mat)
-                    .dot(light_dir)
-                    .max(0.0)
+            let normal = transform::transform_normal(mesh.vertices[i0].normal, &normal_mat);
+            let world = model.transform_point3(p0);
+            0.3 + 0.7 * diffuse(normal) + entity_lights.shade(normal, world)
         } else {
             1.0
         };
         let shade1 = if shaded {
-            0.3 + 0.7
-                * transform::transform_normal(mesh.vertices[i1].normal, &normal_mat)
-                    .dot(light_dir)
-                    .max(0.0)
+            let normal = transform::transform_normal(mesh.vertices[i1].normal, &normal_mat);
+            let world = model.transform_point3(p1);
+            0.3 + 0.7 * diffuse(normal) + entity_lights.shade(normal, world)
         } else {
             1.0
         };
         let shade2 = if shaded {
-            0.3 + 0.7
-                * transform::transform_normal(mesh.vertices[i2].normal, &normal_mat)
-                    .dot(light_dir)
-                    .max(0.0)
+            let normal = transform::transform_normal(mesh.vertices[i2].normal, &normal_mat);
+            let world = model.transform_point3(p2);
+            0.3 + 0.7 * diffuse(normal) + entity_lights.shade(normal, world)
         } else {
             1.0
         };
 
         let (shade0, shade1, shade2) = if environment.is_some() && shaded {
             // Reuse the Gouraud interpolator for N dot L; RGB light is applied in linear space.
-            let dot = |i: usize| {
-                transform::transform_normal(mesh.vertices[i].normal, &normal_mat)
-                    .dot(light_dir)
-                    .max(0.0)
+            let shade = |i: usize, position: Vec3| {
+                let normal = transform::transform_normal(mesh.vertices[i].normal, &normal_mat);
+                let world = model.transform_point3(position);
+                diffuse(normal) + entity_lights.shade(normal, world)
             };
-            (dot(i0), dot(i1), dot(i2))
+            (shade(i0, p0), shade(i1, p1), shade(i2, p2))
+        } else {
+            (shade0, shade1, shade2)
+        };
+        let (shade0, shade1, shade2) = if two_sided {
+            (shade0.max(0.35), shade1.max(0.35), shade2.max(0.35))
         } else {
             (shade0, shade1, shade2)
         };
@@ -1519,7 +1971,7 @@ fn rasterize_mesh_command(
             shadows.filter(|_| shaded),
         );
     }
-    if authored_ui {
+    if authored_ui || pipeline == BasicPipelineKind::Particle {
         fb.set_depth_policy(true, true);
     }
 }
@@ -1745,8 +2197,8 @@ mod tests {
         let efficient = render_triangles(&mut renderer, GeometryDetailMode::Efficient);
         let adaptive = render_triangles(&mut renderer, GeometryDetailMode::Adaptive);
         let detailed = render_triangles(&mut renderer, GeometryDetailMode::Detailed);
-        assert_eq!(efficient, 8 * 12 * 2);
-        assert_eq!(detailed, 24 * 36 * 2);
+        assert_eq!(efficient, (8 - 1) * 12 * 2);
+        assert_eq!(detailed, (24 - 1) * 36 * 2);
         assert!(adaptive >= efficient && adaptive <= detailed);
     }
 
@@ -1802,6 +2254,60 @@ mod tests {
             command,
             GraphicCommand::DrawMeshBatch { instances, .. } if instances.len() == 2
         )));
+    }
+
+    #[test]
+    fn stable_scene_packets_ignore_camera_culling_and_lod_changes() {
+        let mut scene = SceneGraph::new();
+        for index in 0..32 {
+            let id = scene.add_root_with_primitive(&format!("Cube {index}"), Primitive::Cube);
+            if let Some(node) = scene.get_mut(id) {
+                let angle = index as f32 / 32.0 * std::f32::consts::TAU;
+                node.position = Vec3::new(angle.cos() * 8.0, index as f32 * 0.2, angle.sin() * 8.0);
+            }
+        }
+        let options = RenderOptions {
+            stable_scene_packet: true,
+            show_grid_3d: false,
+            selection_outline: false,
+            ..RenderOptions::default()
+        };
+        let mut renderer = SceneRenderer::new(320, 240);
+        let first_camera = Camera {
+            position: Vec3::new(0.0, 2.0, 12.0),
+            ..Camera::default()
+        };
+        let second_camera = Camera {
+            position: Vec3::new(8.0, 3.0, 9.0),
+            ..Camera::default()
+        };
+        let first = renderer.build_frame(
+            &scene,
+            &first_camera,
+            320.0,
+            240.0,
+            &[],
+            [20, 20, 20, 255],
+            Vec3::Y,
+            options.clone(),
+            None,
+        );
+        let second = renderer.build_frame(
+            &scene,
+            &second_camera,
+            320.0,
+            240.0,
+            &[],
+            [20, 20, 20, 255],
+            Vec3::Y,
+            options,
+            None,
+        );
+        assert_eq!(
+            first.commands.content_hash(),
+            second.commands.content_hash(),
+            "stable packets must be camera independent"
+        );
     }
 
     #[test]
@@ -2030,5 +2536,238 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn new_primitives_render_their_cached_meshes_and_bounds() {
+        let renderer = SceneRenderer::new(320, 240);
+        assert_eq!(
+            renderer.local_bounds_for_primitive(Primitive::Wedge),
+            primitives::wedge(1).aabb()
+        );
+        assert_eq!(
+            renderer.local_bounds_for_primitive(Primitive::Torus),
+            primitives::torus(32, 16).aabb()
+        );
+        assert_eq!(
+            renderer.local_bounds_for_primitive(Primitive::Prism),
+            primitives::prism(24).aabb()
+        );
+        assert_eq!(
+            renderer.local_bounds_for_primitive(Primitive::Sphere2D),
+            primitives::sphere2d(32, 16).aabb()
+        );
+
+        let mut scene = SceneGraph::new();
+        for primitive in [
+            Primitive::Wedge,
+            Primitive::Torus,
+            Primitive::Prism,
+            Primitive::Sphere2D,
+        ] {
+            scene.add_root_with_primitive(primitive.label(), primitive);
+        }
+        let expected_triangles = primitives::wedge(1).triangle_count()
+            + primitives::torus(32, 16).triangle_count()
+            + primitives::prism(24).triangle_count()
+            + primitives::sphere2d(32, 16).triangle_count();
+        let camera = Camera::default();
+        let mut renderer = SceneRenderer::new(320, 240);
+        let frame = renderer.build_frame(
+            &scene,
+            &camera,
+            320.0,
+            240.0,
+            &[],
+            [20, 20, 20, 255],
+            Vec3::Y,
+            RenderOptions {
+                show_grid_3d: false,
+                ..RenderOptions::default()
+            },
+            None,
+        );
+
+        assert_eq!(frame.stats.visible_entities, 4);
+        assert_eq!(frame.stats.triangles_rendered as usize, expected_triangles);
+    }
+
+    #[test]
+    fn sphere2d_billboards_toward_the_camera_and_renders_two_sided() {
+        let position = Vec3::new(2.0, -1.0, 0.5);
+        let mut scene = SceneGraph::new();
+        let sphere2d = scene.add_root_with_primitive("Sphere 2D", Primitive::Sphere2D);
+        scene.get_mut(sphere2d).unwrap().position = position;
+        let camera = Camera::default();
+        let mut renderer = SceneRenderer::new(320, 240);
+        let frame = renderer.build_frame(
+            &scene,
+            &camera,
+            320.0,
+            240.0,
+            &[],
+            [20, 20, 20, 255],
+            Vec3::Y,
+            RenderOptions {
+                show_grid_3d: false,
+                ..RenderOptions::default()
+            },
+            None,
+        );
+
+        let mut pipeline = None;
+        let mut drawn = None;
+        for command in frame.commands.commands() {
+            match command {
+                GraphicCommand::SetPipeline(kind) => pipeline = Some(*kind),
+                GraphicCommand::DrawMesh { transform, .. } => {
+                    drawn = Some((pipeline, *transform));
+                }
+                GraphicCommand::DrawMeshBatch { instances, .. } => {
+                    if let Some(instance) = instances.first() {
+                        drawn = Some((pipeline, instance.transform));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (pipeline, transform) = drawn.expect("Sphere2D should be drawn");
+        assert!(matches!(
+            pipeline,
+            Some(BasicPipelineKind::PbrLitTwoSided | BasicPipelineKind::FlatColorTwoSided)
+        ));
+        assert!((transform.w_axis.truncate() - position).length() < 1e-5);
+        let forward = (camera.position - position).normalize();
+        assert!((transform.z_axis.truncate().normalize() - forward).length() < 1e-5);
+        let up = transform.y_axis.truncate().normalize();
+        assert!(up.dot(Vec3::Y) > 0.0);
+        assert!(up.dot(forward).abs() < 1e-5);
+    }
+
+    fn last_drawn_transform(frame: &SceneRenderFrame) -> Option<Mat4> {
+        let mut transform = None;
+        for command in frame.commands.commands() {
+            match command {
+                GraphicCommand::DrawMesh {
+                    transform: draw, ..
+                } => transform = Some(*draw),
+                GraphicCommand::DrawMeshBatch { instances, .. } => {
+                    if let Some(instance) = instances.first() {
+                        transform = Some(instance.transform);
+                    }
+                }
+                _ => {}
+            }
+        }
+        transform
+    }
+
+    #[test]
+    fn surface_unlit_and_double_sided_select_the_flat_two_sided_pipeline() {
+        let mut scene = SceneGraph::new();
+        let cube = scene.add_root_with_primitive("Unlit Cube", Primitive::Cube);
+        {
+            let node = scene.get_mut(cube).unwrap();
+            node.surface.unlit = true;
+            node.surface.double_sided = true;
+        }
+        let camera = Camera::default();
+        let mut renderer = SceneRenderer::new(128, 128);
+        let frame = renderer.build_frame(
+            &scene,
+            &camera,
+            128.0,
+            128.0,
+            &[],
+            [20, 20, 20, 255],
+            Vec3::Y,
+            RenderOptions {
+                show_grid_3d: false,
+                ..RenderOptions::default()
+            },
+            None,
+        );
+
+        let mut pipeline = None;
+        let mut drawn_pipeline = None;
+        for command in frame.commands.commands() {
+            match command {
+                GraphicCommand::SetPipeline(kind) => pipeline = Some(*kind),
+                GraphicCommand::DrawMesh { .. } | GraphicCommand::DrawMeshBatch { .. } => {
+                    drawn_pipeline = pipeline;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(drawn_pipeline, Some(BasicPipelineKind::FlatColorTwoSided));
+    }
+
+    #[test]
+    fn base_pivot_shifts_draw_geometry_without_moving_the_authored_origin() {
+        let mut scene = SceneGraph::new();
+        let cube = scene.add_root_with_primitive("Pivot Cube", Primitive::Cube);
+        scene.get_mut(cube).unwrap().pivot = raf_core::scene::PivotMode::Base;
+        let camera = Camera::default();
+        let mut renderer = SceneRenderer::new(128, 128);
+        let frame = renderer.build_frame(
+            &scene,
+            &camera,
+            128.0,
+            128.0,
+            &[],
+            [20, 20, 20, 255],
+            Vec3::Y,
+            RenderOptions {
+                show_grid_3d: false,
+                ..RenderOptions::default()
+            },
+            None,
+        );
+
+        assert!(
+            (scene.world_matrix(cube).w_axis.truncate() - Vec3::ZERO).length() < 1e-6,
+            "the authored node transform must keep the pivot origin"
+        );
+        let transform = last_drawn_transform(&frame).expect("cube should be drawn");
+        assert!(
+            (transform.w_axis.truncate() - Vec3::new(0.0, 0.5, 0.0)).length() < 1e-5,
+            "unexpected drawn translation {:?}",
+            transform.w_axis.truncate()
+        );
+    }
+
+    #[test]
+    fn primitive_tiling_cache_scales_uvs_and_stays_bounded() {
+        let renderer = SceneRenderer::new(64, 64);
+        let base = Arc::clone(&renderer.cube_basic_mesh);
+        let mut cache = HashMap::new();
+        let key = PrimitiveTilingKey {
+            primitive: primitive_batch_key(Primitive::Cube),
+            lod: 1,
+            tiling: [2.0_f32.to_bits(), 3.0_f32.to_bits()],
+        };
+        let tiled = tiled_primitive_basic(&mut cache, key, &base, [2.0, 3.0]);
+        assert_eq!(tiled.vertices.len(), base.vertices.len());
+        assert!(tiled
+            .vertices
+            .iter()
+            .zip(&base.vertices)
+            .all(
+                |(tiled, base)| (tiled.uv[0] - base.uv[0] * 2.0).abs() < 1e-6
+                    && (tiled.uv[1] - base.uv[1] * 3.0).abs() < 1e-6
+            ));
+
+        let cached = tiled_primitive_basic(&mut cache, key, &base, [2.0, 3.0]);
+        assert!(Arc::ptr_eq(&tiled, &cached));
+
+        for index in 0..(MAX_PRIMITIVE_TILING_CACHE_ENTRIES + 8) {
+            let key = PrimitiveTilingKey {
+                primitive: index as u8,
+                lod: 1,
+                tiling: [2.0_f32.to_bits(), 3.0_f32.to_bits()],
+            };
+            let _ = tiled_primitive_basic(&mut cache, key, &base, [2.0, 3.0]);
+            assert!(cache.len() <= MAX_PRIMITIVE_TILING_CACHE_ENTRIES);
+        }
     }
 }

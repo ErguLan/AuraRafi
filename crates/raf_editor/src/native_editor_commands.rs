@@ -25,18 +25,49 @@ fn apply_inspector_commit(
     if !scene.is_valid_node(target) {
         return None;
     }
+    if let Some(field) = field.strip_prefix("particle.") {
+        if field == "asset" {
+            let path = value.trim().replace('\\', "/");
+            let valid = !path.is_empty()
+                && path.len() <= 256
+                && !path.starts_with('/')
+                && path.ends_with(".rafparticle")
+                && !path.split('/').any(|part| part == ".." || part.is_empty());
+            if !valid {
+                return Some(CommandOutput::error(
+                    raf_core::i18n::t("app.particle_system", runtime.ui_language),
+                    "particle asset path must be a project-relative .rafparticle file",
+                ));
+            }
+            runtime.mutate_scene(scene, |scene| {
+                if let Some(node) = scene.get_mut(target) {
+                    if let Some(component) = node.particle_system.as_mut() {
+                        component.asset = path;
+                    }
+                }
+            });
+        }
+        return None;
+    }
     if let Some(field) = field.strip_prefix("physics.") {
         if field == "joints" {
-            let joints: Option<Vec<raf_core::scene::joint::PhysicsJoint>> =
-                (value.len() <= 32768).then(|| serde_json::from_str(value).ok()).flatten();
+            let joints: Option<Vec<raf_core::scene::joint::PhysicsJoint>> = (value.len() <= 32768)
+                .then(|| serde_json::from_str(value).ok())
+                .flatten();
             let owner = scene.get(target).map(|node| node.uuid)?;
             let valid = joints.as_ref().is_some_and(|joints| {
-                joints.len() <= 32 && joints.iter().all(|joint| {
-                    joint.is_valid() && joint.target != owner
-                        && scene.iter().filter(|(id, node)| {
-                            scene.is_valid_node(*id) && node.uuid == joint.target
-                        }).count() == 1
-                })
+                joints.len() <= 32
+                    && joints.iter().all(|joint| {
+                        joint.is_valid()
+                            && joint.target != owner
+                            && scene
+                                .iter()
+                                .filter(|(id, node)| {
+                                    scene.is_valid_node(*id) && node.uuid == joint.target
+                                })
+                                .count()
+                                == 1
+                    })
             });
             if !valid {
                 return Some(CommandOutput::error(
@@ -94,10 +125,13 @@ fn apply_inspector_commit(
             _ => return None,
         };
         let mut size = node.primitive.dimensions(node.scale);
-        let Some(dimension)=value.trim().parse::<f32>().ok().filter(|v|v.is_finite()) else {
-            return Some(CommandOutput::error(raf_core::i18n::t("app.dimensions",runtime.ui_language),"commands.error.dimensions_invalid"));
+        let Some(dimension) = value.trim().parse::<f32>().ok().filter(|v| v.is_finite()) else {
+            return Some(CommandOutput::error(
+                raf_core::i18n::t("app.dimensions", runtime.ui_language),
+                "commands.error.dimensions_invalid",
+            ));
         };
-        size[axis]=dimension;
+        size[axis] = dimension;
         let command = format!(
             "/game.update target={} size=[{},{},{}]",
             node.uuid, size.x, size.y, size.z
@@ -108,6 +142,112 @@ fn apply_inspector_commit(
             runtime.record_scene_change(before, scene);
         }
         return Some(output);
+    }
+    if let Some(field) = field.strip_prefix("audio.") {
+        let mut source = scene
+            .get(target)
+            .map(|node| node.audio_source.clone())
+            .unwrap_or_default();
+        match field {
+            "clip" => {
+                let normalized = value.trim().replace('\\', "/");
+                if !normalized.is_empty()
+                    && (normalized.starts_with('/')
+                        || normalized.contains(':')
+                        || normalized
+                            .split('/')
+                            .any(|part| part.is_empty() || part == "." || part == "..")
+                        || !matches!(
+                            std::path::Path::new(&normalized)
+                                .extension()
+                                .and_then(|extension| extension.to_str())
+                                .map(str::to_ascii_lowercase)
+                                .as_deref(),
+                            Some("wav") | Some("mp3") | Some("ogg") | Some("flac")
+                        ))
+                {
+                    return Some(CommandOutput::error(
+                        "Audio",
+                        "Use a project-relative .wav/.mp3/.ogg/.flac path.",
+                    ));
+                }
+                source.clip = raf_core::scene::normalize_reference(normalized);
+                if !source.clip.is_empty() {
+                    source.enabled = true;
+                }
+            }
+            "bus" => {
+                let Some(bus) = raf_core::scene::AudioBus::from_slug(&value) else {
+                    return Some(CommandOutput::error(
+                        "Audio",
+                        "Bus must be master, music, sfx, voice or ambient.",
+                    ));
+                };
+                source.bus = bus;
+            }
+            "min_distance" | "max_distance" => {
+                let Some(value) = value
+                    .trim()
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|value| value.is_finite())
+                else {
+                    return Some(CommandOutput::error("Audio", "Enter a finite distance."));
+                };
+                if field == "min_distance" {
+                    source.min_distance = value;
+                } else {
+                    source.max_distance = value;
+                }
+            }
+            _ => return None,
+        }
+        if let Err(error) = source.validate() {
+            return Some(CommandOutput::error("Audio", error));
+        }
+        runtime.mutate_scene(scene, |scene| {
+            if let Some(node) = scene.get_mut(target) {
+                node.audio_source = source;
+            }
+        });
+        return None;
+    }
+    if let Some(field) = field.strip_prefix("light.") {
+        let mut light = scene
+            .get(target)
+            .and_then(|node| node.light.clone())
+            .unwrap_or_default();
+        match field {
+            "intensity" | "range" => {
+                let Some(value) = value.trim().parse::<f32>().ok().filter(|v| v.is_finite()) else {
+                    return Some(CommandOutput::error(
+                        "Light",
+                        "Enter a finite numeric value.",
+                    ));
+                };
+                if field == "intensity" {
+                    light.intensity = value;
+                } else {
+                    light.range = value;
+                }
+            }
+            "color" => {
+                let Some(color) = parse_hex_light_color(value) else {
+                    return Some(CommandOutput::error("Light", "Use #RRGGBB."));
+                };
+                light.color = color;
+            }
+            _ => return None,
+        }
+        if let Err(error) = light.validate() {
+            return Some(CommandOutput::error("Light", error));
+        }
+        runtime.mutate_scene(scene, |scene| {
+            if let Some(node) = scene.get_mut(target) {
+                node.light = Some(light);
+            }
+        });
+        return None;
     }
     if let Some(field) = field.strip_prefix("camera.") {
         let key = if field == "fov_degrees" { "fov" } else { field };
@@ -243,6 +383,15 @@ fn parse_node_color(value: &str) -> Option<raf_core::scene::NodeColor> {
     ))
 }
 
+fn parse_hex_light_color(value: &str) -> Option<[u8; 3]> {
+    let hex = value.trim().trim_start_matches('#');
+    if hex.len() != 6 {
+        return None;
+    }
+    let parse = |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).ok();
+    Some([parse(0..2)?, parse(2..4)?, parse(4..6)?])
+}
+
 fn validate_project_texture_path(value: &str) -> Option<Option<String>> {
     if value.is_empty() {
         return Some(None);
@@ -322,16 +471,15 @@ fn apply_console_command(
         );
     }
 
-    let _project_root = crate::commands::game::bind_project_root(
-        project.map(|project| project.path.clone()),
-    );
+    let _project_root =
+        crate::commands::game::bind_project_root(project.map(|project| project.path.clone()));
     let mut selection = SceneSelectionState {
         selected_node: runtime.game_viewport().selected.first().copied(),
         selected_nodes: runtime.game_viewport().selected.clone(),
     };
     let output = if crate::commands::ui::supports(&parsed.name) {
-        let assets=project.map(|p|p.path.join("assets"));
-        crate::commands::ui::execute(&parsed,assets.as_deref(),false)
+        let assets = project.map(|p| p.path.join("assets"));
+        crate::commands::ui::execute(&parsed, assets.as_deref(), false)
     } else if parsed.name.starts_with("lighting.") {
         let before = scene.clone();
         let output = crate::commands::lighting::execute(&parsed, scene);
@@ -339,7 +487,10 @@ fn apply_console_command(
             runtime.record_scene_change(before, scene);
         }
         output
-    } else if parsed.name.starts_with("behavior.") || parsed.name.starts_with("prefab.") {
+    } else if parsed.name.starts_with("behavior.")
+        || parsed.name.starts_with("prefab.")
+        || parsed.name.starts_with("assembly.")
+    {
         apply_behavior_command(runtime, scene, project, &parsed)
     } else if parsed.name.starts_with("game.")
         || parsed.name.starts_with("world.")
@@ -399,10 +550,29 @@ fn apply_behavior_command(
     };
     let output = crate::commands::behavior::execute(command, &mut context, false);
     if output.changed {
-        runtime.record_scene_change(before, scene);
+        if command.name == "lighting.set" && runtime.environment_gesture_active() {
+            runtime.record_environment_scene_change(before, scene);
+        } else {
+            runtime.record_scene_change(before, scene);
+        }
         runtime.request_canvas_frame();
     }
     output
+}
+
+/// Tab Mode is a focused editor: scene mutation and selection commands from
+/// other workbench panels must not compete with the active mesh session.
+fn mesh_locks_out_command(command: &str) -> bool {
+    [
+        "hierarchy.",
+        "scene.",
+        "assets.",
+        "inspector.",
+        "animations.",
+        "viewport.create-primitive",
+    ]
+    .iter()
+    .any(|prefix| command.starts_with(prefix))
 }
 
 pub(crate) fn apply_workbench_intents(
@@ -414,6 +584,8 @@ pub(crate) fn apply_workbench_intents(
     let mut console_outputs = Vec::new();
     let mut saved_document = false;
     for intent in intents {
+        let mesh_locked = runtime.game_viewport().edit_mode
+            == crate::panels::viewport_controller::NativeViewportEditMode::Mesh;
         match intent {
             NativeWorkbenchIntent::Window(_) => {
                 // The native application executes window commands after the
@@ -447,9 +619,62 @@ pub(crate) fn apply_workbench_intents(
                 // Agent settings are copied to the global settings store by
                 // the native application after the workbench input boundary.
             }
+            NativeWorkbenchIntent::EnvironmentGesture { active } => {
+                runtime.set_environment_gesture(active);
+            }
+            NativeWorkbenchIntent::LightingPatch { patch } => {
+                let before = scene.clone();
+                if let Ok(next) = scene.environment().patched(&patch) {
+                    if scene.set_environment(next) {
+                        if runtime.environment_gesture_active() {
+                            runtime.record_environment_scene_change(before, scene);
+                        } else {
+                            runtime.record_scene_change(before, scene);
+                        }
+                        runtime.request_canvas_frame();
+                    }
+                }
+            }
+            NativeWorkbenchIntent::ReplaceEnvironment { settings } => {
+                let before = scene.clone();
+                if scene.set_environment(settings) {
+                    if runtime.environment_gesture_active() {
+                        runtime.record_environment_scene_change(before, scene);
+                    } else {
+                        runtime.record_scene_change(before, scene);
+                    }
+                    runtime.request_canvas_frame();
+                }
+            }
             NativeWorkbenchIntent::OpenProjectFolder => {
                 // The native application opens the platform file manager after
                 // the retained workbench releases its input borrow.
+            }
+            NativeWorkbenchIntent::ImportAssetFile => {
+                // The native application opens the platform file picker after
+                // the retained workbench releases its input borrow.
+            }
+            NativeWorkbenchIntent::Viewport(action) if mesh_locked => {
+                use crate::panels::viewport_toolbar_surface::ViewportToolbarAction;
+                // Tab Mode owns the viewport; only render toggles stay live.
+                match action {
+                    ViewportToolbarAction::ToggleGrid => {
+                        let viewport = runtime.game_viewport_mut();
+                        viewport.grid_visible = !viewport.grid_visible;
+                        runtime.request_canvas_frame();
+                    }
+                    ViewportToolbarAction::ToggleLabels => {
+                        let viewport = runtime.game_viewport_mut();
+                        viewport.show_labels = !viewport.show_labels;
+                        runtime.request_canvas_frame();
+                    }
+                    ViewportToolbarAction::TogglePolygons => {
+                        let viewport = runtime.game_viewport_mut();
+                        viewport.solid_show_surface_edges = !viewport.solid_show_surface_edges;
+                        runtime.request_canvas_frame();
+                    }
+                    _ => {}
+                }
             }
             NativeWorkbenchIntent::Viewport(action) => {
                 use crate::panels::viewport_toolbar_surface::ViewportToolbarAction;
@@ -512,13 +737,63 @@ pub(crate) fn apply_workbench_intents(
                 target,
                 field,
                 value,
-            } => {
+            } if !mesh_locked => {
                 if let Some(output) = apply_inspector_commit(runtime, scene, target, &field, &value)
                 {
                     console_outputs.push(output);
                 }
             }
+            NativeWorkbenchIntent::InspectorCommit { .. } => {}
             NativeWorkbenchIntent::Command(command) => {
+                if mesh_locked && mesh_locks_out_command(&command) {
+                    continue;
+                }
+                if let Some(raw) = command.strip_prefix("inspector.particle.") {
+                    let Some((action, raw_id)) = raw.rsplit_once(':') else {
+                        continue;
+                    };
+                    let Ok(id) = raw_id.parse::<usize>() else {
+                        continue;
+                    };
+                    let id = SceneNodeId(id);
+                    let (verb, slug) = action
+                        .split_once(':')
+                        .map_or((action, None), |(verb, slug)| (verb, Some(slug)));
+                    runtime.mutate_scene(scene, |scene| {
+                        let Some(node) = scene.get_mut(id) else {
+                            return;
+                        };
+                        let Some(component) = node.particle_system.as_mut() else {
+                            return;
+                        };
+                        match verb {
+                            "play" => {
+                                component.playback = raf_core::scene::ParticlePlayback::Playing
+                            }
+                            "pause" => {
+                                component.playback = raf_core::scene::ParticlePlayback::Paused
+                            }
+                            "freeze" => {
+                                component.playback = raf_core::scene::ParticlePlayback::Frozen
+                            }
+                            "stop" => {
+                                component.playback = raf_core::scene::ParticlePlayback::Stopped
+                            }
+                            "quality" => {
+                                component.quality = match slug {
+                                    Some("potato") => raf_core::scene::ParticleQuality::Potato,
+                                    Some("low") => raf_core::scene::ParticleQuality::Low,
+                                    Some("medium") => raf_core::scene::ParticleQuality::Medium,
+                                    Some("high") => raf_core::scene::ParticleQuality::High,
+                                    Some("epic") => raf_core::scene::ParticleQuality::Epic,
+                                    _ => return,
+                                }
+                            }
+                            _ => {}
+                        }
+                    });
+                    continue;
+                }
                 if let Some(target) =
                     crate::panels::viewport_compass::ViewportCompassTarget::from_command(&command)
                 {
@@ -526,9 +801,38 @@ pub(crate) fn apply_workbench_intents(
                     runtime.request_canvas_frame();
                 } else if command == "animations.redraw" {
                     runtime.request_canvas_frame();
+                } else if let Some(raw) = command.strip_prefix("animations.place-rig:") {
+                    let result = (|| -> Result<_, String> {
+                        let data: serde_json::Value =
+                            serde_json::from_str(raw).map_err(|error| error.to_string())?;
+                        let project =
+                            project.ok_or("A project is required to place a skeletal model")?;
+                        let asset = data["asset"].as_str().ok_or("Missing model asset")?;
+                        let parent = data["parent"].as_u64().map(|id| SceneNodeId(id as usize));
+                        let before = scene.clone();
+                        let (id, _) = crate::commands::game::mesh_asset::place_rig(
+                            scene,
+                            &project.path,
+                            asset,
+                            parent,
+                            None,
+                        )?;
+                        runtime.record_scene_change(before, scene);
+                        runtime.select_node(scene, id);
+                        Ok(())
+                    })();
+                    if let Err(error) = result {
+                        console_outputs.push(CommandOutput::error(
+                            raf_core::i18n::t("animation.import_rig", runtime.ui_language),
+                            error,
+                        ));
+                    }
                 } else if let Some(data) = command.strip_prefix("animations.bind:") {
                     if let Err(error) = bind_animation_asset(runtime, scene, project, data) {
-                        console_outputs.push(CommandOutput::error(raf_core::i18n::t("animation.tab", runtime.ui_language), error));
+                        console_outputs.push(CommandOutput::error(
+                            raf_core::i18n::t("animation.tab", runtime.ui_language),
+                            error,
+                        ));
                     }
                 } else if let Some(raw) = command.strip_prefix("hierarchy.reorder:") {
                     let parts = raw.split(':').collect::<Vec<_>>();
@@ -704,6 +1008,70 @@ pub(crate) fn apply_workbench_intents(
                         }
                         console_outputs.push(output);
                     }
+                } else if let Some(raw) = command.strip_prefix("hierarchy.create-particle:") {
+                    let Some((row, parent)) = raw.rsplit_once(':') else {
+                        continue;
+                    };
+                    let valid = !row.is_empty()
+                        && row.len() <= 256
+                        && row.ends_with(".rafparticle")
+                        && !row.starts_with('/')
+                        && !row.split('/').any(|part| part == ".." || part.is_empty());
+                    if !valid {
+                        console_outputs.push(CommandOutput::error(
+                            "Particle system",
+                            "invalid particle asset path".to_string(),
+                        ));
+                        continue;
+                    }
+                    if parent == "root" {
+                        runtime.create_particle_system(scene, row);
+                    } else if let Ok(id) = parent.parse::<usize>() {
+                        runtime.create_particle_system_under(scene, SceneNodeId(id), row);
+                    }
+                } else if let Some(raw) = command.strip_prefix("hierarchy.create-light:") {
+                    let (raw_parent, kind) = raw
+                        .split_once(':')
+                        .map(|(parent, kind)| (parent, kind))
+                        .unwrap_or(("root", raw));
+                    let parent = if raw_parent == "root" {
+                        None
+                    } else {
+                        raw_parent
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|id| scene.get(SceneNodeId(*id)).is_some())
+                            .map(SceneNodeId)
+                    };
+                    let before = scene.clone();
+                    let name = if kind == "spot" {
+                        "Spot Light"
+                    } else {
+                        "Point Light"
+                    };
+                    let id = parent
+                        .map(|parent| scene.add_child(parent, name))
+                        .unwrap_or_else(|| scene.add_root(name));
+                    if let Some(node) = scene.get_mut(id) {
+                        let mut light = raf_core::scene::SceneLight::default();
+                        light.kind = if kind == "spot" {
+                            raf_core::scene::LightKind::Spot
+                        } else {
+                            raf_core::scene::LightKind::Point
+                        };
+                        light.color = [255, 226, 170];
+                        node.light = Some(light);
+                        node.position.y = 2.0;
+                        node.source_asset = Some(format!("builtin://light/{kind}"));
+                        node.color = raf_core::scene::NodeColor::rgb(255, 226, 170);
+                    }
+                    runtime.select_node(scene, id);
+                    runtime.record_scene_change(before, scene);
+                    console_outputs.push(CommandOutput::changed(
+                        raf_core::i18n::t("app.light_component", runtime.ui_language),
+                        vec![format!("created: {name}")],
+                        serde_json::json!({"id": id.0, "kind": kind}),
+                    ));
                 } else if command == "hierarchy.create-entity:root" {
                     runtime.create_entity(scene);
                 } else if let Some(raw_id) = command.strip_prefix("hierarchy.create-entity:") {
@@ -735,8 +1103,14 @@ pub(crate) fn apply_workbench_intents(
                     }
                 } else if let Some(raw) = command.strip_prefix("inspector.physics.joint.add:") {
                     let mut parts = raw.split(':');
-                    let owner = parts.next().and_then(|value| value.parse::<usize>().ok()).map(SceneNodeId);
-                    let target = parts.next().and_then(|value| value.parse::<usize>().ok()).map(SceneNodeId);
+                    let owner = parts
+                        .next()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .map(SceneNodeId);
+                    let target = parts
+                        .next()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .map(SceneNodeId);
                     let kind = match parts.next() {
                         Some("fixed") => Some(raf_core::scene::joint::JointKind::Fixed),
                         Some("hinge") => Some(raf_core::scene::joint::JointKind::Hinge),
@@ -746,22 +1120,45 @@ pub(crate) fn apply_workbench_intents(
                         _ => None,
                     };
                     if let (Some(owner), Some(target), Some(kind)) = (owner, target, kind) {
-                        if owner != target && scene.is_valid_node(owner) && scene.is_valid_node(target) {
+                        if owner != target
+                            && scene.is_valid_node(owner)
+                            && scene.is_valid_node(target)
+                        {
                             let owner_matrix = scene.world_matrix(owner);
                             let target_matrix = scene.world_matrix(target);
-                            if target_matrix.determinant().is_finite() && target_matrix.determinant().abs() > 1e-8 {
+                            if target_matrix.determinant().is_finite()
+                                && target_matrix.determinant().abs() > 1e-8
+                            {
                                 let inverse = target_matrix.inverse();
-                                let target_anchor = inverse.transform_point3(owner_matrix.transform_point3(glam::Vec3::ZERO));
-                                let target_axis = inverse.transform_vector3(owner_matrix.transform_vector3(glam::Vec3::X)).normalize_or_zero();
+                                let target_anchor = inverse.transform_point3(
+                                    owner_matrix.transform_point3(glam::Vec3::ZERO),
+                                );
+                                let target_axis = inverse
+                                    .transform_vector3(
+                                        owner_matrix.transform_vector3(glam::Vec3::X),
+                                    )
+                                    .normalize_or_zero();
                                 let target_uuid = scene.get(target).unwrap().uuid;
-                                let target_unique = scene.iter().filter(|(id, node)| {
-                                    scene.is_valid_node(*id) && node.uuid == target_uuid
-                                }).count() == 1;
+                                let target_unique = scene
+                                    .iter()
+                                    .filter(|(id, node)| {
+                                        scene.is_valid_node(*id) && node.uuid == target_uuid
+                                    })
+                                    .count()
+                                    == 1;
                                 let mut joint = raf_core::scene::joint::PhysicsJoint::new(
-                                    target_uuid, kind, glam::Vec3::ZERO, target_anchor,
+                                    target_uuid,
+                                    kind,
+                                    glam::Vec3::ZERO,
+                                    target_anchor,
                                 );
                                 joint.target_axis = target_axis;
-                                if target_unique && joint.is_valid() && scene.get(owner).is_some_and(|node| node.physics_joints.len() < 32 && node.uuid != target_uuid) {
+                                if target_unique
+                                    && joint.is_valid()
+                                    && scene.get(owner).is_some_and(|node| {
+                                        node.physics_joints.len() < 32 && node.uuid != target_uuid
+                                    })
+                                {
                                     runtime.mutate_scene(scene, |scene| {
                                         if let Some(node) = scene.get_mut(owner) {
                                             node.physics_joints.push(joint);
@@ -770,6 +1167,20 @@ pub(crate) fn apply_workbench_intents(
                                 }
                             }
                         }
+                    }
+                } else if let Some(raw) = command.strip_prefix("inspector.pivot:") {
+                    let Some((raw_pivot, raw_id)) = raw.split_once(':') else {
+                        continue;
+                    };
+                    if let (Some(pivot), Ok(id)) = (
+                        raf_core::scene::PivotMode::from_slug(raw_pivot),
+                        raw_id.parse::<usize>(),
+                    ) {
+                        runtime.mutate_scene(scene, |scene| {
+                            if let Some(node) = scene.get_mut(SceneNodeId(id)) {
+                                node.pivot = pivot;
+                            }
+                        });
                     }
                 } else if let Some(raw) = command.strip_prefix("inspector.collider:") {
                     if let Some((raw_id, raw_kind)) = raw.split_once(':') {
@@ -834,49 +1245,100 @@ pub(crate) fn apply_workbench_intents(
                     };
                     if let Ok(id) = raw_id.parse::<usize>() {
                         let id = SceneNodeId(id);
+                        if key.starts_with("inspector.particle.") {
+                            runtime.mutate_scene(scene, |scene| {
+                                if let Some(node) = scene.get_mut(id) {
+                                    if let Some(component) = node.particle_system.as_mut() {
+                                        match key {
+                                            "inspector.particle.play_on_start" => {
+                                                component.play_on_start = value;
+                                                component.playback = if value {
+                                                    raf_core::scene::ParticlePlayback::Playing
+                                                } else {
+                                                    raf_core::scene::ParticlePlayback::Stopped
+                                                };
+                                            }
+                                            "inspector.particle.looping" => {
+                                                component.looping = value
+                                            }
+                                            "inspector.particle.visible" => {
+                                                component.visible = value
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            });
+                            continue;
+                        }
                         if key == "inspector.physics.body_owner" {
                             let parent = scene.get(id).and_then(|node| node.parent);
-                            let parent_uuid = parent.filter(|parent| scene.is_valid_node(*parent))
+                            let parent_uuid = parent
+                                .filter(|parent| scene.is_valid_node(*parent))
                                 .and_then(|parent| scene.get(parent))
-                                .filter(|parent| parent.rigid_body.enabled && parent.collider.body_owner.is_none())
+                                .filter(|parent| {
+                                    parent.rigid_body.enabled
+                                        && parent.collider.body_owner.is_none()
+                                })
                                 .map(|parent| parent.uuid)
-                                .filter(|uuid| scene.iter().filter(|(candidate, node)| {
-                                    scene.is_valid_node(*candidate) && node.uuid == *uuid
-                                }).count() == 1);
-                            let child_has_body = scene.get(id).is_some_and(|node| node.rigid_body.enabled);
+                                .filter(|uuid| {
+                                    scene
+                                        .iter()
+                                        .filter(|(candidate, node)| {
+                                            scene.is_valid_node(*candidate) && node.uuid == *uuid
+                                        })
+                                        .count()
+                                        == 1
+                                });
+                            let child_has_body =
+                                scene.get(id).is_some_and(|node| node.rigid_body.enabled);
                             if value && (parent_uuid.is_none() || child_has_body) {
                                 console_outputs.push(CommandOutput::error(
                                     raf_core::i18n::t("app.physics", runtime.ui_language),
-                                    raf_core::i18n::t("runtime.invalid_compound_owner", runtime.ui_language),
+                                    raf_core::i18n::t(
+                                        "runtime.invalid_compound_owner",
+                                        runtime.ui_language,
+                                    ),
                                 ));
                                 continue;
                             }
                             runtime.mutate_scene(scene, |scene| {
                                 if let Some(node) = scene.get_mut(id) {
-                                    node.collider.body_owner = if value { parent_uuid } else { None };
+                                    node.collider.body_owner =
+                                        if value { parent_uuid } else { None };
                                 }
                             });
                             continue;
                         }
-                        if key == "inspector.physics.enabled" && value
-                            && scene.get(id).is_some_and(|node| node.collider.body_owner.is_some())
+                        if key == "inspector.physics.enabled"
+                            && value
+                            && scene
+                                .get(id)
+                                .is_some_and(|node| node.collider.body_owner.is_some())
                         {
                             console_outputs.push(CommandOutput::error(
                                 raf_core::i18n::t("app.physics", runtime.ui_language),
-                                raf_core::i18n::t("runtime.invalid_compound_owner", runtime.ui_language),
+                                raf_core::i18n::t(
+                                    "runtime.invalid_compound_owner",
+                                    runtime.ui_language,
+                                ),
                             ));
                             continue;
                         }
                         if key == "inspector.physics.enabled" && !value {
                             let owner = scene.get(id).map(|node| node.uuid);
                             let has_dependents = scene.iter().any(|(candidate, node)| {
-                                scene.is_valid_node(candidate) && owner.is_some()
+                                scene.is_valid_node(candidate)
+                                    && owner.is_some()
                                     && node.collider.body_owner == owner
                             });
                             if has_dependents {
                                 console_outputs.push(CommandOutput::error(
                                     raf_core::i18n::t("app.physics", runtime.ui_language),
-                                    raf_core::i18n::t("runtime.compound_owner_in_use", runtime.ui_language),
+                                    raf_core::i18n::t(
+                                        "runtime.compound_owner_in_use",
+                                        runtime.ui_language,
+                                    ),
                                 ));
                                 continue;
                             }
@@ -935,15 +1397,41 @@ pub(crate) fn apply_workbench_intents(
                                 "inspector.audio.enabled" => node.audio_source.enabled = value,
                                 "inspector.audio.autoplay" => node.audio_source.autoplay = value,
                                 "inspector.audio.looping" => node.audio_source.looping = value,
+                                "inspector.audio.spatial" => node.audio_source.spatial = value,
+                                "inspector.surface.unlit" => node.surface.unlit = value,
+                                "inspector.surface.double_sided" => {
+                                    node.surface.double_sided = value
+                                }
+                                "inspector.light.enabled" => {
+                                    if value {
+                                        node.light.get_or_insert_with(Default::default);
+                                    } else {
+                                        node.light = None;
+                                    }
+                                }
                                 "inspector.physics.enabled" => node.rigid_body.enabled = value,
                                 "inspector.physics.gravity" => node.rigid_body.use_gravity = value,
-                                "inspector.physics.character" => node.rigid_body.is_character = value,
-                                "inspector.physics.translation_lock_x" => node.rigid_body.translation_locks[0] = value,
-                                "inspector.physics.translation_lock_y" => node.rigid_body.translation_locks[1] = value,
-                                "inspector.physics.translation_lock_z" => node.rigid_body.translation_locks[2] = value,
-                                "inspector.physics.rotation_lock_x" => node.rigid_body.rotation_locks[0] = value,
-                                "inspector.physics.rotation_lock_y" => node.rigid_body.rotation_locks[1] = value,
-                                "inspector.physics.rotation_lock_z" => node.rigid_body.rotation_locks[2] = value,
+                                "inspector.physics.character" => {
+                                    node.rigid_body.is_character = value
+                                }
+                                "inspector.physics.translation_lock_x" => {
+                                    node.rigid_body.translation_locks[0] = value
+                                }
+                                "inspector.physics.translation_lock_y" => {
+                                    node.rigid_body.translation_locks[1] = value
+                                }
+                                "inspector.physics.translation_lock_z" => {
+                                    node.rigid_body.translation_locks[2] = value
+                                }
+                                "inspector.physics.rotation_lock_x" => {
+                                    node.rigid_body.rotation_locks[0] = value
+                                }
+                                "inspector.physics.rotation_lock_y" => {
+                                    node.rigid_body.rotation_locks[1] = value
+                                }
+                                "inspector.physics.rotation_lock_z" => {
+                                    node.rigid_body.rotation_locks[2] = value
+                                }
                                 "inspector.physics.trigger" => node.rigid_body.is_trigger = value,
                                 _ => {}
                             }
@@ -991,6 +1479,20 @@ pub(crate) fn apply_workbench_intents(
                                 }
                             });
                         }
+                    }
+                } else if let Some(kind) = command.strip_prefix("inspector.light.kind:") {
+                    let kind = match kind {
+                        "spot" => raf_core::scene::LightKind::Spot,
+                        _ => raf_core::scene::LightKind::Point,
+                    };
+                    let selected = runtime.game_viewport().selected.first().copied();
+                    if let Some(id) = selected {
+                        runtime.mutate_scene(scene, |scene| {
+                            if let Some(node) = scene.get_mut(id) {
+                                let light = node.light.get_or_insert_with(Default::default);
+                                light.kind = kind;
+                            }
+                        });
                     }
                 } else if let Some(raw) = command.strip_prefix("inspector.appearance.opacity:") {
                     let Some((raw_percentage, raw_id)) = raw.split_once(':') else {
@@ -1043,19 +1545,44 @@ pub(crate) fn apply_workbench_intents(
                     let value = parts
                         .next()
                         .and_then(|value| value.parse::<f32>().ok())
-                        .unwrap_or_default()
-                        .clamp(0.0, 1.0);
+                        .filter(|value| value.is_finite());
                     let Some(raw_id) = parts.next() else {
                         continue;
                     };
-                    if let Ok(id) = raw_id.parse::<usize>() {
+                    if let (Some(value), Ok(id)) = (value, raw_id.parse::<usize>()) {
                         let id = SceneNodeId(id);
                         runtime.mutate_scene(scene, |scene| {
-                            if let Some(node) = scene.get_mut(id) {
-                                if key == "inspector.audio.volume" {
-                                    node.audio_source.volume = value;
-                                } else if key == "inspector.physics.damping" {
-                                    node.rigid_body.damping = value;
+                            let Some(node) = scene.get_mut(id) else {
+                                return;
+                            };
+                            if key == "inspector.audio.volume" {
+                                node.audio_source.volume = value.clamp(0.0, 1.0);
+                            } else if key == "inspector.particle.time_scale" {
+                                if let Some(component) = node.particle_system.as_mut() {
+                                    component.time_scale = value.clamp(0.0, 4.0);
+                                }
+                            } else if key == "inspector.particle.rate_scale" {
+                                if let Some(component) = node.particle_system.as_mut() {
+                                    component.rate_scale = value.clamp(0.0, 4.0);
+                                }
+                            } else if key == "inspector.particle.max_particles" {
+                                if let Some(component) = node.particle_system.as_mut() {
+                                    component.max_particles =
+                                        value.round().clamp(0.0, 250_000.0) as u32;
+                                }
+                            } else if key == "inspector.physics.damping" {
+                                node.rigid_body.damping = value.clamp(0.0, 1.0);
+                            } else if let Some(axis) = key.strip_prefix("inspector.surface.tiling.")
+                            {
+                                let mut surface = node.surface;
+                                let tiling = value.clamp(0.25, 128.0);
+                                match axis {
+                                    "x" => surface.texture_tiling[0] = tiling,
+                                    "y" => surface.texture_tiling[1] = tiling,
+                                    _ => return,
+                                }
+                                if surface.validate().is_ok() {
+                                    node.surface = surface;
                                 }
                             }
                         });
@@ -1175,6 +1702,21 @@ pub(crate) fn apply_workbench_intents(
                             console_outputs.push(CommandOutput::error("Create script", error));
                         }
                     }
+                } else if let Some(raw) = command.strip_prefix("assets.create-particle:") {
+                    let mut parts = raw.splitn(2, ':');
+                    let template = parts.next().unwrap_or("blank");
+                    let name = sanitize_asset_name(parts.next().unwrap_or("new_particle"));
+                    if let Some(project) = project {
+                        if let Err(error) = crate::particle_assets::create_particle_asset(
+                            &project.path,
+                            template,
+                            &name,
+                        ) {
+                            tracing::warn!(%error, "native particle asset creation failed");
+                            console_outputs
+                                .push(CommandOutput::error("Create particle asset", error));
+                        }
+                    }
                 } else if let Some(raw) = command.strip_prefix("assets.create-file:") {
                     if let Some(project) = project {
                         let name = sanitize_asset_name(raw);
@@ -1194,11 +1736,20 @@ pub(crate) fn apply_workbench_intents(
                     };
                     if let Some(project) = project {
                         let result = if animation_asset_in_use(scene, row) {
-                            Err(raf_core::i18n::t("animation.asset_in_use", runtime.ui_language))
+                            Err(raf_core::i18n::t(
+                                "animation.asset_in_use",
+                                runtime.ui_language,
+                            ))
                         } else if raf_assets::animation_asset::is_animation_asset(row)
-                            && !raf_assets::animation_asset::is_animation_asset(new_name) {
-                            Err(raf_core::i18n::t("animation.keep_extension", runtime.ui_language))
-                        } else { rename_asset_file(&project.path, row, new_name) };
+                            && !raf_assets::animation_asset::is_animation_asset(new_name)
+                        {
+                            Err(raf_core::i18n::t(
+                                "animation.keep_extension",
+                                runtime.ui_language,
+                            ))
+                        } else {
+                            rename_asset_file(&project.path, row, new_name)
+                        };
                         if let Err(error) = result {
                             tracing::warn!(%error, row, "native asset rename failed");
                             console_outputs.push(CommandOutput::error("Rename asset", error));
@@ -1214,8 +1765,13 @@ pub(crate) fn apply_workbench_intents(
                 } else if let Some(row) = command.strip_prefix("assets.delete:") {
                     if let Some(project) = project {
                         let result = if animation_asset_in_use(scene, row) {
-                            Err(raf_core::i18n::t("animation.asset_in_use", runtime.ui_language))
-                        } else { delete_asset_file(&project.path, row) };
+                            Err(raf_core::i18n::t(
+                                "animation.asset_in_use",
+                                runtime.ui_language,
+                            ))
+                        } else {
+                            delete_asset_file(&project.path, row)
+                        };
                         if let Err(error) = result {
                             tracing::warn!(%error, row, "native asset deletion failed");
                             console_outputs.push(CommandOutput::error("Delete asset", error));
@@ -1492,6 +2048,11 @@ pub(crate) fn asset_file_row(name: &str) -> String {
     format!("{}.txt", sanitize_asset_name(name))
 }
 
+/// Catalog row a particle asset creation would publish.
+pub(crate) fn asset_particle_row(name: &str) -> String {
+    format!("particles/{}.rafparticle", sanitize_asset_name(name))
+}
+
 /// Catalog row a rename would publish, keeping the file in its current folder.
 pub(crate) fn asset_rename_row(row: &str, new_name: &str) -> String {
     match row.rsplit_once('/') {
@@ -1508,11 +2069,16 @@ pub(crate) fn asset_duplicate_row(row: &str) -> String {
     };
     let (stem, extension) = if raf_assets::animation_asset::is_animation_asset(file_name) {
         let suffix = raf_assets::animation_asset::SUFFIX;
-        (&file_name[..file_name.len() - suffix.len()], Some(&suffix[1..]))
-    } else { match file_name.rsplit_once('.') {
-        Some((stem, extension)) => (stem, Some(extension)),
-        None => (file_name, None),
-    }};
+        (
+            &file_name[..file_name.len() - suffix.len()],
+            Some(&suffix[1..]),
+        )
+    } else {
+        match file_name.rsplit_once('.') {
+            Some((stem, extension)) => (stem, Some(extension)),
+            None => (file_name, None),
+        }
+    };
     let duplicated = match extension {
         Some(extension) => format!("{stem}_copy.{extension}"),
         None => format!("{stem}_copy"),
@@ -1524,14 +2090,30 @@ pub(crate) fn asset_duplicate_row(row: &str) -> String {
     }
 }
 
-fn bind_animation_asset(runtime: &mut NativeEditorRuntime, scene: &mut SceneGraph, project: Option<&Project>, data: &str) -> Result<(), String> {
+fn bind_animation_asset(
+    runtime: &mut NativeEditorRuntime,
+    scene: &mut SceneGraph,
+    project: Option<&Project>,
+    data: &str,
+) -> Result<(), String> {
     #[derive(serde::Deserialize)]
-    struct Binding { target: uuid::Uuid, asset: Option<String> }
+    struct Binding {
+        target: uuid::Uuid,
+        asset: Option<String>,
+    }
     let binding: Binding = serde_json::from_str(data).map_err(|error| error.to_string())?;
     let project = project.ok_or("Animation binding requires an open project")?;
-    let id = scene.iter().find(|(_, node)| !node.name.is_empty() && node.uuid == binding.target)
-        .map(|(id, _)| id).ok_or("Animation target was removed")?;
-    crate::commands::game::animation::validate_link(scene, id, &project.path, binding.asset.as_deref())?;
+    let id = scene
+        .iter()
+        .find(|(_, node)| !node.name.is_empty() && node.uuid == binding.target)
+        .map(|(id, _)| id)
+        .ok_or("Animation target was removed")?;
+    crate::commands::game::animation::validate_link(
+        scene,
+        id,
+        &project.path,
+        binding.asset.as_deref(),
+    )?;
     runtime.mutate_scene(scene, |scene| {
         if let Some(node) = scene.get_mut(id) {
             node.animation = None;
@@ -1542,10 +2124,16 @@ fn bind_animation_asset(runtime: &mut NativeEditorRuntime, scene: &mut SceneGrap
 }
 
 fn animation_asset_in_use(scene: &SceneGraph, row: &str) -> bool {
-    if !raf_assets::animation_asset::is_animation_asset(row) { return false; }
+    if !raf_assets::animation_asset::is_animation_asset(row) {
+        return false;
+    }
     let path = raf_assets::animation_asset::reference(row);
-    scene.iter().any(|(_, node)| !node.name.is_empty() && node.animation_asset.as_deref()
-        .is_some_and(|asset| raf_assets::animation_asset::reference(asset).eq_ignore_ascii_case(&path)))
+    scene.iter().any(|(_, node)| {
+        !node.name.is_empty()
+            && node.animation_asset.as_deref().is_some_and(|asset| {
+                raf_assets::animation_asset::reference(asset).eq_ignore_ascii_case(&path)
+            })
+    })
 }
 
 /// Absolute path of a catalog row, or `None` for virtual built-in rows.

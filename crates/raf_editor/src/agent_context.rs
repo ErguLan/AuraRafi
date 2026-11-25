@@ -603,9 +603,12 @@ impl AgentObservationContext<'_> {
             next_actions.push("Add a Camera entity and set it as the startup camera.");
         }
         if attached_scripts == 0 {
-            next_actions.push("Write a Rhai gameplay script and attach it to the controller entity.");
+            next_actions
+                .push("Write a Rhai gameplay script and attach it to the controller entity.");
         } else if gameplay_scripts == 0 {
-            next_actions.push("Add input, movement, collision, scoring, or event logic to the attached script.");
+            next_actions.push(
+                "Add input, movement, collision, scoring, or event logic to the attached script.",
+            );
         }
         if environment.mode == raf_core::environment::EnvironmentMode::Neutral {
             next_actions.push("If the game needs authored light, set lighting mode to Scene and tune Sun/Sky/Shadows.");
@@ -938,6 +941,10 @@ fn node_kind(node: &SceneNode) -> &'static str {
             raf_core::scene::graph::Primitive::Plane => "plane",
             raf_core::scene::graph::Primitive::Cylinder => "cylinder",
             raf_core::scene::graph::Primitive::Capsule => "capsule",
+            raf_core::scene::graph::Primitive::Wedge => "wedge",
+            raf_core::scene::graph::Primitive::Torus => "torus",
+            raf_core::scene::graph::Primitive::Prism => "prism",
+            raf_core::scene::graph::Primitive::Sphere2D => "sphere2d",
         }
     }
 }
@@ -1108,10 +1115,7 @@ mod tests {
 
     #[test]
     fn game_completion_audit_separates_geometry_from_playable_foundation() {
-        let root = std::env::temp_dir().join(format!(
-            "raf-game-audit-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root = std::env::temp_dir().join(format!("raf-game-audit-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let mut project = Project::create("Audit", ProjectType::Game, &root).unwrap();
         let scripts = project.path.join("assets/scripts");
@@ -1150,10 +1154,7 @@ mod tests {
         assert!(result.ok, "{}", result.summary);
         assert_eq!(result.data["verdict"], "playable_foundation");
         assert_eq!(result.data["counts"]["attached_scripts"], 1);
-        assert_eq!(
-            result.data["counts"]["scripts_with_gameplay_signals"],
-            1
-        );
+        assert_eq!(result.data["counts"]["scripts_with_gameplay_signals"], 1);
 
         scene.get_mut(player).unwrap().scripts.clear();
         let context = AgentObservationContext {

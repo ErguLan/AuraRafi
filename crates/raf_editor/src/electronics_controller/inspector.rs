@@ -270,7 +270,6 @@ impl NativeElectronicsEditor {
         self.touch_ui();
         true
     }
-
 }
 
 /// Builds the structured DRC lines. Severity travels with the line, so no

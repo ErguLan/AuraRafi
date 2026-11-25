@@ -321,7 +321,15 @@ pub(super) fn normalize_asset_path(path: &str) -> String {
 fn used_assets(scene: &SceneGraph) -> BTreeSet<String> {
     scene
         .iter()
-        .filter_map(|(_, node)| node.source_asset.as_ref())
+        .flat_map(|(_, node)| {
+            node.source_asset
+                .iter()
+                .chain(node.base_color_texture.iter())
+                .chain(node.animation_asset.iter())
+                .chain(node.mesh_asset.as_ref().map(|mesh| &mesh.path))
+                .chain(std::iter::once(&node.audio_source.clip).filter(|clip| !clip.is_empty()))
+                .chain(node.scripts.iter())
+        })
         .map(|asset| normalize_asset_path(asset))
         .collect()
 }
@@ -331,10 +339,17 @@ fn scene_asset_references(scene: &SceneGraph, asset: &str) -> Vec<Value> {
     scene
         .iter()
         .filter(|(_, node)| {
-            node.source_asset.as_deref().is_some_and(|source| {
-                let source = normalize_asset_path(source);
-                source == asset || source.ends_with(&asset) || asset.ends_with(&source)
-            })
+            node.source_asset
+                .iter()
+                .chain(node.base_color_texture.iter())
+                .chain(node.animation_asset.iter())
+                .chain(node.mesh_asset.as_ref().map(|mesh| &mesh.path))
+                .chain(std::iter::once(&node.audio_source.clip).filter(|clip| !clip.is_empty()))
+                .chain(node.scripts.iter())
+                .any(|source| {
+                    let source = normalize_asset_path(source);
+                    source == asset || source.ends_with(&asset) || asset.ends_with(&source)
+                })
         })
         .filter_map(|(id, _)| scene_item_reference(scene, id))
         .collect()

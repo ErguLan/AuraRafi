@@ -203,7 +203,10 @@ impl NativeEditorApplication {
         self.apply_exit_confirmation_action(action);
     }
 
-    pub(super) fn apply_exit_confirmation_action(&mut self, action: Option<ExitConfirmationAction>) {
+    pub(super) fn apply_exit_confirmation_action(
+        &mut self,
+        action: Option<ExitConfirmationAction>,
+    ) {
         let action = action.or_else(|| {
             self.input
                 .snapshot()
@@ -252,7 +255,9 @@ impl NativeEditorApplication {
     }
 
     pub(super) fn save_current_documents(&mut self) -> Result<(), String> {
-        if let Some(workbench)=&mut self.workbench{workbench.flush_interface_document()?;}
+        if let Some(workbench) = &mut self.workbench {
+            workbench.flush_interface_document()?;
+        }
         if let Some(result) = self.save_agent_document() {
             return result;
         }

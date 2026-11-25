@@ -39,6 +39,7 @@ pub(super) fn order_contextual_tools(tools: &mut Vec<OpenAiTool>) {
         "lighting_reset",
         "assets_catalog",
         "asset_generate_local_png",
+        "particles_generate",
         "asset_generate_image",
         "external_studio_install",
         "external_studio_generate",
@@ -89,7 +90,19 @@ pub(super) fn classify_prompt(prompt: &str) -> PromptIntent {
     let prompt = prompt.to_lowercase();
     let contains_any = |terms: &[&str]| terms.iter().any(|term| prompt.contains(term));
     PromptIntent {
-        game_ui: contains_any(&["interfaz","interfaces","hud","billboard","responsive","label"," ui ","ui.","game ui","menu","menú"]),
+        game_ui: contains_any(&[
+            "interfaz",
+            "interfaces",
+            "hud",
+            "billboard",
+            "responsive",
+            "label",
+            " ui ",
+            "ui.",
+            "game ui",
+            "menu",
+            "menú",
+        ]),
         lighting: contains_any(&[
             "lighting",
             "sun",
@@ -281,6 +294,27 @@ pub(super) fn classify_prompt(prompt: &str) -> PromptIntent {
             "descarga",
             "asset",
             "assets",
+            "particle",
+            "particles",
+            "particula",
+            "particulas",
+            "partícula",
+            "partículas",
+            "fuego",
+            "fire",
+            "humo",
+            "smoke",
+            "chispas",
+            "sparks",
+            "lluvia",
+            "rain",
+            "polvo",
+            "dust",
+            "magia",
+            "magic",
+            "vfx",
+            "efecto",
+            "efectos",
             "modelo",
             "modelos",
             "model",
@@ -302,9 +336,11 @@ pub(super) fn classify_prompt(prompt: &str) -> PromptIntent {
 
 pub(super) fn catalog_tool_kind(command: &CommandDefinition) -> AgentToolKind {
     let name = command.name.as_str();
-    if name == "game.animation.sample"
-        || name.ends_with(".describe")
-        || name=="ui.document.read"
+    if matches!(
+        name,
+        "game.animation.sample" | "game.animation.bake" | "game.animation.retarget"
+    ) || name.ends_with(".describe")
+        || name == "ui.document.read"
         || name.ends_with(".netlist")
         || name.ends_with(".bom")
         || name.ends_with(".validate")

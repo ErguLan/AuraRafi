@@ -1,7 +1,7 @@
 //! Built-in world kits and archetype placement helpers.
 
-use super::compile::CompiledWorld;
 use super::super::query::parse_vec3_value;
+use super::compile::CompiledWorld;
 use super::*;
 
 pub(super) fn slugify(value: &str) -> String {
@@ -76,7 +76,11 @@ pub(super) fn template_key(template: Option<&str>, fallback: &str, indices: &[us
     key
 }
 
-pub(super) fn value_vec3(value: Option<&Value>, label: &str, default: Vec3) -> Result<Vec3, String> {
+pub(super) fn value_vec3(
+    value: Option<&Value>,
+    label: &str,
+    default: Vec3,
+) -> Result<Vec3, String> {
     match value {
         Some(value) => parse_vec3_value(value, label).map(Vec3::from_array),
         None => Ok(default),
@@ -112,7 +116,11 @@ pub(super) fn value_count(value: Option<&Value>, label: &str) -> Result<Vec3, St
     Ok(counts)
 }
 
-pub(super) fn value_spacing(value: Option<&Value>, label: &str, default: Vec3) -> Result<Vec3, String> {
+pub(super) fn value_spacing(
+    value: Option<&Value>,
+    label: &str,
+    default: Vec3,
+) -> Result<Vec3, String> {
     let Some(value) = value else {
         return Ok(default);
     };
@@ -242,7 +250,9 @@ pub(super) fn archetype_parts(
             .cloned()
             .ok_or_else(|| format!("Archetype '{name}' requires a parts array."))?;
         if parts.is_empty() || parts.len() > 256 {
-            return Err(format!("Archetype '{name}' accepts between 1 and 256 parts."));
+            return Err(format!(
+                "Archetype '{name}' accepts between 1 and 256 parts."
+            ));
         }
         let tags = definition
             .get("tags")
@@ -401,8 +411,7 @@ pub(super) fn mirror_compiled_entities(
             .unwrap_or("world.mirror")
             .to_string();
         entity["name"] = Value::String(unique_name(&format!("{old_name}_mirror"), used_names));
-        entity["stable_key"] =
-            Value::String(unique_key(&format!("{old_key}.mirror"), used_keys));
+        entity["stable_key"] = Value::String(unique_key(&format!("{old_key}.mirror"), used_keys));
         if let Some(position) = entity
             .get_mut("transform")
             .and_then(Value::as_object_mut)
@@ -452,11 +461,17 @@ pub(super) fn variant_compiled_entities(
         .unwrap_or(2)
         .clamp(1, 4096) as usize;
     let origin = value_vec3(
-        operation.get("origin").or_else(|| operation.get("position")),
+        operation
+            .get("origin")
+            .or_else(|| operation.get("position")),
         "variant.origin",
         Vec3::ZERO,
     )?;
-    let spacing = value_spacing(operation.get("spacing"), "variant.spacing", Vec3::new(2.0, 0.0, 2.0))?;
+    let spacing = value_spacing(
+        operation.get("spacing"),
+        "variant.spacing",
+        Vec3::new(2.0, 0.0, 2.0),
+    )?;
     let name = operation
         .get("name")
         .and_then(Value::as_str)
@@ -475,10 +490,7 @@ pub(super) fn variant_compiled_entities(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let parent = operation
-        .get("parent")
-        .and_then(Value::as_str)
-        .or(parent);
+    let parent = operation.get("parent").and_then(Value::as_str).or(parent);
     for index in 0..count {
         let archetype = &variants[index % variants.len()];
         let position = origin

@@ -4,11 +4,18 @@
 //! ordinary `UiNode`s, so authors can still add classes, controls, and event
 //! bindings without introducing a second widget system.
 
+mod color_field;
 mod kit;
 mod media;
+mod number_field;
 mod states;
+pub use color_field::{
+    color_field, color_field_rules, color_popover, UiColorFieldSpec, COLOR_PICKER_POPOVER_HEIGHT,
+    COLOR_PICKER_POPOVER_WIDTH,
+};
 pub use kit::{UiButtonVariant, UiComponents};
 pub use media::{UiImageView, UiImageViewShape};
+pub use number_field::{number_field, number_field_rules, UiNumberFieldSpec};
 
 use crate::controls::{UiImageFit, UiSelect, UiTextInput};
 use crate::events::{UiAction, UiEventBinding, UiEventKind};

@@ -23,6 +23,27 @@ pub struct PhysicsWorld {
     impacts: Vec<PhysicsImpact>,
 }
 impl PhysicsWorld {
+    /// Earliest contact of an axis-aligned probe with a solid oriented collider.
+    pub(crate) fn animation_cast(&mut self, scene: &SceneGraph, owner: SceneNodeId, start: Vec3, delta: Vec3, radius: f32) -> Option<(f32, Vec3)> {
+        if !start.is_finite() || !delta.is_finite() || delta.length_squared() < 1e-10 { return None; }
+        let end = start + delta;
+        let padding = Vec3::splat(radius);
+        self.spatial.query(Aabb { min: start.min(end) - padding, max: start.max(end) + padding }, &mut self.candidates);
+        let probe = BoxShape { center: start, edges: [Vec3::X * radius, Vec3::Y * radius, Vec3::Z * radius] };
+        self.candidates.iter().copied().filter_map(|id| {
+            let node = scene.get(id)?;
+            if node.rigid_body.enabled && node.rigid_body.is_trigger { return None; }
+            let mut cursor = Some(id);
+            for _ in 0..256 {
+                let Some(id) = cursor else { break };
+                if id == owner { return None; }
+                cursor = scene.get(id).and_then(|node| node.parent);
+            }
+            let (time, normal) = shapes::sweep(probe, self.spatial.shape(id)?, delta)?;
+            (normal.dot(delta) < -1e-5).then_some((time, normal))
+        }).min_by(|a,b| a.0.total_cmp(&b.0))
+    }
+
     pub fn prepare(scene: &SceneGraph) -> Result<Self, Vec<String>> {
         let mut world = Self::default();
         world.refresh(scene)?;

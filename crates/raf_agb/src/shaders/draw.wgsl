@@ -7,6 +7,11 @@ struct Frame {
     environment: vec4<f32>,
     // [authored, improved, toon_steps, toon_softness].
     lighting: vec4<f32>,
+    // Four vec4 per local light: [position, range], [color, intensity],
+    // [direction, kind], [inner_cos, outer_cos, falloff, 0].
+    lights: array<vec4<f32>, 32>,
+    // x is the active local light count in 0..=8.
+    light_counts: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -86,18 +91,55 @@ fn scene(vertex: Vertex) -> Paint {
     return base;
 }
 
+/// Point and spot lights, without shadows. Inactive lights cost nothing.
+fn local_lights(n: vec3<f32>, world_position: vec3<f32>, two_sided: bool) -> vec3<f32> {
+    let count = u32(clamp(frame.light_counts.x, 0.0, 8.0));
+    var sum = vec3<f32>(0.0);
+    for (var index = 0u; index < count; index = index + 1u) {
+        let base = index * 4u;
+        let to_light = frame.lights[base].xyz - world_position;
+        let distance = length(to_light);
+        let range = max(frame.lights[base].w, 0.0001);
+        let attenuation = clamp(1.0 - distance / range, 0.0, 1.0);
+        let falloff = attenuation * attenuation;
+        if falloff <= 0.0 { continue; }
+        let direction = to_light / max(distance, 0.0001);
+        let ndl = dot(n, direction);
+        let diffuse = select(max(ndl, 0.0), abs(ndl), two_sided);
+        var factor = falloff * diffuse;
+        if frame.lights[base + 2u].w > 0.5 {
+            let cone = frame.lights[base + 3u];
+            let spot = frame.lights[base + 2u].xyz;
+            let spot_direction = spot * inverseSqrt(max(dot(spot, spot), 0.000001));
+            let inner = max(cone.x, cone.y + 0.0001);
+            factor *= smoothstep(cone.y, inner, dot(-direction, spot_direction));
+        }
+        let color = frame.lights[base + 1u];
+        sum += color.rgb * (color.w * factor);
+    }
+    return sum;
+}
+
 fn scene_paint(vertex: Vertex) -> Paint {
     if (vertex.raster_kind & 255u) != 0u {
         return world_line(vertex);
     }
     let model = mat4x4<f32>(vertex.model_x, vertex.model_y, vertex.model_z, vertex.model_w);
+    let world = model * vec4<f32>(vertex.position, 1.0);
     var rgba = vertex.rgba * vertex.tint;
     if dot(vertex.normal, vertex.normal) > 0.0 {
         let n = mesh_normal(vertex);
-        let diffuse = max(dot(n, frame.light.xyz), 0.0);
+        let two_sided = (vertex.raster_kind & 512u) != 0u;
+        let ndl = dot(n, frame.light.xyz);
+        let diffuse = select(max(ndl, 0.0), abs(ndl), two_sided);
         let solar_weight = select(1.0 - frame.light.w, 1.0, frame.lighting.x > 0.5);
-        let shade = ambient_light(n.y) + frame.light_color.xyz * (sun_band(diffuse) * solar_weight);
-        rgba = vec4<f32>(rgba.rgb * shade, rgba.a);
+        let sky_normal = select(n.y, abs(n.y), two_sided);
+        let shade = ambient_light(sky_normal) + frame.light_color.xyz * (sun_band(diffuse) * solar_weight) +
+            local_lights(n, world.xyz, two_sided);
+        // Free-form meshes must remain readable even when a moved face points
+        // away from every light. This is a visibility floor, not a lighting model.
+        let safe_shade = select(shade, max(shade, vec3<f32>(0.35)), two_sided);
+        rgba = vec4<f32>(rgba.rgb * safe_shade, rgba.a);
     }
     return normal_paint(frame.view_projection * model * vec4<f32>(vertex.position, 1.0), vertex.uv, rgba);
 }

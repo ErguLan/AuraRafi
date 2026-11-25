@@ -17,6 +17,8 @@ pub fn camera(extent: [u32; 2], orbit: f32) -> Frame {
         light_color: [1.0; 4],
         environment: [1.; 4],
         lighting_style: [0.; 4],
+        lights: [[0.; 4]; crate::product::LOCAL_LIGHT_VECS],
+        light_counts: [0.; 4],
         viewport: [0., 0., 1., 1.],
         shadow: None,
         shadow_map: None,

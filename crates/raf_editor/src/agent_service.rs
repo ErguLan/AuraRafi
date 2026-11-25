@@ -212,7 +212,9 @@ impl AgentService {
                 for document in workspace.documents.values_mut() {
                     if let Some(editor) = document.electronics.as_mut() {
                         editor.lab.leave();
-                        if editor.lab.dc_requested { editor.cancel_analysis(); }
+                        if editor.lab.dc_requested {
+                            editor.cancel_analysis();
+                        }
                     }
                 }
                 workspace.closing = true;
@@ -324,11 +326,20 @@ impl AgentService {
     }
 
     pub(crate) fn selected_lab_target(&self) -> Option<(&Path, SessionId, &Path)> {
-        let workspace = self.selected_workspace()
-            .filter(|workspace| !workspace.closing && workspace.project.project_type == ProjectType::Electronics)?;
-        let session = workspace.panel.borrow().document_id().unwrap_or(workspace.registry.active_session);
+        let workspace = self.selected_workspace().filter(|workspace| {
+            !workspace.closing && workspace.project.project_type == ProjectType::Electronics
+        })?;
+        let session = workspace
+            .panel
+            .borrow()
+            .document_id()
+            .unwrap_or(workspace.registry.active_session);
         let document = workspace.documents.get(&session.0.to_string())?;
-        Some((&workspace.project.path, session, &document.session.schematic_file))
+        Some((
+            &workspace.project.path,
+            session,
+            &document.session.schematic_file,
+        ))
     }
 
     pub(crate) fn selected_lab<'a>(
@@ -336,16 +347,26 @@ impl AgentService {
         mounted: Option<(&Path, SessionId, &'a NativeElectronicsEditor)>,
     ) -> Option<&'a NativeElectronicsEditor> {
         let (path, session, _) = self.selected_lab_target()?;
-        if let Some((_, _, editor)) = mounted.filter(|(root, id, _)| *root == path && *id == session) {
+        if let Some((_, _, editor)) =
+            mounted.filter(|(root, id, _)| *root == path && *id == session)
+        {
             return Some(editor);
         }
-        self.selected_workspace()?.documents.get(&session.0.to_string())?.electronics.as_ref()
+        self.selected_workspace()?
+            .documents
+            .get(&session.0.to_string())?
+            .electronics
+            .as_ref()
     }
 
     pub(crate) fn has_lab_work(&self) -> bool {
         self.entries.values().any(|slot| match slot {
-            WorkspaceSlot::Ready(workspace) => workspace.documents.values().any(|document|
-                document.electronics.as_ref().is_some_and(|editor| editor.lab.pending() || editor.lab.dc_requested)),
+            WorkspaceSlot::Ready(workspace) => workspace.documents.values().any(|document| {
+                document
+                    .electronics
+                    .as_ref()
+                    .is_some_and(|editor| editor.lab.pending() || editor.lab.dc_requested)
+            }),
             _ => false,
         })
     }
@@ -356,17 +377,29 @@ impl AgentService {
         hardware_access: bool,
         language: raf_core::Language,
     ) -> bool {
-        let target = visible.then(|| self.selected_lab_target()
-            .map(|(path, session, _)| (path.to_owned(), session))).flatten();
+        let target = visible
+            .then(|| {
+                self.selected_lab_target()
+                    .map(|(path, session, _)| (path.to_owned(), session))
+            })
+            .flatten();
         let mut changed = false;
         for (path, slot) in &mut self.entries {
-            let WorkspaceSlot::Ready(workspace) = slot else { continue };
+            let WorkspaceSlot::Ready(workspace) = slot else {
+                continue;
+            };
             for document in workspace.documents.values_mut() {
-                let Some(editor) = document.electronics.as_mut() else { continue };
+                let Some(editor) = document.electronics.as_mut() else {
+                    continue;
+                };
                 editor.lab.set_hardware_access_enabled(hardware_access);
                 editor.lab.set_language(language);
-                let visible = target.as_ref().is_some_and(|(root, id)| root == path && *id == document.session.id);
-                if visible { editor.prepare_lab(path, &document.session.schematic_file); }
+                let visible = target
+                    .as_ref()
+                    .is_some_and(|(root, id)| root == path && *id == document.session.id);
+                if visible {
+                    editor.prepare_lab(path, &document.session.schematic_file);
+                }
                 if editor.lab.pending() || editor.lab.dc_requested {
                     changed |= editor.poll_lab(visible);
                 }
@@ -1015,7 +1048,9 @@ impl ToolExecutor for DurableExecutor<'_> {
             return Err("agent_workspace.save_pending".into());
         }
         if name == "electronics_lab_simulate" && mode == ToolExecutionMode::Apply {
-            if let (Some(project), Some(editor)) = (&self.inner.project, self.inner.electronics.as_deref_mut()) {
+            if let (Some(project), Some(editor)) =
+                (&self.inner.project, self.inner.electronics.as_deref_mut())
+            {
                 editor.prepare_lab(&project.root, &self.session.schematic_file);
             }
         }
@@ -1216,15 +1251,14 @@ mod tests {
                         let layer = preview
                             .render_layer(scene, &workspace.project, &settings, target)
                             .unwrap();
-                        let cpu_pixels =
-                            match layer.output.as_ref() {
-                                raf_render::api_graphic_basic::device::SceneFrameOutput::CpuPixels(
-                                    pixels,
-                                ) => Some(pixels.clone()),
-                                raf_render::api_graphic_basic::device::SceneFrameOutput::Scene(
-                                    frame,
-                                ) => {
-                                    let mut cpu = raf_render::api_graphic_basic::device::BasicDevice::new(
+                        let cpu_pixels = match layer.output.as_ref() {
+                            raf_render::api_graphic_basic::device::SceneFrameOutput::CpuPixels(
+                                pixels,
+                            ) => Some(pixels.clone()),
+                            raf_render::api_graphic_basic::device::SceneFrameOutput::Scene(
+                                frame,
+                            ) => {
+                                let mut cpu = raf_render::api_graphic_basic::device::BasicDevice::new(
                                         raf_render::api_graphic_basic::device::BasicDeviceConfig {
                                             allow_gpu: false,
                                             force_cpu: true,
@@ -1232,12 +1266,12 @@ mod tests {
                                             adapter_preference: raf_render::api_graphic_basic::GraphicsAdapterPreference::LowPower,
                                         },
                                     );
-                                    match cpu.execute_scene_frame(frame) {
+                                match cpu.execute_scene_frame(frame) {
                                         raf_render::api_graphic_basic::device::SceneFrameOutput::CpuPixels(pixels) => Some(pixels),
                                         _ => None,
                                     }
-                                }
-                            };
+                            }
+                        };
                         if let Some(pixels) = cpu_pixels {
                             let canvas = image::RgbaImage::from_raw(
                                 layer.source_size[0],

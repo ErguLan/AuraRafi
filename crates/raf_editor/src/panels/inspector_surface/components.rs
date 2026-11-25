@@ -102,7 +102,10 @@ fn tab_button(
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
-pub(super) fn session_context_bar(palette: StudioUiPalette, sessions: &ProjectSessionRegistry) -> UiNode {
+pub(super) fn session_context_bar(
+    palette: StudioUiPalette,
+    sessions: &ProjectSessionRegistry,
+) -> UiNode {
     let tokens = palette.tokens();
     let active_name = sessions
         .sessions
@@ -478,7 +481,11 @@ pub(super) fn node_info(
             &node.scripts.len().to_string(),
         ))
 }
-pub(super) fn metadata_key_line(palette: StudioUiPalette, label_key: &str, value_key: &str) -> UiNode {
+pub(super) fn metadata_key_line(
+    palette: StudioUiPalette,
+    label_key: &str,
+    value_key: &str,
+) -> UiNode {
     UiNode::new(
         format!("inspector.metadata.{label_key}"),
         UiNodeKind::Toolbar,
@@ -549,7 +556,12 @@ pub(super) fn metadata_line(palette: StudioUiPalette, label_key: &str, value: &s
         .with_tooltip_value(value.to_string()),
     )
 }
-pub(super) fn status_row(palette: StudioUiPalette, id: SceneNodeId, visible: bool, locked: bool) -> UiNode {
+pub(super) fn status_row(
+    palette: StudioUiPalette,
+    id: SceneNodeId,
+    visible: bool,
+    locked: bool,
+) -> UiNode {
     UiNode::new("inspector.status", UiNodeKind::Toolbar)
         .with_layout(UiLayout {
             flow: UiFlow::Row,
@@ -620,7 +632,12 @@ fn status_button(
         .focusable()
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
-pub(crate) fn action_button(palette: StudioUiPalette, id: &str, text_key: &str, command: String) -> UiNode {
+pub(crate) fn action_button(
+    palette: StudioUiPalette,
+    id: &str,
+    text_key: &str,
+    command: String,
+) -> UiNode {
     UiNode::new(id, UiNodeKind::Button)
         .with_class("inspector-button")
         .with_layout(UiLayout {

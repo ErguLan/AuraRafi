@@ -1,7 +1,7 @@
 //! Node palette sidebar and quick-add popup for the Nodes authoring surface.
 
-use super::*;
 use super::toolbar::icon_button;
+use super::*;
 
 pub(super) fn build_palette(
     palette: StudioUiPalette,

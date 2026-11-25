@@ -113,6 +113,14 @@ pub(super) fn compact_command_data(data: Value) -> Value {
     let Some(object) = data.as_object() else {
         return raf_core::agent_context::compact_result_data(&data);
     };
+    // `game.mesh` returns indexed topology at the top level when the caller asks
+    // for `topology=true`. The generic compaction drops keys named `indices` and
+    // any key containing `vertex`, which would make the Agent-facing inspect
+    // result unusable. Keep this bounded per-entity payload intact; `model_content`
+    // still applies its own array/string budget before the model sees it.
+    if object.contains_key("has_editable_mesh") && object.contains_key("editable_mesh") {
+        return data;
+    }
     if let Some(entity) = object.get("entity").and_then(Value::as_object) {
         return serde_json::json!({
             "entity": {
@@ -607,7 +615,11 @@ fn entity_matches_operation(entity: &Value, params: &Value, scene: &SceneGraph) 
         .is_some_and(|(id, actual)| id.0 == actual as usize)
 }
 
-pub(super) fn verify_entity_postcondition(params: &Value, entity: &Value, scene: &SceneGraph) -> Vec<String> {
+pub(super) fn verify_entity_postcondition(
+    params: &Value,
+    entity: &Value,
+    scene: &SceneGraph,
+) -> Vec<String> {
     let Some(params) = params.as_object() else {
         return vec!["Mutation params must be an object.".to_string()];
     };
@@ -895,6 +907,8 @@ fn canonical_primitive(value: &str) -> String {
         "box" | "block" => "cube".to_string(),
         "ball" | "circle" | "uv_sphere" => "sphere".to_string(),
         "floor" | "sprite" | "sprite2d" => "plane".to_string(),
+        "sphere 2d" | "sphere_2d" | "billboard_sphere" => "sphere2d".to_string(),
+        "ramp" => "wedge".to_string(),
         "group" | "folder" => "empty".to_string(),
         value => value.to_string(),
     }
@@ -912,6 +926,11 @@ pub(super) fn request_preview(mode: ToolExecutionMode, kind: AgentToolKind) -> b
 }
 
 pub(super) fn expects_observable_scene_change(command_name: &str) -> bool {
+    // `game.mesh` is intentionally absent: one command surface mixes read-only
+    // actions (inspect, apply) and legitimate no-ops (revert with no editable
+    // mesh) with real topology edits. Requiring a scene diff per call would
+    // fail those valid invocations. Its mutating actions are still verified by
+    // the command's own `changed` flag and the host transaction ledger.
     matches!(
         command_name,
         "game.add"
@@ -923,6 +942,9 @@ pub(super) fn expects_observable_scene_change(command_name: &str) -> bool {
             | "game.snap"
             | "game.arrange_grid"
             | "game.generate_prefab"
+            | "game.light"
+            | "game.audio"
+            | "game.mesh_asset"
             | "game.build"
             | "game.reconcile"
             | "game.repair"

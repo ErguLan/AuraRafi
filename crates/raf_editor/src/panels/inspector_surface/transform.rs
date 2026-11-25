@@ -1,7 +1,7 @@
 //! Transform vector controls and reset actions.
 
-use super::*;
 use super::components::action_button;
+use super::*;
 
 pub(super) fn vector_row(
     palette: StudioUiPalette,

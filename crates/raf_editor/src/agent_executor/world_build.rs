@@ -10,8 +10,9 @@ use super::evidence::command_output_to_tool_result;
 use super::intent::PromptIntent;
 use super::schemas::{
     batch_operation_params_schema, boolean_schema, color_schema, enum_schema, integer_schema,
-    number_schema, object_schema, scene_build_schema, scene_reconcile_schema,
-    semantic_tags_schema, string_schema, transform_schema, vec3_schema,
+    light_color_schema, light_schema, mesh_asset_schema, number_schema, object_schema,
+    pivot_schema, scene_build_schema, scene_reconcile_schema, semantic_tags_schema, string_schema,
+    surface_schema, transform_schema, vec3_schema, PRIMITIVE_KINDS,
 };
 use super::{AgentToolExecutor, AgentToolPack};
 
@@ -68,14 +69,17 @@ impl AgentToolExecutor<'_> {
 pub(super) fn add_game_program_tools(pack: &mut AgentToolPack) {
     pack.push_native(
         "scene_camera",
-        "Create, configure, assign or remove a Game camera component. Use action=create for a new camera, action=add/set for an existing entity, and action=remove to detach the component. This is the tool that completes game_completion_audit camera checks.",
+        "Create, configure, assign, activate or remove a Game camera component. Use action=create for a new camera, action=add/set for an existing entity, action=activate or look_through to make it the active view, and action=remove to detach the component. This is the tool that completes game_completion_audit camera checks.",
         object_schema(
             Map::from_iter([
                 (
                     "action".to_string(),
-                    enum_schema("Camera action.", &["create", "add", "set", "remove"]),
+                    enum_schema(
+                        "Camera action.",
+                        &["create", "add", "set", "remove", "activate", "look_through"],
+                    ),
                 ),
-                ("target".to_string(), string_schema("Entity target for add/set/remove.")),
+                ("target".to_string(), string_schema("Entity target for add/set/remove/activate.")),
                 ("name".to_string(), string_schema("Name for a new camera entity.")),
                 ("parent".to_string(), string_schema("Optional parent for a new camera.")),
                 ("fov".to_string(), number_schema("Vertical field of view in degrees.", 1.0, 179.0)),
@@ -85,6 +89,19 @@ pub(super) fn add_game_program_tools(pack: &mut AgentToolPack) {
                 ("orthographic".to_string(), boolean_schema("Use an orthographic projection.")),
             ]),
             &["action"],
+        ),
+        AgentToolKind::Mutation,
+        Some("game.camera"),
+    );
+    pack.push_native(
+        "camera_activate",
+        "Make an existing camera entity the active Game camera and use it as the look-through viewpoint. The camera must already exist or be created with scene_camera action=create. This does not start Play.",
+        object_schema(
+            Map::from_iter([(
+                "target".to_string(),
+                string_schema("Camera entity target by stable ID, UUID, name, or path."),
+            )]),
+            &["target"],
         ),
         AgentToolKind::Mutation,
         Some("game.camera"),
@@ -114,7 +131,7 @@ pub(super) fn add_game_program_tools(pack: &mut AgentToolPack) {
                 "audio".to_string(),
                 serde_json::json!({
                     "type": "object",
-                    "description": "enabled, clip (project audio path), autoplay, looping and volume."
+                    "description": "enabled, clip (project audio path), autoplay, looping, volume, bus, spatial, min_distance, max_distance and rolloff. Spatial audio follows the entity world transform."
                 }),
             ),
             (
@@ -124,6 +141,10 @@ pub(super) fn add_game_program_tools(pack: &mut AgentToolPack) {
                     "description": "orthographic, fov_degrees, near, far and ortho_scale."
                 }),
             ),
+            ("light".to_string(), light_schema()),
+            ("mesh_asset".to_string(), mesh_asset_schema()),
+            ("surface".to_string(), surface_schema()),
+            ("pivot".to_string(), pivot_schema()),
             (
                 "scripts".to_string(),
                 serde_json::json!({"type":"array","items":{"type":"string"},"maxItems":32}),
@@ -137,7 +158,7 @@ pub(super) fn add_game_program_tools(pack: &mut AgentToolPack) {
     );
     pack.push_native(
         "scene_component",
-        "Set Inspector-level components on an entity: base-color texture, collider, rigid body, audio source, camera lens, attached scripts or variables. This is required for gameplay-ready objects, not just visible primitives.",
+        "Set Inspector-level components on an entity: base-color texture or surface, 3D mesh asset, point/spot light, collider, rigid body, audio source, camera lens, attached scripts or variables. This is required for gameplay-ready objects, not just visible primitives.",
         component,
         AgentToolKind::Mutation,
         Some("game.update"),
@@ -146,14 +167,27 @@ pub(super) fn add_game_program_tools(pack: &mut AgentToolPack) {
         Map::from_iter([
             (
                 "mode".to_string(),
-                enum_schema("Plan mode. Reconcile updates stable keys in place.", &["build", "reconcile"]),
+                enum_schema(
+                    "Plan mode. Reconcile updates stable keys in place.",
+                    &["build", "reconcile"],
+                ),
             ),
-            ("parent".to_string(), string_schema("Optional existing group that receives the program.")),
+            (
+                "parent".to_string(),
+                string_schema("Optional existing group that receives the program."),
+            ),
             (
                 "design_profile".to_string(),
                 enum_schema(
                     "Optional design contract.",
-                    &["generic", "real_world", "building", "supermarket", "parking", "outdoor"],
+                    &[
+                        "generic",
+                        "real_world",
+                        "building",
+                        "supermarket",
+                        "parking",
+                        "outdoor",
+                    ],
                 ),
             ),
             (
@@ -426,15 +460,12 @@ pub(super) fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIn
     );
     pack.push_native(
         "scene_create",
-        "Create one native scene entity with an explicit primitive, local transform, color, and optional group parent. Use scene_build for modular multi-part structures.",
+        "Create one native scene entity with an explicit primitive, local transform, color, optional light, mesh asset, surface and pivot. Use scene_build for modular multi-part structures.",
         object_schema(
             Map::from_iter([
                 (
                     "kind".to_string(),
-                    enum_schema(
-                        "Entity primitive.",
-                        &["empty", "cube", "sphere", "plane", "cylinder", "capsule"],
-                    ),
+                    enum_schema("Entity primitive.", PRIMITIVE_KINDS),
                 ),
                 (
                     "name".to_string(),
@@ -449,6 +480,10 @@ pub(super) fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIn
                     "color_rgba".to_string(),
                     color_schema("Optional RGBA channels from 0 to 255."),
                 ),
+                ("light".to_string(), light_schema()),
+                ("mesh_asset".to_string(), mesh_asset_schema()),
+                ("surface".to_string(), surface_schema()),
+                ("pivot".to_string(), pivot_schema()),
                 ("semantic_role".to_string(), string_schema("Optional semantic role such as store.shelf.")),
                 ("stable_key".to_string(), string_schema("Optional unique reconciliation key.")),
                 ("tags".to_string(), semantic_tags_schema()),
@@ -461,7 +496,7 @@ pub(super) fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIn
     );
     pack.push_native(
         "scene_update",
-        "Update an existing entity by stable ID, UUID, name, or path. Only supplied fields change.",
+        "Update an existing entity by stable ID, UUID, name, or path. Only supplied fields change; light, mesh_asset, surface and pivot replace the corresponding component.",
         object_schema(
             Map::from_iter([
                 ("target".to_string(), string_schema("Entity target.")),
@@ -475,6 +510,10 @@ pub(super) fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIn
                     "color_rgba".to_string(),
                     color_schema("Optional RGBA channels from 0 to 255."),
                 ),
+                ("light".to_string(), light_schema()),
+                ("mesh_asset".to_string(), mesh_asset_schema()),
+                ("surface".to_string(), surface_schema()),
+                ("pivot".to_string(), pivot_schema()),
                 (
                     "visible".to_string(),
                     boolean_schema("Optional visibility."),
@@ -542,6 +581,249 @@ pub(super) fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIn
         AgentToolKind::Mutation,
         Some("game.snap"),
     );
+    if intent.lighting || intent.gameplay {
+        pack.push_native(
+            "light_create",
+            "Create a point or spot light entity using the shared entity-light component. Point lights emit in every direction; spot lights follow the entity frame with inner/outer cones. Entity lights do not cast shadows. For sun, sky or ambient light use the world environment instead.",
+        object_schema(
+            Map::from_iter([
+                (
+                    "kind".to_string(),
+                    enum_schema("Light shape.", &["point", "spot"]),
+                ),
+                ("name".to_string(), string_schema("Unique descriptive light name.")),
+                (
+                    "parent".to_string(),
+                    string_schema("Optional parent ID, UUID, name, or path."),
+                ),
+                ("transform".to_string(), transform_schema()),
+                (
+                    "color".to_string(),
+                    light_color_schema(),
+                ),
+                ("intensity".to_string(), number_schema("Light multiplier.", 0.0, 64.0)),
+                ("range".to_string(), number_schema("Reach in metres.", 0.05, 10000.0)),
+                (
+                    "inner_cone_degrees".to_string(),
+                    number_schema("Spot inner cone in degrees.", 0.0, 179.0),
+                ),
+                (
+                    "outer_cone_degrees".to_string(),
+                    number_schema("Spot outer cone in degrees.", 0.0, 179.0),
+                ),
+                ("enabled".to_string(), boolean_schema("Light enabled state.")),
+                ("semantic_role".to_string(), string_schema("Optional semantic role.")),
+                ("tags".to_string(), semantic_tags_schema()),
+            ]),
+            &["kind", "name"],
+        ),
+        AgentToolKind::Mutation,
+        Some("game.add"),
+    );
+        pack.push_native(
+        "light_update",
+        "Replace the light component on an existing entity. game.update deserializes the supplied light object with SceneLight defaults, so include kind, color, intensity, range and cones when they must be preserved. Setting enabled=false keeps the component but stops its contribution.",
+        object_schema(
+            Map::from_iter([
+                ("target".to_string(), string_schema("Entity target.")),
+                (
+                    "kind".to_string(),
+                    enum_schema("New light shape.", &["point", "spot"]),
+                ),
+                (
+                    "color".to_string(),
+                    light_color_schema(),
+                ),
+                ("intensity".to_string(), number_schema("Light multiplier.", 0.0, 64.0)),
+                ("range".to_string(), number_schema("Reach in metres.", 0.05, 10000.0)),
+                (
+                    "inner_cone_degrees".to_string(),
+                    number_schema("Spot inner cone in degrees.", 0.0, 179.0),
+                ),
+                (
+                    "outer_cone_degrees".to_string(),
+                    number_schema("Spot outer cone in degrees.", 0.0, 179.0),
+                ),
+                ("enabled".to_string(), boolean_schema("Light enabled state.")),
+            ]),
+            &["target"],
+        ),
+        AgentToolKind::Mutation,
+        Some("game.update"),
+    );
+    }
+    if intent.gameplay || intent.authoring {
+        pack.push_native(
+            "audio_edit",
+            "Attach or edit an entity-scoped audio source. The clip is project-relative and spatial audio follows the entity's world transform, so a sound stays linked to its block. Use bus=music|sfx|voice|ambient, spatial=true for 3D attenuation, and looping/autoplay for ambient cues.",
+            object_schema(
+                Map::from_iter([
+                    (
+                        "action".to_string(),
+                        enum_schema("Audio action.", &["attach", "update", "remove"]),
+                    ),
+                    (
+                        "target".to_string(),
+                        string_schema("Entity ID, UUID, name, or path. Defaults to selection for update."),
+                    ),
+                    (
+                        "clip".to_string(),
+                        string_schema("Project-relative .wav/.mp3/.ogg/.flac path."),
+                    ),
+                    (
+                        "bus".to_string(),
+                        enum_schema("Mixer bus.", &["master", "music", "sfx", "voice", "ambient"]),
+                    ),
+                    ("volume".to_string(), number_schema("Source gain.", 0.0, 1.0)),
+                    ("looping".to_string(), boolean_schema("Loop playback.")),
+                    ("autoplay".to_string(), boolean_schema("Play automatically on runtime start.")),
+                    ("spatial".to_string(), boolean_schema("Attenuate from the entity world position.")),
+                    ("min_distance".to_string(), number_schema("Full-volume distance in metres.", 0.001, 10000.0)),
+                    ("max_distance".to_string(), number_schema("Silent distance in metres.", 0.002, 10000.0)),
+                    ("rolloff".to_string(), number_schema("Distance rolloff exponent.", 0.1, 8.0)),
+                    ("enabled".to_string(), boolean_schema("Audio source enabled state.")),
+                ]),
+                &["action", "target"],
+            ),
+            AgentToolKind::Mutation,
+            Some("game.audio"),
+        );
+        pack.push_native(
+            "mesh_edit",
+            "Edit persistent per-entity mesh topology with indexed vertices and faces. Use action=enter first to convert a primitive into editable topology, then inspect with topology=true before changing indices. set replaces the topology, move/scale edit vertex indices, and extrude/inset/subdivide/delete operate on face indices. action=revert restores the parametric primitive; action=apply validates the current mesh without changing it. Imported GLB/GLTF meshes are not editable yet; do not enter them, rebuild from primitives instead. Examples: mesh_edit action=enter target=Cube; mesh_edit action=extrude target=Cube faces=[0] distance=0.25.",
+            object_schema(
+                Map::from_iter([
+                    (
+                        "action".to_string(),
+                        enum_schema(
+                            "Mesh action.",
+                            &[
+                                "inspect",
+                                "enter",
+                                "set",
+                                "move",
+                                "scale",
+                                "extrude",
+                                "inset",
+                                "subdivide",
+                                "delete",
+                                "revert",
+                                "apply",
+                            ],
+                        ),
+                    ),
+                    (
+                        "target".to_string(),
+                        string_schema(
+                            "Entity ID, UUID, name, path, stable key, or selected. Defaults to the current selection.",
+                        ),
+                    ),
+                    (
+                        "topology".to_string(),
+                        boolean_schema(
+                            "Include vertex positions and triangle indices when action=inspect.",
+                        ),
+                    ),
+                    (
+                        "vertices".to_string(),
+                        serde_json::json!({
+                            "type": "array",
+                            "description": "For action=set, [x,y,z] vertex positions. For move/scale, zero-based vertex indices; omit to affect every vertex.",
+                            "maxItems": 32768,
+                            "items": {
+                                "oneOf": [
+                                    {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+                                    {"type": "integer", "minimum": 0}
+                                ]
+                            }
+                        }),
+                    ),
+                    (
+                        "indices".to_string(),
+                        serde_json::json!({
+                            "type": "array",
+                            "items": {"type": "integer", "minimum": 0},
+                            "maxItems": 196608,
+                            "description": "Flat triangle indices for action=set; every three entries form one face."
+                        }),
+                    ),
+                    (
+                        "faces".to_string(),
+                        serde_json::json!({
+                            "type": "array",
+                            "items": {"type": "integer", "minimum": 0},
+                            "maxItems": 65536,
+                            "description": "Zero-based face indices for extrude, inset, subdivide and delete."
+                        }),
+                    ),
+                    (
+                        "face".to_string(),
+                        integer_schema("Single zero-based face index; shortcut for faces=[n].", 0, 65535),
+                    ),
+                    (
+                        "delta".to_string(),
+                        vec3_schema("Local vertex delta in metres for action=move."),
+                    ),
+                    (
+                        "factor".to_string(),
+                        vec3_schema("Per-axis scale factors for action=scale."),
+                    ),
+                    (
+                        "center".to_string(),
+                        vec3_schema(
+                            "Local scale center for action=scale; defaults to the selection center.",
+                        ),
+                    ),
+                    (
+                        "distance".to_string(),
+                        number_schema(
+                            "Extrude distance in metres along the average face normal.",
+                            -10000.0,
+                            10000.0,
+                        ),
+                    ),
+                    (
+                        "amount".to_string(),
+                        number_schema("Inset distance fraction toward the face center.", 0.0, 0.999),
+                    ),
+                ]),
+                &["action"],
+            ),
+            AgentToolKind::Mutation,
+            Some("game.mesh"),
+        );
+    }
+    if intent.assets || intent.prefab || intent.gameplay {
+        pack.push_native(
+            "mesh_asset_place",
+        "Place a static .glb or .gltf mesh asset as a scene entity. The path is relative to the project assets directory. Optional node selects one source node and import_scale normalises units. Use mesh_asset_inspect first when the file has several nodes or unknown units.",
+        object_schema(
+            Map::from_iter([
+                (
+                    "path".to_string(),
+                    string_schema("Mesh path under assets, for example models/shelf.glb."),
+                ),
+                ("name".to_string(), string_schema("Optional entity name.")),
+                (
+                    "parent".to_string(),
+                    string_schema("Optional parent ID, UUID, name, or path."),
+                ),
+                ("transform".to_string(), transform_schema()),
+                (
+                    "node".to_string(),
+                    integer_schema("Optional source node index inside the glTF document.", 0, 65535),
+                ),
+                (
+                    "import_scale".to_string(),
+                    number_schema("Uniform import scale applied after the node transform.", 0.0001, 10000.0),
+                ),
+            ]),
+            &["path"],
+        ),
+        AgentToolKind::Mutation,
+        Some("game.mesh_asset"),
+    );
+    }
     for (tool, command, description) in [
         (
             "scene_delete",
@@ -630,6 +912,29 @@ pub(super) fn translate_arguments(
     }
     match name {
         "scene_create" | "scene_update" => normalize_scene_arguments(&mut arguments)?,
+        "light_create" => translate_light_create(&mut arguments)?,
+        "light_update" => translate_light_update(&mut arguments)?,
+        "mesh_asset_inspect" => translate_mesh_asset_inspect(&mut arguments)?,
+        "mesh_asset_place" => translate_mesh_asset_place(&mut arguments)?,
+        "camera_activate" => {
+            if let Some(object) = arguments.as_object_mut() {
+                object.insert("action".to_string(), Value::String("activate".to_string()));
+            }
+        }
+        "audio_edit" => {
+            if let Some(object) = arguments.as_object_mut() {
+                if !object.contains_key("action") {
+                    object.insert("action".to_string(), Value::String("attach".to_string()));
+                }
+            }
+        }
+        "mesh_edit" => {
+            if let Some(object) = arguments.as_object_mut() {
+                if !object.contains_key("action") {
+                    object.insert("action".to_string(), Value::String("inspect".to_string()));
+                }
+            }
+        }
         "scene_build" => translate_build(&mut arguments)?,
         "scene_reconcile" => translate_reconcile(&mut arguments)?,
         "scene_repair" => translate_repair(&mut arguments)?,
@@ -642,6 +947,79 @@ pub(super) fn translate_arguments(
         _ => {}
     }
     Ok(arguments)
+}
+
+/// Move flat light fields into the `light` component object expected by
+/// `game.add`. The entity itself stays an Empty node with a light component.
+fn translate_light_create(arguments: &mut Value) -> Result<(), String> {
+    let object = arguments
+        .as_object_mut()
+        .ok_or_else(|| "light_create arguments must be an object.".to_string())?;
+    let light = take_light_fields(object);
+    if !light.contains_key("kind") {
+        return Err("light_create requires kind=point or kind=spot.".to_string());
+    }
+    object.insert("primitive".to_string(), Value::String("empty".to_string()));
+    object.insert("light".to_string(), Value::Object(light));
+    Ok(())
+}
+
+fn translate_light_update(arguments: &mut Value) -> Result<(), String> {
+    let object = arguments
+        .as_object_mut()
+        .ok_or_else(|| "light_update arguments must be an object.".to_string())?;
+    let light = take_light_fields(object);
+    if light.is_empty() {
+        return Err("light_update requires at least one light field besides target.".to_string());
+    }
+    object.insert("light".to_string(), Value::Object(light));
+    Ok(())
+}
+
+fn take_light_fields(object: &mut Map<String, Value>) -> Map<String, Value> {
+    const LIGHT_FIELDS: [&str; 7] = [
+        "kind",
+        "color",
+        "intensity",
+        "range",
+        "inner_cone_degrees",
+        "outer_cone_degrees",
+        "enabled",
+    ];
+    let mut light = Map::new();
+    for field in LIGHT_FIELDS {
+        if let Some(value) = object.remove(field) {
+            light.insert(field.to_string(), value);
+        }
+    }
+    light
+}
+
+fn translate_mesh_asset_inspect(arguments: &mut Value) -> Result<(), String> {
+    let object = arguments
+        .as_object_mut()
+        .ok_or_else(|| "mesh_asset_inspect arguments must be an object.".to_string())?;
+    object.insert("action".to_string(), Value::String("inspect".to_string()));
+    Ok(())
+}
+
+fn translate_mesh_asset_place(arguments: &mut Value) -> Result<(), String> {
+    let object = arguments
+        .as_object_mut()
+        .ok_or_else(|| "mesh_asset_place arguments must be an object.".to_string())?;
+    let path = object
+        .remove("path")
+        .and_then(|value| value.as_str().map(str::to_string))
+        .ok_or_else(|| "mesh_asset_place requires path.".to_string())?;
+    let mut reference = Map::from_iter([("path".to_string(), Value::String(path))]);
+    for key in ["node", "import_scale"] {
+        if let Some(value) = object.remove(key) {
+            reference.insert(key.to_string(), value);
+        }
+    }
+    object.insert("action".to_string(), Value::String("place".to_string()));
+    object.insert("mesh_asset".to_string(), Value::Object(reference));
+    Ok(())
 }
 
 /// Normalize only the semantic discriminator at the Agent boundary.

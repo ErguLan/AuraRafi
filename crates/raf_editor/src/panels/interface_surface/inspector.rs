@@ -14,17 +14,21 @@ fn field(key: &str, width: f32, t: UiTokens) -> UiNode {
         format!("ui.field.{key}")
     };
     let kit = components(t);
-    let control = kit.text_input(
-                &id,
-                UiTextInput {
-                    submit_command: Some(format!("ui.designer.commit:{key}")),
-                    ..UiTextInput::new(&id)
-                },
-            )
-            .with_class("interface.input")
-            .with_event(UiEventBinding::command(UiEventKind::KeyPress("escape".into()),
-                format!("ui.designer.cancel-field:{key}")));
-    kit.property_field(format!("{id}.row"), caption, control).fixed_width(width)
+    let control = kit
+        .text_input(
+            &id,
+            UiTextInput {
+                submit_command: Some(format!("ui.designer.commit:{key}")),
+                ..UiTextInput::new(&id)
+            },
+        )
+        .with_class("interface.input")
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("escape".into()),
+            format!("ui.designer.cancel-field:{key}"),
+        ));
+    kit.property_field(format!("{id}.row"), caption, control)
+        .fixed_width(width)
 }
 fn pair(a: &str, b: &str, width: f32, t: UiTokens) -> UiNode {
     let half = ((width - GAP) * 0.5).max(1.0);

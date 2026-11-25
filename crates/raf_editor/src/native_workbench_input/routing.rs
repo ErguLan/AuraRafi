@@ -84,6 +84,15 @@ impl NativeGameWorkbench {
             self.console.filters_open = false;
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
+        if (self.lighting_color_editor.is_some() || self.lighting_eyedropper.is_some())
+            && native_input
+                .snapshot()
+                .key_pressed(raf_core::InputKey::Escape)
+        {
+            self.lighting_color_editor = None;
+            self.lighting_eyedropper = None;
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        }
         let electronics_transform_had_focus = self
             .host
             .session()
@@ -120,6 +129,7 @@ impl NativeGameWorkbench {
             .has_focus("electronics.inspector.value");
         let search_open = self.search_surface.is_open();
         let mut intents = Vec::new();
+        self.flush_lighting_session(scene, &mut intents);
         if self.hierarchy_drag.is_some() {
             if let Some((pointer, rect)) = native_input
                 .snapshot()
@@ -338,7 +348,7 @@ impl NativeGameWorkbench {
                     self.handle_set_text(key, value, selected, &mut intents);
                 }
                 UiAction::SetToggle { key, value } => {
-                    self.handle_set_toggle(key, value, selected, &mut intents);
+                    self.handle_set_toggle(key, value, selected, project, &mut intents);
                 }
                 UiAction::SetSelect {
                     key,
@@ -566,6 +576,22 @@ impl NativeGameWorkbench {
                         next_agent_scroll_projection(self.agent_scroll_projection_offset, offset[1])
                     {
                         self.agent_scroll_projection_offset = next;
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
+                }
+                UiAction::ScrollTo { id, offset } if id == "console.log-scroll" => {
+                    let max = self
+                        .host
+                        .session()
+                        .interaction
+                        .controls
+                        .scroll_max_offset("console.log-scroll")[1];
+                    let at_bottom = offset[1] >= max - 4.0;
+                    if self.console.auto_scroll && !at_bottom {
+                        self.console.set_auto_scroll(false);
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    } else if !self.console.auto_scroll && at_bottom {
+                        self.console.set_auto_scroll(true);
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                 }

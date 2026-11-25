@@ -2,50 +2,192 @@
 
 This document outlines the development roadmap for AuraRafi.
 
-## Construction, visual Assets and Hierarchy: current scope and 0.12
+## TEMP — Pendientes técnicos post-0.12 (diferidos, no ejecutar en 0.12)
 
-This pass improves supported authoring, without introducing another modeling
-stack. Capsule is the only new shape: 1 m diameter, 2 m total height, centered on
-Y. Shared shape descriptors define local dimensions and conservative world AABBs.
-Dimensions edit existing scale; no second persistent size is introduced. Existing
-scene transforms are preserved. Commands reject simultaneous size and scale.
+Estos puntos se retoman **después** del cierre 0.12, en este orden. No forman
+parte del alcance actual; quedan aquí para no perderlos.
+
+- [ ] **`generate_circuit` real o retirado.** Hoy es un template LED con 4
+  componentes fijos (`crates/raf_editor/src/commands/electronics.rs:290`), no un
+  generador de circuitos. Convertirlo en un flujo real (netlist estructurada →
+  validación → instanciación) o renombrarlo/retirarlo del catálogo público.
+- [ ] **Partir `raf_editor` por dominio.** `agent`, `electronics`, `workbench`,
+  `settings`, `commands`. Hoy concentra ~156k líneas y 300+ archivos. Imponer
+  límites de tamaño de archivo/módulo y separar el agente del editor base.
+- [ ] **Política de panics.** Medir `unwrap`/`expect`/`panic!` excluyendo tests
+  con una regla explícita; en command handlers y surfaces devolver error o
+  diagnóstico en vez de abortar el proceso.
+- [ ] **Archivos comunitarios y seguridad.** `CODE_OF_CONDUCT.md`,
+  `SECURITY.md` y `.github/ISSUE_TEMPLATE/`. `docs/CONTRIBUTING.md` ya existe.
+
+Follow-ups detectados al cerrar P0:
+
+- [ ] **Deuda de Clippy.** El gate estricto solo cubre `raf_net`; `raf_core`,
+  `raf_script`, `raf_ui`, `raf_agb` y `raf_editor` tienen warnings existentes.
+  Limpiarlos y extender `-D warnings` al workspace.
+- [ ] **macOS editor bring-up.** La CI cubre `raf_core`/`raf_net` en macOS; el
+  editor y el renderer siguen pendientes de validación nativa.
+
+Auditoría P2 actual: [TEMP_TECH_AUDIT.md](TEMP_TECH_AUDIT.md).
+
+## Construction, visual Assets and Hierarchy: 0.12 engine closure
+
+This pass closes the shared 0.12 engine foundation without introducing another
+modeling stack. The shared shape catalog contains `empty`, `cube`, `sphere`,
+`plane`, `cylinder`, `capsule`, `wedge`, `torus`, `prism` and `sphere2d`.
+Capsule is 1 m diameter and 2 m total height, centered on Y. Sphere2D is a
+camera-facing shaded disk (billboard), not a second sphere mesh. Shared shape
+descriptors define local dimensions and conservative world AABBs. Dimensions
+edit existing scale; no second persistent size is introduced. Existing scene
+transforms are preserved. Commands reject simultaneous size and scale.
 
 Current source scope:
 
-- Parent-aware authoring bounds, anchored single-face scaling, metric dimensions,
-  floor/surface snap and cancellable asset placement.
-- Existing Assets surface with typed catalog projections, image thumbnails and
-  isolated ApiGraphicBasic primitive/prefab previews. Demand-driven 128 px cache,
-  at most 256 entries and 16 MiB RGBA. Oversized prefabs keep an explanatory icon.
-  Refresh/catalog changes invalidate previews. GLB/GLTF remain discoverable files,
-  not placeable models.
-- Compact Hierarchy component/diagnostic badges, conjunctive field queries,
+- [x] Parent-aware authoring bounds, anchored single-face scaling, metric
+  dimensions, floor/surface snap and cancellable asset placement.
+- [x] Existing Assets surface with typed catalog projections, image thumbnails
+  and isolated ApiGraphicBasic primitive/prefab previews. Demand-driven 128 px
+  cache, at most 256 entries and 16 MiB RGBA. Oversized prefabs keep an
+  explanatory icon. Refresh/catalog changes invalidate previews. GLB/GLTF files
+  are static mesh assets that can be inspected and placed in the scene.
+- [x] Compact Hierarchy component/diagnostic badges, conjunctive field queries,
   insertion parent, ordered drops, auto-scroll and per-session UUID view state
   in `editor_hierarchy.ron`. Scripts remain optional virtual component rows.
-- Already implemented: camera component, environmental Sun, directional shadows,
-  AudioSource, triggers and independent editable prefabs.
-- Tab stays in Object Mode with an explicit notice until persistent mesh editing
-  exists. Mesh edge display is not advertised as editing.
+- [x] Opt-in compact script indicator on Hierarchy rows, derived from
+  `SceneNode.scripts` with zero file I/O.
+- [x] Camera component, active/startup camera, environmental Sun, directional
+  shadows, AudioSource, triggers and independent editable prefabs.
+- [x] Entity point/spot lights with a bounded per-frame budget and no per-light
+  shadows.
+- [x] Tab Mesh Editor v1: focused Object/Tab mode, persisted
+  `EditableMeshData`, vertex/edge/face selection, direct handle dragging,
+  extrude with side walls, inset, subdivide, delete, Accept/Cancel, axis locks
+  and scene-history undo. Imported GLB meshes and interactive bevel/boolean
+  remain out of this pass.
 
 0.12 deliverables and acceptance:
 
-- GLB/GLTF Mesh Assets: meshes/material slots, import bounds, source identity,
-  validated textures, editor/runtime placement and save/load round trips.
-- Linked Prefab Packages: source/version, overrides, update, revert, make-unique;
-  nested instances only after cycle/reference validation.
-- Point/Spot Lights and functional spawn markers: registered capabilities with
-  actual Inspector, rendering/runtime behavior and automation schemas.
-- Persistent Editable Mesh: Object/Vertex/Edge/Face selection, Accept/Cancel,
-  undo/redo and saved geometry. Extrude, inset, interactive bevel, editable pivots
-  and experimental boolean subtraction require validated, bounded topology.
-- Wedge, torus, configurable prisms and parametric cylinder (radii, segments,
-  caps, thickness) extend the shared shape catalog, not disconnected menu lists.
-- Mesh Assets, linked Prefab Instances, supported lights, cameras, audio emitters,
-  trigger volumes, spawn markers, groups and shapes are displayed from real
-  registered capabilities. No placeholder types or fake Hierarchy nodes.
+- [x] Static GLB/GLTF Mesh Assets: decoded meshes, material slots, import
+  bounds, source identity, validated textures, editor/runtime placement and
+  save/load round trips. Skins, morph targets and animation playback are not
+  part of the static placement path.
+- [x] Linked Assemblies v1: source/version/hash, `assembly.revert`,
+  `assembly.update`, `assembly.make_unique`, nested cycle validation and
+  source-slot reuse. Root overrides are preserved; child-level override merge
+  and automatic refresh remain pending. Product naming is Assembly, never
+  Prefab.
+- [x] Point/Spot entity lights: registered component with Inspector, rendering
+  through the shared scene pipeline and automation schemas. Per-light shadows
+  are not implemented.
+- [x] Spawn markers and trigger volumes authored through `game.spawn` and
+  `game.trigger`, shown as real Hierarchy types. Remaining registered capability
+  types stay pending.
+- [x] Persistent Editable Mesh v1: Object/Vertex/Edge/Face selection,
+  Accept/Cancel, undo/redo and saved geometry. Interactive bevel, editable pivots
+  and experimental boolean subtraction remain pending.
+- [x] Wedge, torus, prism and Sphere2D extend the shared shape catalog, not
+  disconnected menu lists. Parametric cylinder radii/segments and editable
+  pivots remain pending.
+- [ ] Mesh Assets, linked Prefab Instances, supported lights, cameras, audio
+  emitters, trigger volumes, spawn markers, groups and shapes displayed from
+  real registered capabilities. No placeholder types or fake Hierarchy nodes.
 
 After 0.12: splines, lathe/sweep/loft and extensive procedural construction.
 Native DPI/input/recovery acceptance is distinct from compilation/offscreen tests.
+
+## Audio System v1 (0.12)
+
+Entity-scoped audio is connected to blocks, the project mix, the Agent and
+scripting. See [AUDIO.md](AUDIO.md).
+
+- [x] `AudioSource` with mixer bus, spatial flag, minimum/maximum distance and
+  rolloff. Existing scenes default to SFX and non-spatial playback.
+- [x] Project mixer settings for master, music, SFX, voice and ambient, plus a
+  bounded voice budget.
+- [x] Runtime listener update from the active camera; spatial gain follows the
+  entity world transform every fixed step.
+- [x] `game.audio` actions `attach`, `update` and `remove`; the Agent exposes
+  `audio_edit`.
+- [x] Rhai `stop_all_audio` and `set_audio_bus_volume`; `set_property` supports
+  `audio.*` fields.
+- [x] Assets audition button and bounded WAV metadata/waveform reader.
+- [ ] MP3/OGG/FLAC native decoding. These files are catalogued but the native
+  output path currently accepts PCM WAV.
+- [ ] Live mixer console, waveform card rendering and spatial occlusion.
+
+## 0.12 Engine Closure (implementado)
+
+This section records what the repository now supports at the engine and
+authoring-contract level. It is a capability ledger, not a promise of advanced
+rendering or production-grade asset pipelines.
+
+- [x] Corrected geometry catalog: `empty`, `cube`, `sphere`, `plane`, `cylinder`,
+  `capsule`, `wedge`, `torus`, `prism` and `sphere2d` share one slug list in the
+  Agent schemas, scene batch and command catalog. The batch no longer excludes
+  Capsule, and the old hardcoded lists are gone.
+- [x] Sphere2D billboard: a camera-facing shaded disk composed with a billboard
+  rotation in `SceneRenderer`, rendered two-sided. It is a flat representation,
+  not a second lit sphere volume.
+- [x] Entity point/spot lights: `SceneLight` on `SceneNode`, authored through
+  `game.add`/`game.update`, `game.light`, the Inspector and the Agent tools.
+  `LightKind` is point or spot; spot uses inner/outer cones. World Sun, sky and
+  ambient remain in `EnvironmentSettings`.
+- [x] Static GLB/GLTF import: `raf_assets::model_asset` decodes `.glb`/`.gltf`
+  meshes, material slots, bounds and textures with explicit size/count limits.
+  `MeshAssetRef` stores a project-relative path, optional source node, content
+  hash and import scale. Skins, morph targets and animation playback are not
+  imported by this path.
+- [x] Active camera and real look-through: a camera component can be created
+  and configured. `game.camera action=look_through` renders the viewport through
+  that entity camera, draws a 90% safe frame plus rule-of-thirds guides, and
+  Escape or `action=editor_view` restores the editor camera.
+- [x] Surface and pivot authoring: `surface.tiling` scales UVs on primitives,
+  editable meshes and imported models; `unlit` and `double_sided` reach both
+  pipeline paths; pivot Center/Base/Corner are applied as a render-space
+  geometry offset without moving gizmos, lights, scripts or children.
+  `Center` on imported meshes keeps the authored origin to avoid moving assets.
+- [x] Static model rendering: `SceneRenderer` caches decoded models by project
+  path and renders their baked static submeshes through the shared scene
+  pipeline, including `game.mesh_asset action=place` and project save/load.
+- [x] Assets import surface: toolbar Import opens a modal with drop zone,
+  options, progress/error states and a native file picker. GLB/GLTF packages are
+  copied below `assets/models/<slug>/` with their dependencies and metadata.
+- [x] Model previews and placement: the preview worker renders decoded static
+  models into the same bounded thumbnail cache, and the placement ghost uses the
+  cached model bounds and a temporary scene node.
+- [x] Data safety: `project.ron` and `scene.ron` publish through the recoverable
+  atomic writer, and scene parsing can recover the previous generation instead
+  of silently returning an empty scene.
+- [x] Scene packet reuse: the editor compositor hashes command content instead of
+  the frame `Arc` pointer, so camera-only frames no longer rebuild or re-upload
+  the scene packet.
+- [x] Local-light shading on both paths: CPU Gouraud shading and the shared GPU
+  shader consume the same bounded light layout. Per-light shadows remain out of
+  scope.
+- [x] Hierarchy Scene/Lighting tabs, kind registry, light/mesh/camera badges,
+  real keyboard navigation and background box selection.
+- [x] GPU backface culling and split opaque/two-sided/transparent pipeline
+  state across DX12, Vulkan, Metal and WebGPU. The CPU path already culled and
+  blended correctly.
+- [x] Persistent Editable Mesh v1, vertex/edge/face picking, inset, subdivide,
+  delete and Accept/Cancel. Interactive bevel, boolean subtraction and
+  sub-object animation remain pending.
+- [x] Hierarchy component/diagnostic badges, directional Sun shadows, capsule
+  authoring and the existing camera/AudioSource/trigger/prefab slices remain
+  implemented.
+
+Explicit limits in this closure:
+
+- No per-light shadows, cascades, GI, contact shadows, volumetrics or
+  physically calibrated photometry.
+- Entity lights are bounded: at most 8 enabled local lights per frame,
+  selected by influence around the camera focus. Higher render profiles do not
+  raise this cap yet.
+- GLB/GLTF support is static geometry plus base-color material slots. There is
+  no skinned or morph-target placement, and no PBR rendering promise.
+- Import failure, unsupported extension, missing dependency and malformed
+  numbers are reported as command errors; they are not silently replaced with
+  placeholder geometry.
 
 ## Harness 0.12 — pendientes de la pasada P0–P2
 
@@ -539,32 +681,36 @@ target remains v0.12 and is specified in
 - [x] Agent/attached CLI/MCP transform rig updates and read-only pose sampling.
   Embedded GLB transform clips can be mapped to existing rig nodes explicitly.
 - [x] Animations dock with project clip assets, durable entity links, isolated
-  playhead preview, and key capture for position, rotation and scale tracks.
+  viewport playback and scrubbing, and key capture for position, rotation and
+  scale tracks.
+- [x] Skeletal GLB/glTF placement from Assets, four-weight CPU deformation,
+  inverse binds, editable key jumps and stepped/linear track settings. Cubic
+  transform channels are baked at import. The same deformed geometry feeds the
+  existing ApiGraphicBasic renderer paths.
+- [x] Action variants gated by authored hand-slot occupancy, two-bone ground
+  and target placement, and a swept tip probe for solid box obstacles.
+- [x] Per-bone blend with authored dynamic bodies and bounded torque feedback,
+  transform take baking and explicit rest-pose retargeting.
+- [x] Bounded pose-and-planar-trajectory matching over authored clips with
+  crossfades, alongside velocity-driven locomotion blending.
 - [x] Development overlays in Play for transform rig links, collision geometry,
   velocity, gravitational weight, applied loads and contact impulses. Optional
   world-space impact offsets drive a bounded visual reaction on a rig child.
-- [ ] GLB/GLTF mesh, skin and clip import with bounds, source identity, joint
-  weights, inverse bind matrices and full animation tracks including cubic and
-  morph curves. Preserve stable bone bindings and validate reimports.
-- [ ] Skeletal keyframe animation with a bone hierarchy, skinning data, a
-  playback clock and editor/runtime sampling.
-- [ ] Skeletal animation playback on the render path, on the GPU and the CPU
-  recovery rasterizer, from the same deformation contract.
+- [ ] Morph curves and facial deformation, preserving stable bone bindings
+  across reimport, full skinned material slots and GPU-side deformation.
 - [ ] Connect animation collision to playback: evaluate the configured
   `AnimCollider` set each animation step and dispatch the selected response.
-- [ ] Foot-placement and hand-grab integration on top of the bounded IK solvers
-  in `raf_core::scene::ik`.
+- [ ] Stable planted contacts on moving supports and physical grab constraints.
 - [ ] Expanded animation timeline with curve and graph editing, collision
   inspection and camera/audio sequencing. Export take images
   and video, preserve stepped poses through retargeting and bake to keys/cache.
-- [ ] Actions with resource ownership, synchronized gameplay markers and safe
-  interruption. Verify held props, contact-aware root motion, shape casts for
-  rotating limbs and held objects, and bounded contact correction.
-- [ ] Partial active ragdoll with motors, per-joint blends, balance/recovery and
-  facial targets. Verify the same impacts at several speeds and angles.
-- [ ] Procedural locomotion and motion matching from a measured clip library.
-  Profile 1, 20 and 100 characters with per-character detail levels and replay
-  diagnostics. Evaluate studio interchange beyond GLB through external adapters.
+- [ ] Gameplay markers with safe commit/rollback, actual held-prop constraints,
+  contact-aware root motion, and rotational sweeps for limbs and held objects.
+- [ ] Ragdoll authoring, balance and recovery behaviors, and complete physical
+  take recording. Verify impacts at several speeds and angles.
+- [ ] Qualify motion matching against a production clip library, articulated
+  characters and end-to-end frame measurements with per-character detail levels
+  and replay diagnostics. Evaluate studio interchange through external adapters.
 
 ### Electronics catalog
 
@@ -616,7 +762,12 @@ this section complete until the media path is measured end to end.
 - [ ] Point and spot lights registered as editable scene capabilities with
   Inspector, shading and automation schemas.
 - [ ] Ambient occlusion (SSAO) and a general post-processing stack.
-- [ ] Particle systems as a real rendering capability, not only a budget.
+- [x] Particle systems as a real rendering capability, not only a budget:
+  data-driven `.rafparticle` JSON, CPU simulation, flipbook atlases, quality
+  budgets, scene component, editor preview controls, runtime project policy,
+  Properties, Assets creation/placement, script and node actions, and the
+  `particles_generate` agent tool. GPU compute sorting, heat distortion and
+  smoke volume upgrades remain in the 0.12 advanced-rendering track.
 - [ ] Ray-tracing backend and traversal behind the prepared Complement Trace
   configuration.
 

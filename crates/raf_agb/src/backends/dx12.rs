@@ -787,7 +787,31 @@ unsafe fn draw_batches(
                             pipelines.scene()
                         }
                     }
+                    Stage::ShadowSceneTwoSided => {
+                        if let Some(pass) = shadow {
+                            pass.scene_two_sided()
+                        } else {
+                            pipelines.scene_two_sided()
+                        }
+                    }
+                    Stage::ShadowSceneTransparent => {
+                        if let Some(pass) = shadow {
+                            pass.scene_transparent()
+                        } else {
+                            pipelines.scene_transparent()
+                        }
+                    }
+                    Stage::ShadowSceneTransparentTwoSided => {
+                        if let Some(pass) = shadow {
+                            pass.scene_transparent_two_sided()
+                        } else {
+                            pipelines.scene_transparent_two_sided()
+                        }
+                    }
                     Stage::Scene => pipelines.scene(),
+                    Stage::SceneTwoSided => pipelines.scene_two_sided(),
+                    Stage::SceneTransparent => pipelines.scene_transparent(),
+                    Stage::SceneTransparentTwoSided => pipelines.scene_transparent_two_sided(),
                     Stage::ReadDepth => pipelines.read_depth(),
                     Stage::Overlay => pipelines.overlay(),
                 };

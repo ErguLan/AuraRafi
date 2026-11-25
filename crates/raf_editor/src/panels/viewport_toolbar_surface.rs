@@ -953,6 +953,10 @@ fn viewport_primitive_option(palette: StudioUiPalette, primitive: Primitive) -> 
             Primitive::Cylinder => UiIconId::Cylinder,
             Primitive::Capsule => UiIconId::Capsule,
             Primitive::Plane => UiIconId::Plane,
+            Primitive::Wedge => UiIconId::Cube,
+            Primitive::Torus => UiIconId::Sphere,
+            Primitive::Prism => UiIconId::Cylinder,
+            Primitive::Sphere2D => UiIconId::Sphere,
             Primitive::Empty => UiIconId::Node,
         })
         .with_size(UiIconSize::Small)

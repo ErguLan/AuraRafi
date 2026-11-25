@@ -53,9 +53,8 @@ fn desktop_ribbon_keeps_tools_visible_and_usable_at_real_window_widths() {
                     let mut natural = request.clone();
                     natural.max_width = 1024.0;
                     natural.overflow = UiTextOverflow::Clip;
-                    let needed =
-                        raf_render::api_graphic_basic::ui_surface::UiTextAtlas::default()
-                            .measure_prefix_width(&natural, &text, text.chars().count());
+                    let needed = raf_render::api_graphic_basic::ui_surface::UiTextAtlas::default()
+                        .measure_prefix_width(&natural, &text, text.chars().count());
                     assert!(
                         needed <= request.max_width + 0.1,
                         "{id} needs {needed}, receives {} at {width}",
@@ -192,11 +191,7 @@ fn rect_of(frame: &UiSurfaceFrame, id: &str) -> UiRect {
         .rect
 }
 
-fn rule_for<'a>(
-    surface: &'a UiSurface,
-    class: &str,
-    state: UiStyleRuleState,
-) -> &'a UiStylePatch {
+fn rule_for<'a>(surface: &'a UiSurface, class: &str, state: UiStyleRuleState) -> &'a UiStylePatch {
     surface
         .style_sheet
         .rules
@@ -261,8 +256,7 @@ fn control_width(labelled: bool, label: Option<&str>) -> f32 {
 /// of the active surface and the two selection edits.
 fn document_span(kind: CadSurfaceKind, labelled: bool) -> f32 {
     let mode_width = if labelled {
-        labelled_width("electronics.toolbar.schematic")
-            + labelled_width("electronics.toolbar.pcb")
+        labelled_width("electronics.toolbar.schematic") + labelled_width("electronics.toolbar.pcb")
     } else {
         compact_mode_width("electronics.toolbar.schematic")
             + compact_mode_width("electronics.toolbar.pcb")
@@ -805,8 +799,7 @@ fn the_engaged_tool_and_an_engaged_option_do_not_share_a_treatment() {
 fn only_the_tool_in_hand_wears_the_saturated_accent() {
     for kind in [CadSurfaceKind::Schematic, CadSurfaceKind::Pcb] {
         for width in [NARROW_WIDTH, ICON_WIDTH, LABELLED_WIDTH] {
-            let surface =
-                build_with(ToolbarState::available(kind, ElectronicsTool::Place), width);
+            let surface = build_with(ToolbarState::available(kind, ElectronicsTool::Place), width);
             let mut engaged = Vec::new();
             fn walk(node: &UiNode, engaged: &mut Vec<String>) {
                 if node.classes.iter().any(|class| class == CLASS_TOOL_ACTIVE) {
@@ -986,8 +979,7 @@ fn the_band_passes_the_retained_layout_gate_in_both_width_directions() {
 fn cpu_toolbar_layouts_at_real_breakpoints_and_can_save_optional_review_images() {
     use raf_render::api_graphic_basic::ui_surface::CpuUiSurfaceHost;
 
-    let qa_dir =
-        std::env::var_os("RAF_ELECTRONICS_TOOLBAR_QA_DIR").map(std::path::PathBuf::from);
+    let qa_dir = std::env::var_os("RAF_ELECTRONICS_TOOLBAR_QA_DIR").map(std::path::PathBuf::from);
     if let Some(dir) = &qa_dir {
         std::fs::create_dir_all(dir).expect("create toolbar QA image directory");
     }

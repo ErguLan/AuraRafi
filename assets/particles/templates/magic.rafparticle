@@ -1,0 +1,215 @@
+{
+  "version": 1,
+  "name": "Magic",
+  "budget": {
+    "max_particles": 1600,
+    "max_sprites": 1600
+  },
+  "emitters": [
+    {
+      "name": "aura",
+      "texture": "particles/textures/soft.png",
+      "enabled": true,
+      "max_particles": 700,
+      "rate": 26.0,
+      "burst": 10,
+      "lifetime": [
+        1.4,
+        2.4
+      ],
+      "speed": [
+        0.15,
+        0.7
+      ],
+      "spread": [
+        70.0,
+        70.0
+      ],
+      "direction": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "gravity": [
+        0.0,
+        0.12,
+        0.0
+      ],
+      "drag": 0.4,
+      "size": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.22
+          },
+          {
+            "t": 0.45,
+            "value": 0.62
+          },
+          {
+            "t": 1.0,
+            "value": 0.85
+          }
+        ]
+      },
+      "opacity": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.0
+          },
+          {
+            "t": 0.2,
+            "value": 0.16
+          },
+          {
+            "t": 0.7,
+            "value": 0.09
+          },
+          {
+            "t": 1.0,
+            "value": 0.0
+          }
+        ]
+      },
+      "color": {
+        "keys": [
+          {
+            "t": 0.0,
+            "color": [
+              180,
+              120,
+              255,
+              255
+            ]
+          },
+          {
+            "t": 0.5,
+            "color": [
+              90,
+              200,
+              255,
+              230
+            ]
+          },
+          {
+            "t": 1.0,
+            "color": [
+              30,
+              70,
+              180,
+              0
+            ]
+          }
+        ]
+      },
+      "shape": {
+        "type": "sphere",
+        "radius": 0.28
+      },
+      "flipbook": null,
+      "collision": null,
+      "wind_affects_drag": true
+    },
+    {
+      "name": "sparkles",
+      "texture": "particles/textures/spark.png",
+      "enabled": true,
+      "max_particles": 700,
+      "rate": 42.0,
+      "burst": 18,
+      "lifetime": [
+        0.5,
+        1.1
+      ],
+      "speed": [
+        0.8,
+        2.6
+      ],
+      "spread": [
+        90.0,
+        90.0
+      ],
+      "direction": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "gravity": [
+        0.0,
+        -1.4,
+        0.0
+      ],
+      "drag": 0.08,
+      "size": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.075
+          },
+          {
+            "t": 0.5,
+            "value": 0.05
+          },
+          {
+            "t": 1.0,
+            "value": 0.015
+          }
+        ]
+      },
+      "opacity": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 1.0
+          },
+          {
+            "t": 0.65,
+            "value": 0.7
+          },
+          {
+            "t": 1.0,
+            "value": 0.0
+          }
+        ]
+      },
+      "color": {
+        "keys": [
+          {
+            "t": 0.0,
+            "color": [
+              255,
+              255,
+              255,
+              255
+            ]
+          },
+          {
+            "t": 0.45,
+            "color": [
+              160,
+              230,
+              255,
+              230
+            ]
+          },
+          {
+            "t": 1.0,
+            "color": [
+              80,
+              100,
+              255,
+              0
+            ]
+          }
+        ]
+      },
+      "shape": {
+        "type": "point"
+      },
+      "flipbook": null,
+      "collision": null,
+      "wind_affects_drag": false
+    }
+  ]
+}

@@ -163,6 +163,10 @@ pub struct EngineSettings {
     pub fps_limit: u32,
     pub vsync: bool,
     pub multithreading: bool,
+    /// Editor-only particle preview controls. The game runtime uses the
+    /// project's `particle_runtime` policy instead.
+    #[serde(default)]
+    pub particle_preview: crate::scene::ParticlePreviewSettings,
 
     // -- Editor --
     pub grid_visible: bool,
@@ -181,6 +185,10 @@ pub struct EngineSettings {
     /// Opt-in static script links, presented as virtual rows, never scene children.
     #[serde(default)]
     pub hierarchy_show_script_links: bool,
+    /// Opt-in compact script indicator on rows that carry attached scripts.
+    /// Derived from `SceneNode.scripts` with zero I/O, so it is O(1) per row.
+    #[serde(default)]
+    pub hierarchy_show_script_indicators: bool,
     #[serde(default = "default_true")]
     pub hierarchy_show_visibility: bool,
     #[serde(default = "default_true")]
@@ -244,13 +252,6 @@ pub struct EngineSettings {
 
     /// Responsive layout: adapts UI to small screens (mobile/tablet).
     pub responsive_layout: bool,
-
-    // -- Rendering (v0.7.0) --
-    /// Render quality preset (Potato/Low/Medium/High).
-    /// Controls which advanced features are enabled.
-    /// Default: Potato (everything off, maximum performance).
-    /// Individual feature toggles are in the project's render_config.
-    pub render_preset: RenderPreset,
 
     // -- Input (v0.7.0) --
     /// Invert mouse X axis for orbit camera.

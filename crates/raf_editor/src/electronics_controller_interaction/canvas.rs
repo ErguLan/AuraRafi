@@ -3,9 +3,7 @@
 use super::*;
 
 use super::drag::{drag_polyline_before, grabbed_vertex_index, DragOutcome};
-use super::gestures::{
-    chaining_tool, wire_gesture_owns_release, wire_preview_follows_pointer,
-};
+use super::gestures::{chaining_tool, wire_gesture_owns_release, wire_preview_follows_pointer};
 use super::pointer::{
     canvas_pointer_busy, pan_button_for_press, pointer_left_press_origin, rect_contains,
 };
@@ -124,7 +122,8 @@ impl NativeElectronicsEditor {
         self.ensure_camera(canvas);
         let minimap = self.minimap_rects(size);
         let over_panel = minimap.is_some_and(|rects| rect_contains(rects.panel, pointer));
-        let over_image = !self.minimap_collapsed && minimap.is_some_and(|rects| rect_contains(rects.image, pointer));
+        let over_image = !self.minimap_collapsed
+            && minimap.is_some_and(|rects| rect_contains(rects.image, pointer));
 
         // Sampled before the assignment below so the hover repick can tell a real
         // cursor movement from a repeated frame.
@@ -534,11 +533,19 @@ impl NativeElectronicsEditor {
             result.request_redraw = true;
         }
 
-        if self.active_surface == CadSurfaceKind::Pcb && self.tool == ElectronicsTool::Route && pointer_changed {
-            let target_changed = previous_pointer_world.and_then(|p| self.route_hover_identity(p)) != self.route_hover_identity(world);
+        if self.active_surface == CadSurfaceKind::Pcb
+            && self.tool == ElectronicsTool::Route
+            && pointer_changed
+        {
+            let target_changed = previous_pointer_world.and_then(|p| self.route_hover_identity(p))
+                != self.route_hover_identity(world);
             if self.pcb_route_draft.is_some() || target_changed {
                 self.rebuild_scene();
-                if target_changed { self.touch_ui(); } else { self.touch(); }
+                if target_changed {
+                    self.touch_ui();
+                } else {
+                    self.touch();
+                }
                 result.request_redraw = true;
             }
         }
@@ -583,7 +590,10 @@ impl NativeElectronicsEditor {
         if input.modifiers.command_modifier() || input.modifiers.alt {
             return false;
         }
-        if input.key_pressed(InputKey::Enter) && self.tool == ElectronicsTool::Route && self.active_surface == CadSurfaceKind::Pcb {
+        if input.key_pressed(InputKey::Enter)
+            && self.tool == ElectronicsTool::Route
+            && self.active_surface == CadSurfaceKind::Pcb
+        {
             return self.apply_pcb_tool_command("electronics.pcb.route.finish");
         }
         if input.key_pressed(shortcut::ROTATE) {

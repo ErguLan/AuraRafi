@@ -18,6 +18,7 @@ mod controls;
 mod general;
 mod graphics;
 mod hardware;
+mod impact;
 mod runtime;
 mod sections;
 mod style;
@@ -36,12 +37,17 @@ const CONTROL_WIDTH: f32 = 320.0;
 const SETTINGS_NAV_WIDTH: f32 = 236.0;
 const SETTINGS_CONTROL_MIN_WIDTH: f32 = 220.0;
 const SETTINGS_RANGE_MIN_WIDTH: f32 = 150.0;
-const SETTINGS_COMPACT_BREAKPOINT: f32 = 360.0;
+/// Below this width a settings row stacks so the control and the impact
+/// badges keep their intrinsic width instead of clipping each other.
+const SETTINGS_COMPACT_BREAKPOINT: f32 = 640.0;
 const SETTINGS_WORKSPACE_BREAKPOINT: f32 = 440.0;
 const SETTINGS_CONTENT_MAX_WIDTH: f32 = 900.0;
 const SEGMENT_MIN_WIDTH: f32 = 68.0;
 const SETTINGS_ROW_HEIGHT: f32 = 58.0;
 const SETTINGS_STACKED_ROW_HEIGHT: f32 = 84.0;
+const SETTINGS_IMPACT_ROW_HEIGHT: f32 = 70.0;
+const SETTINGS_IMPACT_STACKED_ROW_HEIGHT: f32 = 110.0;
+pub(crate) const PERFORMANCE_FILTER_COMMAND: &str = "settings.performance_filter.toggle";
 const DEFAULT_MODAL_RECT: UiRect = UiRect::new(48.0, 48.0, 1080.0, 720.0);
 
 pub fn build_settings_surface(
@@ -58,6 +64,7 @@ pub fn build_settings_surface(
         None,
         &[],
         "",
+        false,
         false,
     )
 }
@@ -80,6 +87,7 @@ pub fn build_settings_surface_with_api_keys(
         revealed_api_keys,
         "",
         false,
+        false,
     )
 }
 
@@ -101,6 +109,7 @@ pub fn build_settings_surface_with_state(
         &[],
         "",
         false,
+        false,
     )
 }
 
@@ -114,6 +123,7 @@ pub(crate) fn build_settings_surface_with_state_and_api_keys(
     revealed_api_keys: &[AiProvider],
     model_filter: &str,
     draft_dirty: bool,
+    performance_only: bool,
 ) -> UiSurface {
     let tokens = palette.tokens();
     let root = UiNode::new("settings.root", UiNodeKind::Root)
@@ -147,8 +157,15 @@ pub(crate) fn build_settings_surface_with_state_and_api_keys(
         revealed_api_keys,
         model_filter,
         draft_dirty,
+        performance_only,
     );
-    apply_search_filter(&mut modal_node, search_query, settings.language, palette);
+    apply_filters(
+        &mut modal_node,
+        search_query,
+        performance_only,
+        settings.language,
+        palette,
+    );
     let root = root.with_child(modal_node);
 
     let mut surface = UiSurface::new("editor.engine-settings", palette, root);
@@ -156,17 +173,19 @@ pub(crate) fn build_settings_surface_with_state_and_api_keys(
     surface
 }
 
-/// Hides rows that do not match the active search and removes empty groups.
-/// Matching happens against the same localized copy the user sees, so it
-/// follows the current language automatically.
-fn apply_search_filter(
+/// Hides rows that do not match the active search or the performance filter
+/// and removes empty groups. Search matching happens against the same
+/// localized copy the user sees, so it follows the current language
+/// automatically.
+fn apply_filters(
     modal: &mut UiNode,
     query: &str,
+    performance_only: bool,
     language: Language,
     palette: StudioUiPalette,
 ) {
     let query = query.trim().to_lowercase();
-    if query.is_empty() {
+    if query.is_empty() && !performance_only {
         return;
     }
     let Some(scroll) = modal.find_mut("settings.workspace.scroll") else {
@@ -175,28 +194,52 @@ fn apply_search_filter(
     let Some(card) = scroll.children.first_mut() else {
         return;
     };
-    let visible = filter_settings_rows(card, &query, language);
+    let tokens = palette.tokens();
+    let no_results_key = if query.is_empty() {
+        "settings.impact.no_results"
+    } else {
+        "settings.no_results"
+    };
+    // Sections such as AI or Scripting contain custom cards, not only rows.
+    // Replace their whole body with a clean empty state instead of leaving
+    // headings and controls behind when the performance filter is active.
+    if performance_only && impact::summarize(card).performance == 0 {
+        card.children.clear();
+        card.children
+            .push(no_results_node(tokens.text_muted, no_results_key));
+        return;
+    }
+    let visible = filter_settings_rows(card, &query, performance_only, language);
     hide_empty_groups(card);
     if visible == 0 {
-        let tokens = palette.tokens();
-        card.children.push(
-            UiNode::new("settings.no-results", UiNodeKind::Label)
-                .with_text_key("settings.no_results")
-                .with_text_style(UiTextStyle::body(tokens.text_muted))
-                .with_layout(UiLayout::fixed(0.0, 40.0)),
-        );
+        card.children
+            .push(no_results_node(tokens.text_muted, no_results_key));
     }
 }
 
-fn filter_settings_rows(node: &mut UiNode, query: &str, language: Language) -> usize {
+fn no_results_node(color: [u8; 4], text_key: &str) -> UiNode {
+    UiNode::new("settings.no-results", UiNodeKind::Label)
+        .with_text_key(text_key)
+        .with_text_style(UiTextStyle::body(color))
+        .with_layout(UiLayout::fixed(0.0, 40.0))
+}
+
+fn filter_settings_rows(
+    node: &mut UiNode,
+    query: &str,
+    performance_only: bool,
+    language: Language,
+) -> usize {
     if node.classes.iter().any(|class| class == "settings-row") {
-        let matched = node_matches_query(node, query, language);
+        let matches_query = query.is_empty() || node_matches_query(node, query, language);
+        let matches_performance = !performance_only || impact::row_has_performance(node);
+        let matched = matches_query && matches_performance;
         node.hidden = !matched;
         return usize::from(matched);
     }
     let mut visible = 0;
     for child in &mut node.children {
-        visible += filter_settings_rows(child, query, language);
+        visible += filter_settings_rows(child, query, performance_only, language);
     }
     visible
 }
@@ -259,6 +302,7 @@ fn modal(
     revealed_api_keys: &[AiProvider],
     model_filter: &str,
     draft_dirty: bool,
+    performance_only: bool,
 ) -> UiNode {
     let tokens = palette.tokens();
     UiNode::new("settings.modal", UiNodeKind::FloatingPanel)
@@ -297,6 +341,7 @@ fn modal(
                     open_select,
                     revealed_api_keys,
                     model_filter,
+                    performance_only,
                 )),
         )
         .with_child(modal_footer(palette, draft_dirty))
@@ -310,53 +355,27 @@ fn workspace(
     open_select: Option<&str>,
     revealed_api_keys: &[AiProvider],
     model_filter: &str,
+    performance_only: bool,
 ) -> UiNode {
-    let tokens = palette.tokens();
+    let content = section_content(
+        palette,
+        settings,
+        section,
+        open_select,
+        revealed_api_keys,
+        model_filter,
+    );
+    let summary = impact::summarize(&content);
     UiNode::new("settings.workspace", UiNodeKind::Panel)
         .with_class("settings-workspace")
         .with_layout(UiLayout::fill(UiFlow::Column))
-        .with_child(
-            UiNode::new("settings.workspace.header", UiNodeKind::Toolbar)
-                .with_layout(UiLayout {
-                    flow: UiFlow::Column,
-                    align_items: UiAlign::Center,
-                    gap: 0.0,
-                    responsive: vec![raf_ui::UiResponsiveRule {
-                        max_width: SETTINGS_WORKSPACE_BREAKPOINT,
-                        flow: Some(UiFlow::Column),
-                        basis: Some([0.0, 76.0]),
-                        padding: Some(UiSpacing::xy(0.0, 12.0)),
-                        gap: Some(0.0),
-                        compact: Some(UiCompactMode::Stack),
-                        grid_columns: None,
-                    }],
-                    ..UiLayout::fixed(0.0, 76.0).with_width_mode(UiSizeMode::Fill)
-                })
-                .with_child(
-                    UiNode::new("settings.workspace.header-content", UiNodeKind::Panel)
-                        .with_layout(UiLayout {
-                            flow: UiFlow::Column,
-                            gap: 3.0,
-                            padding: UiSpacing::xy(0.0, 15.0),
-                            max_size: [SETTINGS_CONTENT_MAX_WIDTH, 0.0],
-                            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
-                        })
-                        .with_style(UiStyle::transparent())
-                        .with_child(
-                            UiNode::new("settings.workspace.title", UiNodeKind::Label)
-                                .with_text_key(section.key())
-                                .with_text_style(UiTextStyle::panel_title(tokens.text))
-                                .with_layout(UiLayout::fixed(0.0, 22.0))
-                                .with_text_overflow(UiTextOverflow::Ellipsis),
-                        )
-                        .with_child(
-                            UiNode::new("settings.workspace.help", UiNodeKind::Label)
-                                .with_text_key(section.help_key())
-                                .with_text_style(UiTextStyle::body(tokens.text_muted))
-                                .with_layout(UiLayout::fixed(0.0, 18.0)),
-                        ),
-                ),
-        )
+        .with_child(workspace_header(
+            palette,
+            settings.language,
+            section,
+            summary,
+            performance_only,
+        ))
         .with_child(
             UiNode::scroll_view("settings.workspace.scroll", UiScrollAxis::Vertical)
                 .with_layout(UiLayout {
@@ -376,13 +395,73 @@ fn workspace(
                     }],
                     ..UiLayout::fill(UiFlow::Column)
                 })
-                .with_child(section_content(
-                    palette,
-                    settings,
-                    section,
-                    open_select,
-                    revealed_api_keys,
-                    model_filter,
-                )),
+                .with_child(content),
         )
+}
+
+fn workspace_header(
+    palette: StudioUiPalette,
+    language: Language,
+    section: SettingsSection,
+    summary: impact::ImpactSummary,
+    performance_only: bool,
+) -> UiNode {
+    let tokens = palette.tokens();
+    let has_impact_rows = summary.performance > 0;
+    let show_filter = has_impact_rows || performance_only;
+    let mut copy = UiNode::new("settings.workspace.header-copy", UiNodeKind::Panel)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            grow: 1.0,
+            gap: 3.0,
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        })
+        .with_style(UiStyle::transparent())
+        .with_child(
+            UiNode::new("settings.workspace.title", UiNodeKind::Label)
+                .with_text_key(section.key())
+                .with_text_style(UiTextStyle::panel_title(tokens.text))
+                .with_layout(UiLayout::fixed(0.0, 22.0))
+                .with_text_overflow(UiTextOverflow::Ellipsis),
+        )
+        .with_child(
+            UiNode::new("settings.workspace.help", UiNodeKind::Label)
+                .with_text_key(section.help_key())
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fixed(0.0, 18.0)),
+        );
+    if has_impact_rows {
+        copy = copy.with_child(impact::summary_label(palette, summary, language));
+    }
+    let mut content = UiNode::new("settings.workspace.header-content", UiNodeKind::Panel)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 14.0,
+            padding: UiSpacing::xy(15.0, 15.0),
+            max_size: [SETTINGS_CONTENT_MAX_WIDTH, 0.0],
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        })
+        .with_style(UiStyle::transparent())
+        .with_child(copy);
+    if show_filter {
+        content = content.with_child(impact::performance_filter_button(palette, performance_only));
+    }
+    UiNode::new("settings.workspace.header", UiNodeKind::Toolbar)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            align_items: UiAlign::Center,
+            gap: 0.0,
+            responsive: vec![raf_ui::UiResponsiveRule {
+                max_width: SETTINGS_WORKSPACE_BREAKPOINT,
+                flow: Some(UiFlow::Column),
+                basis: Some([0.0, 92.0]),
+                padding: Some(UiSpacing::xy(0.0, 12.0)),
+                gap: Some(0.0),
+                compact: Some(UiCompactMode::Stack),
+                grid_columns: None,
+            }],
+            ..UiLayout::fixed(0.0, 92.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(content)
 }

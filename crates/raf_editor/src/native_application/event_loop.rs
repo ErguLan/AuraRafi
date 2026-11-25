@@ -27,7 +27,11 @@ pub fn run_native() -> Result<(), String> {
     let wakeup = event_loop.create_proxy();
     application.event_loop_proxy = Some(wakeup.clone());
     #[cfg(windows)]
-    { application.accessibility = Some(crate::native_accessibility::NativeAccessibility::new(wakeup.clone())); }
+    {
+        application.accessibility = Some(crate::native_accessibility::NativeAccessibility::new(
+            wakeup.clone(),
+        ));
+    }
     application.attached_host.set_wakeup(wakeup);
     event_loop
         .run_app(&mut application)
@@ -300,8 +304,11 @@ impl NativeEditorApplication {
             };
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
-        if self.agents.has_lab_work() || self.electronics_editor.as_ref()
-            .is_some_and(|editor| editor.lab.pending() || editor.lab.dc_requested)
+        if self.agents.has_lab_work()
+            || self
+                .electronics_editor
+                .as_ref()
+                .is_some_and(|editor| editor.lab.pending() || editor.lab.dc_requested)
         {
             let wake = Instant::now() + Duration::from_millis(50);
             let deadline = match event_loop.control_flow() {
@@ -334,7 +341,6 @@ impl NativeEditorApplication {
         }
     }
 }
-
 
 impl ApplicationHandler for NativeEditorApplication {
     fn device_event(

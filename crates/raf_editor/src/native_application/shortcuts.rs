@@ -5,7 +5,10 @@ use raf_core::project::ProjectType;
 /// Dispatch CAD button edges before later motion changes their location and
 /// command chords before Control is released. Presentation still waits for
 /// its frame permit after dispatching input.
-pub(super) fn electronics_input_edge_pending(project_type: Option<ProjectType>, input: &raf_core::InputSnapshot) -> bool {
+pub(super) fn electronics_input_edge_pending(
+    project_type: Option<ProjectType>,
+    input: &raf_core::InputSnapshot,
+) -> bool {
     project_type == Some(ProjectType::Electronics)
         && input.window_focused
         && (!input.pointer_pressed_buttons.is_empty()

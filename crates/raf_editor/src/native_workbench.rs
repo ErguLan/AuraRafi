@@ -45,16 +45,20 @@ use crate::electronics_minimap;
 use crate::native_game_runtime::RuntimeNotice;
 use crate::panels::ai_chat::{AgentAction, AgentPanel, AgentReadiness, SharedAgentPanel};
 use crate::panels::assets_surface::{
-    asset_absolute_path, asset_rows_with_builtins, asset_visible_range,
-    build_assets_backdrop_surface, build_assets_context_menu_surface,
-    build_assets_create_menu_surface, build_assets_delete_modal_surface,
-    build_assets_file_popover_surface, build_assets_open_modal_surface,
+    asset_absolute_path, asset_grid_viewport_width, asset_rows_with_builtins,
+    asset_visible_range_for_width, build_assets_backdrop_surface,
+    build_assets_context_menu_surface, build_assets_create_menu_surface,
+    build_assets_delete_modal_surface, build_assets_file_popover_surface,
+    build_assets_import_backdrop_surface, build_assets_import_modal_surface,
+    build_assets_open_modal_surface, build_assets_particle_popover_surface,
     build_assets_primitive_popover_surface, build_assets_rename_modal_surface,
-    build_assets_script_popover_surface, build_assets_surface, format_row_name, AssetFilter,
-    AssetsMotion, AssetsOperation, AssetsStatus, AssetsSurfaceParams,
-    ASSETS_CONTEXT_MENU_BUILTIN_HEIGHT, ASSETS_CONTEXT_MENU_HEIGHT, ASSETS_CREATE_MENU_HEIGHT,
-    ASSETS_DELETE_MODAL_HEIGHT, ASSETS_FILE_POPOVER_HEIGHT, ASSETS_MENU_WIDTH, ASSETS_MODAL_WIDTH,
-    ASSETS_OPEN_MODAL_HEIGHT, ASSETS_POPOVER_WIDTH, ASSETS_PRIMITIVE_POPOVER_HEIGHT,
+    build_assets_script_popover_surface, build_assets_surface, build_assets_surface_with_width,
+    format_row_name, AssetFilter, AssetsImportModalState, AssetsMotion, AssetsOperation,
+    AssetsStatus, AssetsSurfaceParams, ASSETS_CONTEXT_MENU_BUILTIN_HEIGHT,
+    ASSETS_CONTEXT_MENU_HEIGHT, ASSETS_CREATE_MENU_HEIGHT, ASSETS_DELETE_MODAL_HEIGHT,
+    ASSETS_FILE_POPOVER_HEIGHT, ASSETS_IMPORT_MODAL_WIDTH, ASSETS_IMPORT_NAME_ID,
+    ASSETS_MENU_WIDTH, ASSETS_MODAL_WIDTH, ASSETS_OPEN_MODAL_HEIGHT,
+    ASSETS_PARTICLE_POPOVER_HEIGHT, ASSETS_POPOVER_WIDTH, ASSETS_PRIMITIVE_POPOVER_HEIGHT,
     ASSETS_RENAME_MODAL_HEIGHT, ASSETS_SCRIPT_POPOVER_HEIGHT, ASSET_CARD_MIN_VIEWPORT,
     ASSET_SELECTION_BAR_HEIGHT, ASSET_TOOLBAR_HEIGHT,
 };
@@ -157,6 +161,29 @@ fn next_agent_scroll_projection(current: f32, next: f32) -> Option<f32> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct AssetsImportHostState {
+    pub path: Option<std::path::PathBuf>,
+    pub file_name: Option<String>,
+    pub file_size: Option<u64>,
+    pub options: crate::panels::assets_surface::AssetsImportOptions,
+    pub phase: crate::panels::assets_surface::AssetsImportPhase,
+    pub error: Option<String>,
+}
+
+impl Default for AssetsImportHostState {
+    fn default() -> Self {
+        Self {
+            path: None,
+            file_name: None,
+            file_size: None,
+            options: Default::default(),
+            phase: Default::default(),
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum NativeWorkbenchIntent {
     Window(UiWindowCommand),
     OpenSettings {
@@ -180,6 +207,20 @@ pub enum NativeWorkbenchIntent {
     ProjectSettingCommand(String),
     AgentSettingsChanged(EngineSettings),
     OpenProjectFolder,
+    ImportAssetFile,
+    /// A continuous value gesture owns one undo entry until it ends.
+    EnvironmentGesture {
+        active: bool,
+    },
+    /// Silent, already validated world-lighting patch from a continuous UI
+    /// control. Keeps slider and dial gestures out of the Console transcript.
+    LightingPatch {
+        patch: serde_json::Map<String, serde_json::Value>,
+    },
+    /// Replace the world environment with a fully validated preset.
+    ReplaceEnvironment {
+        settings: raf_core::environment::EnvironmentSettings,
+    },
     Viewport(ViewportToolbarAction),
     Command(String),
     InspectorCommit {
@@ -201,6 +242,13 @@ struct WorkbenchResizeState {
     kind: WorkbenchResizeKind,
     origin_pointer: [f32; 2],
     origin_value: f32,
+}
+
+#[derive(Debug, Clone)]
+struct LightingScrubState {
+    path: String,
+    origin_pointer_x: f32,
+    start_value: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +290,8 @@ pub struct NativeGameWorkbench {
     project_numeric_edits: raf_ui::numeric::UiNumericEditBank,
     project_numeric_scope: Option<uuid::Uuid>,
     project_catalog: ProjectCatalog,
+    pub(crate) assets_import: Option<AssetsImportHostState>,
+    audio_preview: raf_player::audio::RuntimeAudio,
     last_catalog_revision: u64,
     assets_surface: AssetsSurfaceHost,
     animations: animations::AnimationPanel,
@@ -271,6 +321,12 @@ pub struct NativeGameWorkbench {
     lighting_section: String,
     lighting_preview_neutral: bool,
     lighting_error: bool,
+    lighting_color_editor: Option<String>,
+    lighting_eyedropper: Option<String>,
+    lighting_recent_colors: Vec<[u8; 3]>,
+    lighting_text_gesture: Option<(String, String)>,
+    lighting_scrub: Option<LightingScrubState>,
+    lighting_color_sample: Option<(String, [u8; 3])>,
     electronics_navigator_tab: String,
     electronics_library_query: String,
     electronics_workspace: electronics_layout::ElectronicsWorkspaceState,
@@ -717,6 +773,76 @@ impl NativeGameWorkbench {
             || self.bottom_dock.resize().is_some()
             || self.panel_resize.is_some()
             || !self.agent_motion.is_settled()
+    }
+
+    pub fn open_assets_import(&mut self, path: Option<std::path::PathBuf>) {
+        let mut state = AssetsImportHostState::default();
+        if let Some(path) = path {
+            state.file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string);
+            state.file_size = std::fs::metadata(&path).ok().map(|meta| meta.len());
+            state.options.name = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Imported Asset")
+                .to_string();
+            state.path = Some(path);
+        }
+        self.assets_import = Some(state);
+        self.host
+            .session_mut()
+            .interaction
+            .focus
+            .request_focus(ASSETS_IMPORT_NAME_ID);
+        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+    }
+
+    pub fn close_assets_import(&mut self) {
+        self.assets_import = None;
+        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+    }
+
+    pub fn confirm_assets_import(&mut self) -> Result<(), String> {
+        if let Some(state) = self.assets_import.as_mut() {
+            let typed = self
+                .host
+                .session()
+                .interaction
+                .controls
+                .text(ASSETS_IMPORT_NAME_ID)
+                .trim()
+                .to_string();
+            if !typed.is_empty() {
+                state.options.name = typed;
+            }
+        }
+        let Some(state) = self.assets_import.as_ref() else {
+            return Ok(());
+        };
+        let Some(path) = state.path.clone() else {
+            return Err("Choose a file first.".to_string());
+        };
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if matches!(extension.as_str(), "glb" | "gltf") {
+            let root = self
+                .assets_project_root
+                .as_ref()
+                .ok_or_else(|| "Open a project before importing a model.".to_string())?;
+            raf_assets::importer::import_model_package(&path, &root.join("assets"))
+                .map_err(|error| error.to_string())?;
+            self.project_catalog.refresh();
+        } else {
+            self.project_catalog.import_external_files(vec![path]);
+        }
+        self.assets_import = None;
+        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        Ok(())
     }
 
     /// Returns the last immutable asset snapshot for the attached Agent

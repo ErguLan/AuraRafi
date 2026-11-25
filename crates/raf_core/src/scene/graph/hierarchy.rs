@@ -236,6 +236,23 @@ impl SceneGraph {
         self.nodes[id.0].parent = None;
         self.nodes[id.0].name = String::new();
         self.nodes[id.0].is_folder = false;
+        self.nodes[id.0].editable_mesh = None;
+        self.nodes[id.0].linked_assembly = None;
+        self.nodes[id.0].spawn_marker = None;
+        self.nodes[id.0].mesh_asset = None;
+        self.nodes[id.0].skin = None;
+        self.nodes[id.0].animation = None;
+        self.nodes[id.0].animation_asset = None;
+        self.nodes[id.0].game_camera = None;
+        self.nodes[id.0].light = None;
+        self.nodes[id.0].audio_source = Default::default();
+        self.nodes[id.0].collider = Default::default();
+        self.nodes[id.0].rigid_body = Default::default();
+        self.nodes[id.0].character_controller = None;
+        self.nodes[id.0].physics_joints.clear();
+        self.nodes[id.0].scripts.clear();
+        self.nodes[id.0].variables.clear();
+        self.nodes[id.0].behavior_parameters.clear();
         true
     }
 

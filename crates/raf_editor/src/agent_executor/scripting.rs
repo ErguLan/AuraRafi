@@ -21,7 +21,11 @@ pub(super) fn execute(
 ) -> Option<CommandOutput> {
     if command.name.starts_with("behavior.") || command.name.starts_with("prefab.") {
         let mut context = ScriptCommandContext { scene, assets_root };
-        Some(crate::commands::behavior::execute(command, &mut context, false))
+        Some(crate::commands::behavior::execute(
+            command,
+            &mut context,
+            false,
+        ))
     } else if command.name.starts_with("script.") {
         let mut context = ScriptCommandContext { scene, assets_root };
         Some(script::execute(&command.name, command, &mut context))
@@ -41,7 +45,11 @@ pub(super) fn preview(
             scene: &mut scene,
             assets_root,
         };
-        return Some(crate::commands::behavior::execute(command, &mut context, true));
+        return Some(crate::commands::behavior::execute(
+            command,
+            &mut context,
+            true,
+        ));
     }
     if command.name == "script.write" {
         return Some(crate::commands::script::preview_write(command));
@@ -55,28 +63,31 @@ pub(super) fn add_game_scripting_tools(
     language: Language,
     mode: AgentMode,
 ) {
-                for name in [
-                    "script.create",
-                    "script.write",
-                    "script.attach",
-                    "script.detach",
-                    "script.validate",
-                    "script.run",
-                    "behavior.attach",
-                    "behavior.detach",
-                    "behavior.parameter",
-                    "prefab.capture",
-                    "prefab.instantiate",
-                ] {
-                    if let Some(command) = catalog.find(name) {
-                        let kind = if matches!(name, "script.validate" | "script.run") {
-                            AgentToolKind::Read
-                        } else {
-                            AgentToolKind::Mutation
-                        };
-                        if kind == AgentToolKind::Read || mode != AgentMode::Inspect {
-                            pack.push_catalog(command, language, kind);
-                        }
-                    }
-                }
+    for name in [
+        "script.create",
+        "script.write",
+        "script.attach",
+        "script.detach",
+        "script.validate",
+        "script.run",
+        "behavior.attach",
+        "behavior.detach",
+        "behavior.parameter",
+        "prefab.capture",
+        "prefab.instantiate",
+        "assembly.revert",
+        "assembly.update",
+        "assembly.make_unique",
+    ] {
+        if let Some(command) = catalog.find(name) {
+            let kind = if matches!(name, "script.validate" | "script.run") {
+                AgentToolKind::Read
+            } else {
+                AgentToolKind::Mutation
+            };
+            if kind == AgentToolKind::Read || mode != AgentMode::Inspect {
+                pack.push_catalog(command, language, kind);
+            }
+        }
+    }
 }

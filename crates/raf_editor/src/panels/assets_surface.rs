@@ -3,11 +3,22 @@
 //! The panel is declarative only: it renders rows, toolbars and overlay
 //! documents from [`AssetsSurfaceParams`] and emits commands. Filesystem work,
 //! focus and transient state live in the host and in the application boundary.
+//!
+//! Host integration points (kept outside this panel):
+//! - `assets.import-open` opens the import modal and focuses `assets.import.name`.
+//! - `hierarchy.create-light:point|spot` creates the virtual light rows.
+//! - Grid virtualization should call [`asset_visible_range_for_width`] with
+//!   `asset_grid_viewport_width(content_rect.width)` and then
+//!   [`build_assets_surface_with_width`] with the same value, so spacers and
+//!   the materialized window agree. The legacy [`build_assets_surface`] keeps
+//!   the previous host call working with [`ASSET_GRID_FALLBACK_WIDTH`].
 
 #[path = "assets_surface/catalog.rs"]
 mod catalog;
 #[path = "assets_surface/create.rs"]
 mod create;
+#[path = "assets_surface/import_modal.rs"]
+mod import_modal;
 #[path = "assets_surface/menus.rs"]
 mod menus;
 #[path = "assets_surface/modals.rs"]
@@ -20,15 +31,22 @@ mod search;
 #[path = "assets_surface/tests.rs"]
 mod tests;
 
-pub use catalog::{
-    asset_absolute_path, asset_display_name, asset_file_name, asset_rows_with_builtins,
-    asset_visible_range, format_row_name, is_builtin_asset_row, visible_asset_rows,
-    BUILTIN_ASSET_ROWS,
-};
 pub(crate) use catalog::asset_scroll_projection_changed;
+pub use catalog::{
+    asset_absolute_path, asset_display_name, asset_file_name, asset_grid_columns,
+    asset_grid_row_count, asset_grid_row_range, asset_rows_with_builtins, asset_visible_range,
+    asset_visible_range_for_width, builtin_asset_command, format_row_name, is_builtin_asset_row,
+    is_builtin_light_row, primitive_card_name, visible_asset_rows, BUILTIN_ASSET_ROWS,
+    BUILTIN_LIGHT_ROWS,
+};
 pub use create::{
     build_assets_create_menu_surface, build_assets_file_popover_surface,
-    build_assets_primitive_popover_surface, build_assets_script_popover_surface,
+    build_assets_particle_popover_surface, build_assets_primitive_popover_surface,
+    build_assets_script_popover_surface,
+};
+pub use import_modal::{
+    build_assets_import_backdrop_surface, build_assets_import_modal_surface,
+    AssetsImportModalState, AssetsImportOptions, AssetsImportPhase,
 };
 pub use menus::{
     assets_overlay_style_sheet, build_assets_backdrop_surface, build_assets_context_menu_surface,
@@ -46,8 +64,8 @@ use raf_render::api_graphic_basic::ui_surface::{
 use crate::panels::editor_bottom_dock_styles::bottom_style_sheet;
 
 use self::catalog::{
-    asset_card, asset_status_strip, asset_toolbar, asset_virtual_spacer_height,
-    selection_action_bar, spacer,
+    asset_card, asset_status_strip, asset_toolbar, asset_virtual_bottom_spacer_height,
+    asset_virtual_top_spacer_height, selection_action_bar, spacer,
 };
 use self::preview::{append_asset_actions, decorate_asset_card, find_node_mut};
 use self::search::{asset_sidebar, empty_state};
@@ -234,9 +252,17 @@ const ASSET_CARD_HEIGHT: f32 = 164.0;
 const ASSET_CARD_GAP: f32 = 6.0;
 const ASSET_LIST_ROW_HEIGHT: f32 = 34.0;
 const ASSET_LIST_ROW_GAP: f32 = 2.0;
-const ASSET_SIDEBAR_WIDTH: f32 = 184.0;
+/// Width of the category sidebar. The grid viewport is the remaining width.
+pub const ASSET_SIDEBAR_WIDTH: f32 = 184.0;
 pub const ASSET_TOOLBAR_HEIGHT: f32 = 34.0;
 pub const ASSET_SELECTION_BAR_HEIGHT: f32 = 34.0;
+/// Horizontal padding of the grid scroll viewport. Column math subtracts it.
+pub const ASSET_GRID_PADDING_X: f32 = 12.0;
+/// Grid viewport width assumed by the legacy, host-compatible entry points.
+/// Hosts should migrate to the `*_for_width` / `*_with_width` pair and pass
+/// [`asset_grid_viewport_width`] of the real Assets content width. The fallback
+/// keeps current callers coherent.
+pub const ASSET_GRID_FALLBACK_WIDTH: f32 = 1280.0;
 /// Smallest grid viewport the virtualization will trust. A very short panel
 /// keeps one full screen of rows instead of collapsing to a sliver.
 pub const ASSET_CARD_MIN_VIEWPORT: f32 = 96.0;
@@ -245,11 +271,12 @@ pub const ASSET_CARD_MIN_VIEWPORT: f32 = 96.0;
 /// bounds: the host wrapper clips, so a too small rect would cut a menu while
 /// an extra few pixels only show transparent padding.
 pub const ASSETS_MENU_WIDTH: f32 = 214.0;
-pub const ASSETS_CREATE_MENU_HEIGHT: f32 = 188.0;
+pub const ASSETS_CREATE_MENU_HEIGHT: f32 = 220.0;
 pub const ASSETS_CONTEXT_MENU_HEIGHT: f32 = 256.0;
 pub const ASSETS_CONTEXT_MENU_BUILTIN_HEIGHT: f32 = 76.0;
 pub const ASSETS_POPOVER_WIDTH: f32 = 300.0;
 pub const ASSETS_SCRIPT_POPOVER_HEIGHT: f32 = 164.0;
+pub const ASSETS_PARTICLE_POPOVER_HEIGHT: f32 = 208.0;
 pub const ASSETS_FILE_POPOVER_HEIGHT: f32 = 112.0;
 pub const ASSETS_PRIMITIVE_POPOVER_HEIGHT: f32 = 148.0;
 pub const ASSETS_MODAL_WIDTH: f32 = 420.0;
@@ -258,13 +285,35 @@ pub const ASSETS_MODAL_TEXT_WIDTH: f32 = 232.0;
 pub const ASSETS_OPEN_MODAL_HEIGHT: f32 = 400.0;
 pub const ASSETS_RENAME_MODAL_HEIGHT: f32 = 210.0;
 pub const ASSETS_DELETE_MODAL_HEIGHT: f32 = 168.0;
+/// Declarative import modal. Width is fixed; height follows its content.
+pub const ASSETS_IMPORT_MODAL_WIDTH: f32 = 560.0;
+/// Host focus target after `assets.import-open` (initial focus in the name).
+pub const ASSETS_IMPORT_NAME_ID: &str = "assets.import.name";
 
 /// Row pitch used by virtualization. Grid cards are much taller than list rows,
 /// so the estimate must follow the active view mode.
 const ASSET_CARD_PITCH: f32 = ASSET_CARD_HEIGHT + ASSET_CARD_GAP;
 const ASSET_LIST_PITCH: f32 = ASSET_LIST_ROW_HEIGHT + ASSET_LIST_ROW_GAP;
 
+/// Converts a whole Assets panel width into the grid viewport width used by
+/// [`asset_visible_range_for_width`] and [`build_assets_surface_with_width`].
+pub fn asset_grid_viewport_width(panel_width: f32) -> f32 {
+    if !panel_width.is_finite() {
+        return ASSET_GRID_FALLBACK_WIDTH;
+    }
+    (panel_width - ASSET_SIDEBAR_WIDTH).max(0.0)
+}
+
 pub fn build_assets_surface(params: AssetsSurfaceParams<'_>) -> UiSurface {
+    build_assets_surface_with_width(params, ASSET_GRID_FALLBACK_WIDTH)
+}
+
+/// Builds the panel using the real grid viewport width for row virtualization
+/// spacers. Pair it with [`asset_visible_range_for_width`] using the same width.
+pub fn build_assets_surface_with_width(
+    params: AssetsSurfaceParams<'_>,
+    grid_width: f32,
+) -> UiSurface {
     let AssetsSurfaceParams {
         palette,
         rows,
@@ -312,7 +361,7 @@ pub fn build_assets_surface(params: AssetsSurfaceParams<'_>) -> UiSurface {
             } else {
                 ASSET_LIST_ROW_GAP
             },
-            padding: UiSpacing::xy(12.0, 12.0),
+            padding: UiSpacing::xy(ASSET_GRID_PADDING_X, 12.0),
             overflow: if view == AssetViewMode::Grid {
                 UiOverflow::ScrollY
             } else {
@@ -328,7 +377,7 @@ pub fn build_assets_surface(params: AssetsSurfaceParams<'_>) -> UiSurface {
     if start > 0 {
         grid = grid.with_child(spacer(
             "assets.top-spacer",
-            asset_virtual_spacer_height(start, view),
+            asset_virtual_top_spacer_height(start, grid_width, view),
         ));
     }
     for (source_index, row) in filtered_rows
@@ -357,7 +406,7 @@ pub fn build_assets_surface(params: AssetsSurfaceParams<'_>) -> UiSurface {
     if end < total_rows {
         grid = grid.with_child(spacer(
             "assets.bottom-spacer",
-            asset_virtual_spacer_height(total_rows - end, view),
+            asset_virtual_bottom_spacer_height(total_rows - end, grid_width, view),
         ));
     }
     if filtered_rows.is_empty() {

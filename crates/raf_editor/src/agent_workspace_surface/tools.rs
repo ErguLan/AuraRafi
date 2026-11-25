@@ -1,7 +1,7 @@
 //! Tool-result projections: evidence artifacts and the world plan panel.
 
-use super::*;
 use super::layout::label;
+use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum EvidenceTab {
@@ -110,10 +110,7 @@ pub(crate) fn collect_evidence_artifacts(
                 .get("top_down_map")
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
-                || result
-                    .data
-                    .get("mode")
-                    .and_then(serde_json::Value::as_str)
+                || result.data.get("mode").and_then(serde_json::Value::as_str)
                     == Some("top_down_map")
                 || uri.contains("top-down-");
             let contact_sheet = candidate
@@ -138,7 +135,12 @@ pub(crate) fn collect_evidence_artifacts(
             let height = candidate
                 .get("height")
                 .and_then(serde_json::Value::as_u64)
-                .or_else(|| result.data.get("height").and_then(serde_json::Value::as_u64))
+                .or_else(|| {
+                    result
+                        .data
+                        .get("height")
+                        .and_then(serde_json::Value::as_u64)
+                })
                 .unwrap_or(0) as u32;
             let label = candidate
                 .get("label")
@@ -151,9 +153,7 @@ pub(crate) fn collect_evidence_artifacts(
                         .and_then(serde_json::Value::as_str)
                 })
                 .map(str::to_string)
-                .unwrap_or_else(|| {
-                    uri.rsplit('/').next().unwrap_or(&uri).to_string()
-                });
+                .unwrap_or_else(|| uri.rsplit('/').next().unwrap_or(&uri).to_string());
             let mut compare_lines = Vec::new();
             if width > 0 && height > 0 {
                 compare_lines.push(format!("{width} x {height} px"));
@@ -183,13 +183,12 @@ pub(crate) fn collect_evidence_artifacts(
                         .get("overlap_count")
                         .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
-                    compare_lines.push(format!(
-                        "{entities} entities / {colliders} colliders"
-                    ));
+                    compare_lines.push(format!("{entities} entities / {colliders} colliders"));
                     compare_lines.push(format!("Grid {grid:.2} m / {overlaps} overlaps"));
                 }
                 EvidenceKind::Capture => {
-                    if let Some(view) = result.data.get("view").and_then(serde_json::Value::as_str) {
+                    if let Some(view) = result.data.get("view").and_then(serde_json::Value::as_str)
+                    {
                         compare_lines.push(format!("View {view}"));
                     }
                     if let Some(distance) = result
@@ -226,7 +225,6 @@ pub(crate) fn collect_evidence_artifacts(
     artifacts
 }
 
-
 #[derive(Debug, Clone)]
 pub(super) struct WorldPlanSummary {
     id: String,
@@ -260,10 +258,7 @@ impl WorldPanelModel {
         let brief = brief_text
             .as_deref()
             .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
-        let brief_rows = brief
-            .as_ref()
-            .map(world_brief_rows)
-            .unwrap_or_default();
+        let brief_rows = brief.as_ref().map(world_brief_rows).unwrap_or_default();
         let mut plan = None;
         let mut issues = Vec::new();
         let mut seen_issues = std::collections::HashSet::new();
@@ -284,17 +279,16 @@ impl WorldPanelModel {
                 }
             }
             if let Some(verification) = result.verification.as_ref() {
-                if verification.get("status").and_then(serde_json::Value::as_str)
+                if verification
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
                     == Some("failed")
                 {
                     if let Some(failures) = verification
                         .get("failures")
                         .and_then(serde_json::Value::as_array)
                     {
-                        for failure in failures
-                            .iter()
-                            .filter_map(serde_json::Value::as_str)
-                        {
+                        for failure in failures.iter().filter_map(serde_json::Value::as_str) {
                             if seen_issues.insert(failure.to_string()) {
                                 issues.push(failure.to_string());
                             }
@@ -304,8 +298,14 @@ impl WorldPanelModel {
             }
             if plan.is_none() {
                 if let (Some(plan_id), Some(preview)) = (
-                    result.data.get("plan_id").and_then(serde_json::Value::as_str),
-                    result.data.get("preview").and_then(serde_json::Value::as_object),
+                    result
+                        .data
+                        .get("plan_id")
+                        .and_then(serde_json::Value::as_str),
+                    result
+                        .data
+                        .get("preview")
+                        .and_then(serde_json::Value::as_object),
                 ) {
                     plan = Some(WorldPlanSummary {
                         id: plan_id.to_string(),
@@ -349,9 +349,9 @@ impl WorldPanelModel {
         issues.truncate(8);
         Self {
             project_name: project.name.clone(),
-            brief_path: brief_text.as_ref().map(|_| {
-                ".aura_rafi/world/brief.json".to_string()
-            }),
+            brief_path: brief_text
+                .as_ref()
+                .map(|_| ".aura_rafi/world/brief.json".to_string()),
             brief_rows,
             plan,
             issues,
@@ -453,39 +453,35 @@ pub(super) fn world_panel(
     model: &WorldPanelModel,
 ) -> UiNode {
     let tokens = workspace_tokens(palette);
-    let mut root = UiNode::new("agent.workspace.world", UiNodeKind::Panel)
-        .with_layout(UiLayout {
-            flow: UiFlow::Column,
-            gap: 8.0,
-            grow: 1.0,
-            ..UiLayout::fill(UiFlow::Column)
-        });
-    let mut header = UiNode::new(
-        "agent.workspace.world.header",
-        UiNodeKind::Toolbar,
-    )
-    .with_layout(UiLayout {
-        flow: UiFlow::Row,
-        align_items: UiAlign::Center,
+    let mut root = UiNode::new("agent.workspace.world", UiNodeKind::Panel).with_layout(UiLayout {
+        flow: UiFlow::Column,
         gap: 8.0,
-        ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
-    })
-    .with_child(
-        UiNode::new("agent.workspace.world.title", UiNodeKind::Label)
-            .with_text_key("agent_workspace.world")
-            .with_text_style(UiTextStyle::panel_title(tokens.text))
-            .with_layout(UiLayout {
-                grow: 1.0,
-                width_mode: UiSizeMode::Fill,
-                ..UiLayout::fit_content()
-            }),
-    )
-    .with_child(
-        UiNode::new("agent.workspace.world.project", UiNodeKind::Label)
-            .with_text_value(model.project_name.clone())
-            .with_text_style(UiTextStyle::button(tokens.accent_hot))
-            .with_layout(UiLayout::fit_content()),
-    );
+        grow: 1.0,
+        ..UiLayout::fill(UiFlow::Column)
+    });
+    let mut header = UiNode::new("agent.workspace.world.header", UiNodeKind::Toolbar)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 8.0,
+            ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(
+            UiNode::new("agent.workspace.world.title", UiNodeKind::Label)
+                .with_text_key("agent_workspace.world")
+                .with_text_style(UiTextStyle::panel_title(tokens.text))
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    width_mode: UiSizeMode::Fill,
+                    ..UiLayout::fit_content()
+                }),
+        )
+        .with_child(
+            UiNode::new("agent.workspace.world.project", UiNodeKind::Label)
+                .with_text_value(model.project_name.clone())
+                .with_text_style(UiTextStyle::button(tokens.accent_hot))
+                .with_layout(UiLayout::fit_content()),
+        );
     if let Some(revision) = model.saved_revision {
         header = header.with_child(
             UiNode::new("agent.workspace.world.revision", UiNodeKind::Label)
@@ -571,11 +567,7 @@ pub(super) fn world_panel(
         plan_section = plan_section
             .with_child(
                 UiNode::new("agent.workspace.world.plan.id", UiNodeKind::Label)
-                    .with_text_value(format!(
-                        "{} · {}",
-                        plan.mode,
-                        short_world_plan_id(&plan.id)
-                    ))
+                    .with_text_value(format!("{} · {}", plan.mode, short_world_plan_id(&plan.id)))
                     .with_text_style(UiTextStyle::button(tokens.text))
                     .with_layout(UiLayout::fit_content()),
             )
@@ -645,14 +637,16 @@ pub(super) fn world_panel(
         "agent_workspace.world_checkpoints",
         language,
     );
-    checkpoint_section = checkpoint_section
-        .with_child(
-            UiNode::new("agent.workspace.world.checkpoints.journal", UiNodeKind::Label)
-                .with_text_value(model.journal_path.clone())
-                .with_text_style(UiTextStyle::body(tokens.text_muted))
-                .with_text_overflow(UiTextOverflow::Ellipsis)
-                .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
-        );
+    checkpoint_section = checkpoint_section.with_child(
+        UiNode::new(
+            "agent.workspace.world.checkpoints.journal",
+            UiNodeKind::Label,
+        )
+        .with_text_value(model.journal_path.clone())
+        .with_text_style(UiTextStyle::body(tokens.text_muted))
+        .with_text_overflow(UiTextOverflow::Ellipsis)
+        .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
+    );
     if let Some(revision) = model.saved_revision {
         checkpoint_section = checkpoint_section.with_child(
             UiNode::new("agent.workspace.world.checkpoints.saved", UiNodeKind::Label)

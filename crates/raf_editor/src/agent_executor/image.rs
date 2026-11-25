@@ -31,105 +31,99 @@ impl AgentToolExecutor<'_> {
         call_id: &str,
         arguments: &Value,
     ) -> Result<AgentToolResult, String> {
-            let project_root = self.project.as_ref().map(|project| project.root.clone());
-            let mut paths = arguments
-                .get("images")
-                .and_then(Value::as_array)
-                .map(|images| {
-                    images
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if let Some(image) = arguments.get("image").and_then(Value::as_str) {
-                paths.insert(0, image.to_string());
-            }
-            paths.truncate(raf_ai::chat_media::MAX_IMAGES);
-            let mut images = Vec::new();
-            let mut warnings = Vec::new();
-            if let Some(root) = project_root.as_deref() {
-                for path in &paths {
-                    let relative = path.replace('\\', "/");
-                    let safe = !relative.starts_with('/')
-                        && !relative.contains(':')
-                        && relative
-                            .split('/')
-                            .all(|component| !matches!(component, "" | "." | ".."))
-                        && relative.ends_with(".png");
-                    if !safe {
-                        warnings.push(format!("Ignored unsafe image reference: {path}"));
-                        continue;
-                    }
-                    match ::image::image_dimensions(root.join(&relative)) {
-                        Ok((width, height)) => images.push(raf_ai::chat_media::ChatImage {
-                            file: relative,
-                            width,
-                            height,
-                        }),
-                        Err(error) => warnings.push(format!(
-                            "Could not read {path}: {error}"
-                        )),
-                    }
+        let project_root = self.project.as_ref().map(|project| project.root.clone());
+        let mut paths = arguments
+            .get("images")
+            .and_then(Value::as_array)
+            .map(|images| {
+                images
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if let Some(image) = arguments.get("image").and_then(Value::as_str) {
+            paths.insert(0, image.to_string());
+        }
+        paths.truncate(raf_ai::chat_media::MAX_IMAGES);
+        let mut images = Vec::new();
+        let mut warnings = Vec::new();
+        if let Some(root) = project_root.as_deref() {
+            for path in &paths {
+                let relative = path.replace('\\', "/");
+                let safe = !relative.starts_with('/')
+                    && !relative.contains(':')
+                    && relative
+                        .split('/')
+                        .all(|component| !matches!(component, "" | "." | ".."))
+                    && relative.ends_with(".png");
+                if !safe {
+                    warnings.push(format!("Ignored unsafe image reference: {path}"));
+                    continue;
+                }
+                match ::image::image_dimensions(root.join(&relative)) {
+                    Ok((width, height)) => images.push(raf_ai::chat_media::ChatImage {
+                        file: relative,
+                        width,
+                        height,
+                    }),
+                    Err(error) => warnings.push(format!("Could not read {path}: {error}")),
                 }
             }
-            let brief = arguments
-                .get("brief")
-                .cloned()
-                .or_else(|| {
-                    project_root.as_ref().and_then(|root| {
-                        std::fs::read(root.join(".aura_rafi/world/brief.json"))
-                            .ok()
-                            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                    })
+        }
+        let brief = arguments
+            .get("brief")
+            .cloned()
+            .or_else(|| {
+                project_root.as_ref().and_then(|root| {
+                    std::fs::read(root.join(".aura_rafi/world/brief.json"))
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
                 })
-                .unwrap_or(Value::Null);
-            let focus = arguments
-                .get("focus")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            // A dedicated reviewer performs a network call. Start it on a
-            // worker thread and let the Agent runtime poll for the result, so
-            // the editor never freezes while a provider is thinking.
-            if let (Some(reviewer), Some(root)) =
-                (self.vision_reviewer.as_ref(), project_root.as_ref())
-            {
-                let queued = raf_ai::vision_bridge::start_review(
-                    call_id,
-                    reviewer.clone(),
-                    root.clone(),
-                    images.clone(),
-                    brief.clone(),
-                    focus.to_string(),
-                );
-                if queued || raf_ai::vision_bridge::is_review_pending(call_id) {
-                    let mut result = AgentToolResult::success(
-                        "Visual review queued.",
-                        serde_json::json!({
-                            "state": "queued",
-                            "image_count": images.len(),
-                            "model": reviewer.model,
-                            "provider": reviewer.provider_label(),
-                        }),
-                    );
-                    result.revision = Some(self.ledger.revision());
-                    result.verification = Some(serde_json::json!({"status": "pending"}));
-                    return Ok(result);
-                }
-            }
-            let data = raf_ai::vision_bridge::review_images(
-                self.vision_reviewer.as_ref(),
-                project_root.as_deref(),
-                &images,
-                &brief,
-                focus,
+            })
+            .unwrap_or(Value::Null);
+        let focus = arguments.get("focus").and_then(Value::as_str).unwrap_or("");
+        // A dedicated reviewer performs a network call. Start it on a
+        // worker thread and let the Agent runtime poll for the result, so
+        // the editor never freezes while a provider is thinking.
+        if let (Some(reviewer), Some(root)) = (self.vision_reviewer.as_ref(), project_root.as_ref())
+        {
+            let queued = raf_ai::vision_bridge::start_review(
+                call_id,
+                reviewer.clone(),
+                root.clone(),
+                images.clone(),
+                brief.clone(),
+                focus.to_string(),
             );
-            let mut result = visual_review_tool_result(data, self.ledger.revision());
-            if !warnings.is_empty() {
-                result.warnings.splice(0..0, warnings);
+            if queued || raf_ai::vision_bridge::is_review_pending(call_id) {
+                let mut result = AgentToolResult::success(
+                    "Visual review queued.",
+                    serde_json::json!({
+                        "state": "queued",
+                        "image_count": images.len(),
+                        "model": reviewer.model,
+                        "provider": reviewer.provider_label(),
+                    }),
+                );
+                result.revision = Some(self.ledger.revision());
+                result.verification = Some(serde_json::json!({"status": "pending"}));
+                return Ok(result);
             }
-            return Ok(result);
+        }
+        let data = raf_ai::vision_bridge::review_images(
+            self.vision_reviewer.as_ref(),
+            project_root.as_deref(),
+            &images,
+            &brief,
+            focus,
+        );
+        let mut result = visual_review_tool_result(data, self.ledger.revision());
+        if !warnings.is_empty() {
+            result.warnings.splice(0..0, warnings);
+        }
+        return Ok(result);
     }
 }
 

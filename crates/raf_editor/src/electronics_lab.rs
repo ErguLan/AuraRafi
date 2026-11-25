@@ -681,7 +681,9 @@ impl ElectronicsLab {
     }
 
     fn poll_reconnect(&mut self) {
-        let Some(deadline) = self.reconnect else { return };
+        let Some(deadline) = self.reconnect else {
+            return;
+        };
         if Instant::now() < deadline {
             return;
         }
@@ -714,9 +716,8 @@ impl ElectronicsLab {
                             .replace("{attempt}", &self.reconnect_attempts.to_string())
                             .replace("{total}", &RECONNECT_ATTEMPTS.to_string()),
                     );
-                    self.reconnect = Some(
-                        Instant::now() + reconnect_delay(self.reconnect_attempts),
-                    );
+                    self.reconnect =
+                        Some(Instant::now() + reconnect_delay(self.reconnect_attempts));
                 }
             }
         }
@@ -1128,8 +1129,9 @@ mod tests {
 
         assert!(!lab.connected());
         assert!(!lab.scanning());
-        assert!(lab.error.as_deref().is_some_and(|error| {
-            error.contains("Enable hardware access")
-        }));
+        assert!(lab
+            .error
+            .as_deref()
+            .is_some_and(|error| { error.contains("Enable hardware access") }));
     }
 }

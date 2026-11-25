@@ -1,0 +1,234 @@
+{
+  "version": 1,
+  "name": "Smoke",
+  "budget": {
+    "max_particles": 900,
+    "max_sprites": 900
+  },
+  "emitters": [
+    {
+      "name": "puffs",
+      "texture": "particles/textures/smoke_atlas.png",
+      "enabled": true,
+      "max_particles": 650,
+      "rate": 28.0,
+      "burst": 10,
+      "lifetime": [
+        2.6,
+        5.0
+      ],
+      "speed": [
+        0.35,
+        0.9
+      ],
+      "spread": [
+        22.0,
+        32.0
+      ],
+      "direction": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "gravity": [
+        0.06,
+        0.12,
+        0.0
+      ],
+      "drag": 0.55,
+      "size": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.7
+          },
+          {
+            "t": 0.45,
+            "value": 1.8
+          },
+          {
+            "t": 1.0,
+            "value": 3.4
+          }
+        ]
+      },
+      "opacity": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.0
+          },
+          {
+            "t": 0.12,
+            "value": 0.18
+          },
+          {
+            "t": 0.6,
+            "value": 0.1
+          },
+          {
+            "t": 1.0,
+            "value": 0.0
+          }
+        ]
+      },
+      "color": {
+        "keys": [
+          {
+            "t": 0.0,
+            "color": [
+              150,
+              152,
+              158,
+              255
+            ]
+          },
+          {
+            "t": 0.5,
+            "color": [
+              96,
+              98,
+              104,
+              210
+            ]
+          },
+          {
+            "t": 1.0,
+            "color": [
+              58,
+              60,
+              66,
+              0
+            ]
+          }
+        ]
+      },
+      "shape": {
+        "type": "sphere",
+        "radius": 0.32
+      },
+      "flipbook": {
+        "columns": 4,
+        "rows": 4,
+        "fps": 8.0,
+        "start_random": true
+      },
+      "collision": null,
+      "wind_affects_drag": true
+    },
+    {
+      "name": "wisps",
+      "texture": "particles/textures/smoke_atlas.png",
+      "enabled": true,
+      "max_particles": 250,
+      "rate": 10.0,
+      "burst": 4,
+      "lifetime": [
+        3.0,
+        5.5
+      ],
+      "speed": [
+        0.1,
+        0.35
+      ],
+      "spread": [
+        40.0,
+        40.0
+      ],
+      "direction": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "gravity": [
+        0.04,
+        0.1,
+        0.0
+      ],
+      "drag": 0.8,
+      "size": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 1.1
+          },
+          {
+            "t": 0.6,
+            "value": 2.6
+          },
+          {
+            "t": 1.0,
+            "value": 4.2
+          }
+        ]
+      },
+      "opacity": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.0
+          },
+          {
+            "t": 0.15,
+            "value": 0.08
+          },
+          {
+            "t": 0.7,
+            "value": 0.05
+          },
+          {
+            "t": 1.0,
+            "value": 0.0
+          }
+        ]
+      },
+      "color": {
+        "keys": [
+          {
+            "t": 0.0,
+            "color": [
+              130,
+              130,
+              135,
+              255
+            ]
+          },
+          {
+            "t": 0.55,
+            "color": [
+              90,
+              90,
+              95,
+              160
+            ]
+          },
+          {
+            "t": 1.0,
+            "color": [
+              60,
+              60,
+              65,
+              0
+            ]
+          }
+        ]
+      },
+      "shape": {
+        "type": "box",
+        "half_extents": [
+          0.6,
+          0.2,
+          0.6
+        ]
+      },
+      "flipbook": {
+        "columns": 4,
+        "rows": 4,
+        "fps": 6.0,
+        "start_random": true
+      },
+      "collision": null,
+      "wind_affects_drag": true
+    }
+  ]
+}

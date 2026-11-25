@@ -34,8 +34,7 @@ impl NativeElectronicsEditor {
         let size = Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0));
         self.ensure_camera(canvas);
         let local = pointer.and_then(|point| canvas.local_point(point));
-        let minimap_panel = self.minimap_rects(size)
-            .map(|rects| rects.panel);
+        let minimap_panel = self.minimap_rects(size).map(|rects| rects.panel);
         let world = local
             .filter(|point| minimap_panel.map_or(true, |panel| !rect_contains(panel, *point)))
             .map(|point| self.camera.world_from_screen(Vec2::from(point), size));
@@ -58,8 +57,7 @@ impl NativeElectronicsEditor {
         let size = Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0));
         let pointer = input.pointer_position;
         let local = pointer.and_then(|point| canvas.local_point(point));
-        let minimap_panel = self.minimap_rects(size)
-            .map(|rects| rects.panel);
+        let minimap_panel = self.minimap_rects(size).map(|rects| rects.panel);
         let world = local
             .filter(|point| minimap_panel.map_or(true, |panel| !rect_contains(panel, *point)))
             .map(|point| {

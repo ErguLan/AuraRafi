@@ -15,7 +15,8 @@ use raf_ui::{
 };
 
 use crate::panels::electronics_surface::{
-    electronics_class_rule, electronics_focus_rule, electronics_hover_rule, ELECTRONICS_BORDER_WIDTH,
+    electronics_class_rule, electronics_focus_rule, electronics_hover_rule,
+    ELECTRONICS_BORDER_WIDTH,
 };
 
 use super::actions::{

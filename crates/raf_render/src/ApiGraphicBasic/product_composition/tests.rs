@@ -94,13 +94,16 @@ fn packet_sky(frame: &SceneRenderFrame, revision: u64) -> SkyBackdrop {
             _ => None,
         });
     let sky = skies.next().expect("an authored scene must emit a sky");
-    assert!(skies.next().is_none(), "the sky must be emitted exactly once");
+    assert!(
+        skies.next().is_none(),
+        "the sky must be emitted exactly once"
+    );
     sky
 }
 
 fn assert_ambient(uniforms: &FrameUniforms, expected: Vec3) {
-    let fraction = (0.2126 * expected.x + 0.7152 * expected.y + 0.0722 * expected.z)
-        .clamp(0.0, 1.0);
+    let fraction =
+        (0.2126 * expected.x + 0.7152 * expected.y + 0.0722 * expected.z).clamp(0.0, 1.0);
     close(uniforms.environment.ambient, fraction);
     let tint = Vec3::from_array(uniforms.environment.ambient_tint);
     let reconstructed = tint * uniforms.environment.ambient;
@@ -185,9 +188,12 @@ fn scene_commands_keep_painter_order_and_state() {
 fn supported_pipelines_map_and_unsupported_states_keep_their_name() {
     let supported = [
         (BasicPipelineKind::FlatColor, Pipeline::SCENE),
-        (BasicPipelineKind::FlatColorTwoSided, Pipeline::SCENE),
+        (
+            BasicPipelineKind::FlatColorTwoSided,
+            Pipeline::SCENE_TWO_SIDED,
+        ),
         (BasicPipelineKind::PbrLit, Pipeline::LIT),
-        (BasicPipelineKind::PbrLitTwoSided, Pipeline::LIT),
+        (BasicPipelineKind::PbrLitTwoSided, Pipeline::LIT_TWO_SIDED),
         (BasicPipelineKind::XRay, Pipeline::OVERLAY),
         (BasicPipelineKind::UiSurface, Pipeline::OVERLAY),
         (BasicPipelineKind::UiSurfaceOverlay, Pipeline::OVERLAY),
@@ -596,10 +602,11 @@ fn neutral_environment_emits_no_sky_and_keeps_neutral_uniforms() {
     let mut builder = ProductFrameBuilder::default();
     builder.append_scene(&scene, 1).unwrap();
     assert!(
-        !builder.packet().commands.iter().any(|command| matches!(
-            command,
-            Command::DrawSky(_) | Command::SceneBackground(_)
-        )),
+        !builder
+            .packet()
+            .commands
+            .iter()
+            .any(|command| matches!(command, Command::DrawSky(_) | Command::SceneBackground(_))),
         "neutral lighting must not synthesize a sky or scene background"
     );
 
@@ -760,7 +767,10 @@ fn shadow_contract_mapping_follows_enabled_state_and_filter_quality() {
     let mapped = scene_frame_uniforms(&scene_frame)
         .shadows
         .expect("enabled shadows must map");
-    assert_eq!(mapped.light_view_projection, source.geometry.view_projection);
+    assert_eq!(
+        mapped.light_view_projection,
+        source.geometry.view_projection
+    );
     assert_eq!(mapped.resolution, source.geometry.resolution);
     assert_eq!(mapped.depth_key, source.geometry.key);
     close(

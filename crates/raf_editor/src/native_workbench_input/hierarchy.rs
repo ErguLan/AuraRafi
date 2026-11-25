@@ -95,11 +95,13 @@ impl NativeGameWorkbench {
     ) -> bool {
         if let Some(tab) = name.strip_prefix("hierarchy.tab:") {
             self.interface_scene_view();
-            if matches!(
-                tab,
-                "hierarchy" | "assets" | "world" | "lighting" | "bookmarks" | "search"
-            ) {
+            // Only the two real tree modes remain. Removed placeholder tabs
+            // fall back to Scene instead of rendering an empty body.
+            if matches!(tab, "hierarchy" | "lighting") {
                 self.hierarchy_active_tab = tab.to_string();
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            } else {
+                self.hierarchy_active_tab = "hierarchy".to_string();
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             }
             return true;
@@ -110,7 +112,9 @@ impl NativeGameWorkbench {
             return true;
         }
         if name == "hierarchy.search.open" {
-            self.hierarchy_active_tab = "search".to_string();
+            // Search everywhere is a modal, not a hierarchy tab.
+            self.hierarchy_active_tab = "hierarchy".to_string();
+            self.open_search();
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             return true;
         }
@@ -265,10 +269,91 @@ impl NativeGameWorkbench {
             if let Ok(id) = raw_id.parse::<usize>() {
                 if let Some(node) = scene.get(SceneNodeId(id)) {
                     self.hierarchy_renaming = Some((SceneNodeId(id), node.name.clone()));
+                    // The inline control is rebuilt on the next authored frame;
+                    // requesting the control id (not the value key) makes the
+                    // text input immediately own keyboard input.
+                    self.host
+                        .session_mut()
+                        .interaction
+                        .focus
+                        .request_focus(hierarchy_rename_focus_id(SceneNodeId(id)));
                     self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 }
                 return true;
             }
+        }
+        if let Some(raw) = name.strip_prefix("hierarchy.navigate:") {
+            let shift = native_input.snapshot().modifiers.shift;
+            self.navigate_hierarchy(raw, scene, shift, intents);
+            return true;
+        }
+        if name == "hierarchy.box-select.press" {
+            if let Some(pointer) = native_input.snapshot().pointer_position {
+                let additive = native_input.snapshot().modifiers.shift;
+                self.hierarchy_model.press_box_selection(pointer, additive);
+            }
+            return true;
+        }
+        if name == "hierarchy.box-select.start" {
+            if let Some(pointer) = native_input.snapshot().pointer_position {
+                if self.hierarchy_model.start_box_selection(pointer).is_some() {
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                }
+            }
+            return true;
+        }
+        if name == "hierarchy.box-select.move" {
+            if let Some(pointer) = native_input.snapshot().pointer_position {
+                if self.hierarchy_model.update_box_selection(pointer).is_some() {
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                }
+            }
+            return true;
+        }
+        if name == "hierarchy.box-select.end" {
+            if let Some(pointer) = native_input.snapshot().pointer_position {
+                self.hierarchy_model.update_box_selection(pointer);
+            }
+            let selection = self.hierarchy_model.take_box_selection();
+            let Some(selection) = selection.filter(|selection| selection.active) else {
+                return true;
+            };
+            let rect = selection.rect();
+            let rows = self
+                .hierarchy_model
+                .row_ids()
+                .filter(|id| {
+                    self.host
+                        .layout_rect(&format!("hierarchy.row.{}", id.0))
+                        .is_some_and(|row| !row.intersection(rect).is_empty())
+                })
+                .collect::<Vec<_>>();
+            if rows.is_empty() {
+                if !selection.additive {
+                    intents.push(NativeWorkbenchIntent::Command(
+                        "hierarchy.clear-selection".to_string(),
+                    ));
+                }
+            } else {
+                for (index, id) in rows.iter().enumerate() {
+                    // `shift` toggles an already selected row, so an additive
+                    // box keeps existing members instead of deselecting them.
+                    if selection.additive && selected.contains(id) {
+                        continue;
+                    }
+                    let mode = if index == 0 && !selection.additive {
+                        "replace"
+                    } else {
+                        "shift"
+                    };
+                    intents.push(NativeWorkbenchIntent::Command(format!(
+                        "hierarchy.select:{}:{mode}",
+                        id.0
+                    )));
+                }
+            }
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            return true;
         }
         if let Some(raw_id) = name.strip_prefix("hierarchy.select:") {
             if let Ok(id) = raw_id.parse::<usize>() {
@@ -437,6 +522,133 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
+    /// Keyboard tree navigation. Up/down/home/end move the selection over
+    /// selectable rows; left/right collapse/expand the current branch first and
+    /// only move to the parent/first child when the branch is already resolved.
+    fn navigate_hierarchy(
+        &mut self,
+        raw: &str,
+        scene: &SceneGraph,
+        shift: bool,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) {
+        use crate::panels::hierarchy_model::HierarchyNavigation;
+
+        let Some((direction, raw_id)) = raw.split_once(':') else {
+            return;
+        };
+        let Ok(id) = raw_id.parse::<usize>() else {
+            return;
+        };
+        let id = SceneNodeId(id);
+        let target = match direction {
+            "up" => self
+                .hierarchy_model
+                .navigate(Some(id), HierarchyNavigation::Up),
+            "down" => self
+                .hierarchy_model
+                .navigate(Some(id), HierarchyNavigation::Down),
+            "home" => self
+                .hierarchy_model
+                .navigate(Some(id), HierarchyNavigation::Home),
+            "end" => self
+                .hierarchy_model
+                .navigate(Some(id), HierarchyNavigation::End),
+            "left" => {
+                if self.hierarchy_model.row_has_children(id)
+                    && self.hierarchy_model.is_row_expanded(id)
+                {
+                    self.hierarchy_model.toggle_expanded(id);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    None
+                } else {
+                    scene
+                        .get(id)
+                        .and_then(|node| node.parent)
+                        .filter(|parent| self.hierarchy_model.row_position(*parent).is_some())
+                }
+            }
+            "right" => {
+                if self.hierarchy_model.row_has_children(id)
+                    && !self.hierarchy_model.is_row_expanded(id)
+                {
+                    self.hierarchy_model.toggle_expanded(id);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    None
+                } else {
+                    scene.get(id).and_then(|node| {
+                        node.children
+                            .iter()
+                            .copied()
+                            .find(|child| self.hierarchy_model.row_position(*child).is_some())
+                    })
+                }
+            }
+            _ => None,
+        };
+        let Some(target) = target else {
+            return;
+        };
+        intents.push(NativeWorkbenchIntent::Command(format!(
+            "hierarchy.select:{}:{}",
+            target.0,
+            if shift { "shift" } else { "replace" }
+        )));
+        // Keep the keyboard origin on the newly selected row so repeated arrow
+        // presses continue navigating from the visible selection.
+        self.host
+            .session_mut()
+            .interaction
+            .focus
+            .request_focus(format!("hierarchy.row.{}.select", target.0));
+        self.reveal_hierarchy_row(target);
+    }
+
+    /// Scrolls only when the target row leaves the measured tree viewport.
+    fn reveal_hierarchy_row(&mut self, id: SceneNodeId) {
+        let Some(index) = self.hierarchy_model.row_position(id) else {
+            return;
+        };
+        let row_height = self.agent_settings.hierarchy_row_height.max(1.0);
+        let Some(viewport) = self.host.layout_rect("hierarchy.tree") else {
+            return;
+        };
+        let offset = self
+            .host
+            .session()
+            .interaction
+            .controls
+            .scroll_offset("hierarchy.tree")[1];
+        let top = index as f32 * row_height;
+        let bottom = top + row_height;
+        let visible = viewport.height.max(row_height);
+        let delta = if top < offset {
+            top - offset
+        } else if bottom > offset + visible {
+            bottom - (offset + visible)
+        } else {
+            0.0
+        };
+        if delta.abs() <= f32::EPSILON {
+            return;
+        }
+        let next = self
+            .host
+            .session_mut()
+            .interaction
+            .controls
+            .scroll_by("hierarchy.tree", [0.0, delta]);
+        self.note_hierarchy_scroll(next[1]);
+    }
+}
+
+/// Node id of the inline rename input. The value key is intentionally
+/// different, so focusing the value key would never reach the control.
+pub(super) fn hierarchy_rename_focus_id(id: SceneNodeId) -> String {
+    format!("hierarchy.rename.control.{}", id.0)
+}
+
+impl NativeGameWorkbench {
     pub(super) fn handle_hierarchy_open_menu(
         &mut self,
         id: &String,
@@ -470,4 +682,21 @@ pub(super) fn hierarchy_context_selection_intent(
 ) -> Option<NativeWorkbenchIntent> {
     (!selected.contains(&target))
         .then(|| NativeWorkbenchIntent::Command(format!("hierarchy.select:{}:replace", target.0)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_focus_targets_the_inline_control_not_the_value_key() {
+        assert_eq!(
+            hierarchy_rename_focus_id(SceneNodeId(7)),
+            "hierarchy.rename.control.7"
+        );
+        assert_ne!(
+            hierarchy_rename_focus_id(SceneNodeId(7)),
+            "hierarchy.rename.7"
+        );
+    }
 }

@@ -5,8 +5,8 @@ use raf_core::ai::AgentMode;
 use raf_core::config::{EngineSettings, Language};
 use raf_core::i18n::t;
 use raf_render::api_graphic_basic::ui_surface::{
-    StudioUiPalette, UiAccessibilityRole, UiAlign, UiFlow, UiIcon, UiIconId, UiIconSize,
-    UiLayout, UiNode, UiNodeKind, UiSizeMode, UiSpacing, UiStyle, UiTextOverflow, UiTextStyle,
+    StudioUiPalette, UiAccessibilityRole, UiAlign, UiFlow, UiIcon, UiIconId, UiIconSize, UiLayout,
+    UiNode, UiNodeKind, UiSizeMode, UiSpacing, UiStyle, UiTextOverflow, UiTextStyle,
 };
 
 use crate::panels::ai_chat::{AgentPanel, AgentReadiness};

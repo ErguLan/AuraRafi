@@ -1,7 +1,7 @@
 //! Center chat, laboratory body and empty/loading states.
 
-use super::*;
 use super::layout::label;
+use super::*;
 
 pub(super) fn laboratory_nodes(
     tokens: &UiTokens,
@@ -81,15 +81,14 @@ pub(super) fn empty_state(
     width: f32,
     height: f32,
 ) -> UiNode {
-    let mut empty =
-        UiNode::new("agent.workspace.empty", UiNodeKind::Panel).with_layout(UiLayout {
-            flow: UiFlow::Column,
-            gap: 16.0,
-            align_items: UiAlign::Center,
-            justify_content: UiJustify::Center,
-            padding: UiSpacing::same(32.0),
-            ..UiLayout::absolute(UiRect::new(rail, 52.0, width - rail, height - 52.0))
-        });
+    let mut empty = UiNode::new("agent.workspace.empty", UiNodeKind::Panel).with_layout(UiLayout {
+        flow: UiFlow::Column,
+        gap: 16.0,
+        align_items: UiAlign::Center,
+        justify_content: UiJustify::Center,
+        padding: UiSpacing::same(32.0),
+        ..UiLayout::absolute(UiRect::new(rail, 52.0, width - rail, height - 52.0))
+    });
     let closing = service
         .selected
         .as_deref()

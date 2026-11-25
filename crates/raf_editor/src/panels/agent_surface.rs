@@ -23,8 +23,8 @@ use raf_core::config::EngineSettings;
 use raf_core::i18n::t;
 use raf_core::project::ProjectType;
 use raf_render::api_graphic_basic::ui_surface::{
-    StudioUiPalette, UiFlow, UiLayout, UiNode, UiNodeKind, UiOverflow, UiRect, UiSizeMode,
-    UiStyle, UiSurface,
+    StudioUiPalette, UiFlow, UiLayout, UiNode, UiNodeKind, UiOverflow, UiRect, UiSizeMode, UiStyle,
+    UiSurface,
 };
 
 use super::ai_chat::{AgentPanel, AgentReadiness};
@@ -187,7 +187,8 @@ fn build_main(
             .effective_provider(settings)
             .map(|provider| provider.model.clone())
             .unwrap_or_default();
-        if settings.agent_openai_use_plan && settings.default_ai_provider == raf_ai::provider::AiProvider::OpenAI
+        if settings.agent_openai_use_plan
+            && settings.default_ai_provider == raf_ai::provider::AiProvider::OpenAI
         {
             raf_ai::chatgpt_auth::snapshot()
                 .and_then(|view| {
@@ -254,7 +255,8 @@ fn build_main(
                 && !(message.role == MessageRole::Assistant
                     && message.content.trim().is_empty()
                     && message.tool_calls.is_some()
-                    && (!panel.show_reasoning || message.reasoning.as_ref().is_none_or(|r| r.text.is_empty())))
+                    && (!panel.show_reasoning
+                        || message.reasoning.as_ref().is_none_or(|r| r.text.is_empty())))
         })
         .collect::<Vec<_>>();
     let history_width = (width - 22.0).max(180.0);

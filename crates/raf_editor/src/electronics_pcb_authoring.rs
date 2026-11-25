@@ -460,7 +460,10 @@ mod tests {
         assert!(editor.undo());
         assert!(editor.pcb_route_draft.is_none());
         assert!(editor.route_error.is_none());
-        assert_eq!(editor.surface_errors(), &["Unrelated document error".to_string()]);
+        assert_eq!(
+            editor.surface_errors(),
+            &["Unrelated document error".to_string()]
+        );
         assert_eq!(editor.history.len(), history);
         assert_eq!(pcb_fingerprint(&editor.pcb), before);
     }

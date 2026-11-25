@@ -1,0 +1,229 @@
+{
+  "version": 1,
+  "name": "Fire",
+  "budget": {
+    "max_particles": 2200,
+    "max_sprites": 2200
+  },
+  "emitters": [
+    {
+      "name": "flames",
+      "texture": "particles/textures/fire_atlas.png",
+      "enabled": true,
+      "max_particles": 1600,
+      "rate": 260.0,
+      "burst": 70,
+      "lifetime": [
+        0.35,
+        0.75
+      ],
+      "speed": [
+        0.9,
+        2.0
+      ],
+      "spread": [
+        10.0,
+        18.0
+      ],
+      "direction": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "gravity": [
+        0.0,
+        0.7,
+        0.0
+      ],
+      "drag": 0.6,
+      "size": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.34
+          },
+          {
+            "t": 0.35,
+            "value": 0.52
+          },
+          {
+            "t": 1.0,
+            "value": 0.24
+          }
+        ]
+      },
+      "opacity": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.55
+          },
+          {
+            "t": 0.1,
+            "value": 0.95
+          },
+          {
+            "t": 0.6,
+            "value": 0.45
+          },
+          {
+            "t": 1.0,
+            "value": 0.0
+          }
+        ]
+      },
+      "color": {
+        "keys": [
+          {
+            "t": 0.0,
+            "color": [
+              255,
+              245,
+              205,
+              255
+            ]
+          },
+          {
+            "t": 0.22,
+            "color": [
+              255,
+              176,
+              64,
+              255
+            ]
+          },
+          {
+            "t": 0.6,
+            "color": [
+              205,
+              72,
+              18,
+              220
+            ]
+          },
+          {
+            "t": 1.0,
+            "color": [
+              45,
+              14,
+              8,
+              0
+            ]
+          }
+        ]
+      },
+      "shape": {
+        "type": "sphere",
+        "radius": 0.14
+      },
+      "flipbook": {
+        "columns": 4,
+        "rows": 4,
+        "fps": 26.0,
+        "start_random": true
+      },
+      "collision": null,
+      "wind_affects_drag": true
+    },
+    {
+      "name": "embers",
+      "texture": "particles/textures/soft.png",
+      "enabled": true,
+      "max_particles": 350,
+      "rate": 18.0,
+      "burst": 6,
+      "lifetime": [
+        1.0,
+        2.0
+      ],
+      "speed": [
+        0.6,
+        1.8
+      ],
+      "spread": [
+        18.0,
+        26.0
+      ],
+      "direction": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "gravity": [
+        0.0,
+        0.1,
+        0.0
+      ],
+      "drag": 0.2,
+      "size": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 0.035
+          },
+          {
+            "t": 0.6,
+            "value": 0.022
+          },
+          {
+            "t": 1.0,
+            "value": 0.008
+          }
+        ]
+      },
+      "opacity": {
+        "keys": [
+          {
+            "t": 0.0,
+            "value": 1.0
+          },
+          {
+            "t": 0.7,
+            "value": 0.75
+          },
+          {
+            "t": 1.0,
+            "value": 0.0
+          }
+        ]
+      },
+      "color": {
+        "keys": [
+          {
+            "t": 0.0,
+            "color": [
+              255,
+              230,
+              150,
+              255
+            ]
+          },
+          {
+            "t": 0.4,
+            "color": [
+              255,
+              150,
+              50,
+              255
+            ]
+          },
+          {
+            "t": 1.0,
+            "color": [
+              120,
+              30,
+              10,
+              0
+            ]
+          }
+        ]
+      },
+      "shape": {
+        "type": "point"
+      },
+      "flipbook": null,
+      "collision": null,
+      "wind_affects_drag": true
+    }
+  ]
+}

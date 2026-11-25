@@ -157,7 +157,7 @@ impl PlayerSession {
             source: Some(source),
             receiver: None,
             cancellation: Arc::new(AtomicBool::new(false)),
-            audio: RuntimeAudio::new(false),
+            audio: RuntimeAudio::new(false, Default::default()),
             settings,
             instance,
             api_label: host.api_label(),
@@ -421,12 +421,8 @@ impl PlayerSession {
             Preparation::Compile(progress) => {
                 let language = self.settings.language;
                 let entering = self.loading.stage_key != "runtime.compiling";
-                self.loading.compile(
-                    &progress.path,
-                    progress.completed,
-                    progress.total,
-                    language,
-                );
+                self.loading
+                    .compile(&progress.path, progress.completed, progress.total, language);
                 if entering {
                     let message = t("runtime.compiling", language);
                     let at_ms = self.loading.started.elapsed().as_millis() as u64;
@@ -497,9 +493,10 @@ impl PlayerSession {
                 )));
                 self.game_ui.clear();
                 self.status = world.status().clone();
+                let audio_settings = world.audio_settings().clone();
                 self.world = Some(*world);
                 // A headless host never opens an audio output device.
-                self.audio = RuntimeAudio::new(audio && !host.is_headless());
+                self.audio = RuntimeAudio::new(audio && !host.is_headless(), audio_settings);
                 self.root = Some(root);
                 self.receiver = None;
                 self.retry_source = None;
@@ -792,22 +789,23 @@ impl PlayerSession {
             can_retry: false,
         };
         if self.loading_surface_key.as_ref() != Some(&key) {
-            self.ui.set_surface(build_runtime_loading_surface_with_options(
-                RuntimeLoadingView {
-                    palette,
-                    progress: self.loading.progress,
-                    language,
-                    detail: &self.loading.detail,
-                    status: &status,
-                    count: &self.loading.count,
-                    elapsed_secs,
-                    history: &self.loading.history,
-                    slow: self.loading.slow,
-                    failed: false,
-                    error: None,
-                    can_retry: false,
-                },
-            ));
+            self.ui
+                .set_surface(build_runtime_loading_surface_with_options(
+                    RuntimeLoadingView {
+                        palette,
+                        progress: self.loading.progress,
+                        language,
+                        detail: &self.loading.detail,
+                        status: &status,
+                        count: &self.loading.count,
+                        elapsed_secs,
+                        history: &self.loading.history,
+                        slow: self.loading.slow,
+                        failed: false,
+                        error: None,
+                        can_retry: false,
+                    },
+                ));
             self.loading_surface_key = Some(key);
         }
         let actions = self.ui.process_routed_input(
@@ -817,12 +815,7 @@ impl PlayerSession {
             input,
             &mut self.router,
             InputOwner::RetainedUi(InputRegionId(0x6c6f6164)),
-            UiRect::new(
-                0.0,
-                0.0,
-                view.logical[0] as f32,
-                view.logical[1] as f32,
-            ),
+            UiRect::new(0.0, 0.0, view.logical[0] as f32, view.logical[1] as f32),
         );
         if actions.iter().any(|action| {
             matches!(&action.action, UiAction::Command { name } if name == "runtime.cancel")
@@ -887,22 +880,23 @@ impl PlayerSession {
             can_retry,
         };
         if self.loading_surface_key.as_ref() != Some(&key) {
-            self.ui.set_surface(build_runtime_loading_surface_with_options(
-                RuntimeLoadingView {
-                    palette,
-                    progress: self.loading.progress,
-                    language,
-                    detail: &detail,
-                    status: &status,
-                    count: &self.loading.count,
-                    elapsed_secs,
-                    history: &self.loading.history,
-                    slow: false,
-                    failed: true,
-                    error: error.as_deref(),
-                    can_retry,
-                },
-            ));
+            self.ui
+                .set_surface(build_runtime_loading_surface_with_options(
+                    RuntimeLoadingView {
+                        palette,
+                        progress: self.loading.progress,
+                        language,
+                        detail: &detail,
+                        status: &status,
+                        count: &self.loading.count,
+                        elapsed_secs,
+                        history: &self.loading.history,
+                        slow: false,
+                        failed: true,
+                        error: error.as_deref(),
+                        can_retry,
+                    },
+                ));
             self.loading_surface_key = Some(key);
         }
         self.last_render_ms = 0.0;
@@ -913,12 +907,7 @@ impl PlayerSession {
             input,
             &mut self.router,
             InputOwner::RetainedUi(InputRegionId(0x6c6f6164)),
-            UiRect::new(
-                0.0,
-                0.0,
-                view.logical[0] as f32,
-                view.logical[1] as f32,
-            ),
+            UiRect::new(0.0, 0.0, view.logical[0] as f32, view.logical[1] as f32),
         );
         for action in actions {
             if let UiAction::Command { name } = action.action {
@@ -998,19 +987,27 @@ impl PlayerSession {
         let palette = palette(self.settings.theme);
         let debug_world = self.world.as_ref().filter(|world| {
             let settings = world.project_settings();
-            !headless && (settings.runtime.animation_debug_draw
-                || (settings.enable_physics && settings.runtime.physics_debug_draw))
+            !headless
+                && (settings.runtime.animation_debug_draw
+                    || (settings.enable_physics && settings.runtime.physics_debug_draw))
         });
         let debug_interval = debug_world.map_or(0, |world| {
             let ticks = world.status().fixed_ticks;
             if self.status.phase == RuntimePhase::Running {
-                ticks / u64::from((world.project_settings().runtime.fixed_hz.clamp(15, 120) / 4).max(1))
+                ticks
+                    / u64::from(
+                        (world.project_settings().runtime.fixed_hz.clamp(15, 120) / 4).max(1),
+                    )
             } else {
                 ticks
             }
         });
         let debug_text = debug_world.map(|world| {
-            self.surface_key.as_ref().filter(|key| key.debug_interval == debug_interval && key.phase == self.status.phase)
+            self.surface_key
+                .as_ref()
+                .filter(|key| {
+                    key.debug_interval == debug_interval && key.phase == self.status.phase
+                })
                 .and_then(|key| key.debug_text.clone())
                 .unwrap_or_else(|| crate::physics_debug::stats(world))
         });
@@ -1166,6 +1163,11 @@ impl PlayerSession {
                 return Ok(());
             }
             if let Some(root) = &self.root {
+                let listener = world
+                    .presentation_camera_pose()
+                    .map(|pose| pose.position)
+                    .unwrap_or_default();
+                self.audio.update_listener(&world.scene, listener);
                 let commands = world.drain_audio();
                 let audio = self.audio.consume(&world.scene, root, commands);
                 self.audio
@@ -1191,7 +1193,7 @@ impl PlayerSession {
             self.game_ui
                 .sync(host, world, root, self.settings.theme, environment);
         }
-        let canvas = self.render_canvas(host, size, scale);
+        let canvas = self.render_canvas(host, size, scale, dt as f32);
         let top = if headless { 0 } else { (34.0 * scale) as u32 };
         let mut layers = self.game_ui.overlay_layers(
             CanvasTargetRect {
@@ -1226,9 +1228,11 @@ impl PlayerSession {
         host: &NativeUiWindowHost,
         size: [u32; 2],
         scale: f32,
+        dt: f32,
     ) -> Option<EditorCanvasLayer> {
         let world = self.world.as_ref()?;
         let pose = world.presentation_camera_pose()?;
+        let quality = world.presentation_quality();
         let top = if host.is_headless() {
             0
         } else {
@@ -1240,7 +1244,7 @@ impl PlayerSession {
             width: size[0],
             height: size[1].saturating_sub(top).max(1),
         };
-        let mode = world.project_settings().viewport_resolution;
+        let mode = quality.viewport_resolution;
         let (min, max) = mode.resolution_range();
         self.resolution.set_resolution_limits(
             min,
@@ -1267,9 +1271,21 @@ impl PlayerSession {
             .presentation_revision()
             .wrapping_mul(31)
             .wrapping_add(self.game_ui.revision());
-        if let Some((cached_revision, cached_size, cached_pose, canvas)) = &self.cached_canvas {
-            if *cached_revision == revision && *cached_size == cache_size && *cached_pose == pose {
-                return Some(canvas.clone());
+        let particles_animating = world.project_settings().particle_runtime.enabled
+            && world.scene.iter().any(|(_, node)| {
+                node.particle_system.as_ref().is_some_and(|component| {
+                    component.visible
+                        && component.playback == raf_core::scene::ParticlePlayback::Playing
+                })
+            });
+        if !particles_animating {
+            if let Some((cached_revision, cached_size, cached_pose, canvas)) = &self.cached_canvas {
+                if *cached_revision == revision
+                    && *cached_size == cache_size
+                    && *cached_pose == pose
+                {
+                    return Some(canvas.clone());
+                }
             }
         }
         let camera = Camera {
@@ -1290,11 +1306,23 @@ impl PlayerSession {
             environment_override: Some(world.presentation_environment()),
             show_grid_3d: false,
             selection_outline: false,
-            geometry_detail: world_render_options(world).0,
-            texture_quality: world_render_options(world).1,
+            geometry_detail: quality.geometry_detail,
+            texture_quality: quality.texture_quality,
             world_streaming_enabled: world.project_settings().world_streaming_enabled,
             world_stream_region_size: world.project_settings().world_stream_region_size,
             world_stream_load_radius: world.project_settings().world_stream_load_radius,
+            particles: raf_render::particles::ParticleRenderOptions {
+                enabled: world.project_settings().particle_runtime.enabled,
+                paused: false,
+                frozen: false,
+                stopped: false,
+                time_scale: world.project_settings().particle_runtime.time_scale,
+                quality: world.project_settings().particle_runtime.quality,
+                max_sprites: world.project_settings().particle_runtime.max_particles,
+                wind: world.project_settings().particle_runtime.wind,
+            },
+            particle_dt: dt.clamp(1.0 / 240.0, 0.1),
+            stable_scene_packet: world.scene.len() <= 4096,
             ..RenderOptions::default()
         };
         let render_started = Instant::now();
@@ -1343,17 +1371,6 @@ pub fn palette(theme: raf_core::config::Theme) -> StudioUiPalette {
     } else {
         StudioUiPalette::IndustrialDark
     }
-}
-fn world_render_options(
-    world: &RuntimeWorld,
-) -> (
-    raf_core::project::GeometryDetailMode,
-    raf_core::project::TextureQualityMode,
-) {
-    (
-        world.project_settings().geometry_detail,
-        world.project_settings().texture_quality,
-    )
 }
 fn load_ui_document(
     root: &std::path::Path,

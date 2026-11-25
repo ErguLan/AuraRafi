@@ -85,32 +85,32 @@ impl AgentToolPack {
 }
 
 pub(super) fn build_tool_pack(
-        catalog: &CommandCatalog,
-        language: Language,
-        project_type: Option<ProjectType>,
-        mode: AgentMode,
-        prompt: &str,
-    ) -> AgentToolPack {
-        let intent = classify_prompt(prompt);
-        let mut pack = AgentToolPack {
-            language,
-            ..AgentToolPack::default()
-        };
-        add_project_read_tools(&mut pack, intent, project_type);
-        if project_type.is_some() && mode != AgentMode::Inspect && intent.assets {
-            add_asset_generation_tools(&mut pack);
-        }
+    catalog: &CommandCatalog,
+    language: Language,
+    project_type: Option<ProjectType>,
+    mode: AgentMode,
+    prompt: &str,
+) -> AgentToolPack {
+    let intent = classify_prompt(prompt);
+    let mut pack = AgentToolPack {
+        language,
+        ..AgentToolPack::default()
+    };
+    add_project_read_tools(&mut pack, intent, project_type);
+    if project_type.is_some() && mode != AgentMode::Inspect && intent.assets {
+        add_asset_generation_tools(&mut pack);
+    }
 
-        match project_type {
-            Some(ProjectType::Game) => {
-                if intent.game_ui {
-                    for name in ["ui.document.read","ui.document.create","ui.document.apply","ui.document.undo"] {
-                        let kind=if name=="ui.document.read"{AgentToolKind::Read}else{AgentToolKind::Mutation};
-                        if kind==AgentToolKind::Read || mode!=AgentMode::Inspect {if let Some(command)=catalog.find(name){pack.push_catalog(command,language,kind);}}
-                    }
-                }
-                for &name in &["lighting.inspect", "lighting.set", "lighting.reset"][..] {
-                    let kind = if name == "lighting.inspect" {
+    match project_type {
+        Some(ProjectType::Game) => {
+            if intent.game_ui {
+                for name in [
+                    "ui.document.read",
+                    "ui.document.create",
+                    "ui.document.apply",
+                    "ui.document.undo",
+                ] {
+                    let kind = if name == "ui.document.read" {
                         AgentToolKind::Read
                     } else {
                         AgentToolKind::Mutation
@@ -121,118 +121,135 @@ pub(super) fn build_tool_pack(
                         }
                     }
                 }
-                // A prompt such as "un supermercado" has no explicit authoring
-                // verb, but it still needs the construction surface. The core
-                // pack is therefore mode-gated, not keyword-gated.
-                if mode != AgentMode::Inspect {
-                    add_game_mutation_tools(
-                        &mut pack,
-                        PromptIntent {
-                            authoring: true,
-                            ..intent
-                        },
-                    );
-                    add_game_program_tools(&mut pack);
-                }
-                add_game_scripting_tools(&mut pack, catalog, language, mode);
             }
-            Some(ProjectType::Electronics) => {
-                pack.push_native("electronics_lab_simulate",
+            for &name in &["lighting.inspect", "lighting.set", "lighting.reset"][..] {
+                let kind = if name == "lighting.inspect" {
+                    AgentToolKind::Read
+                } else {
+                    AgentToolKind::Mutation
+                };
+                if kind == AgentToolKind::Read || mode != AgentMode::Inspect {
+                    if let Some(command) = catalog.find(name) {
+                        pack.push_catalog(command, language, kind);
+                    }
+                }
+            }
+            // A prompt such as "un supermercado" has no explicit authoring
+            // verb, but it still needs the construction surface. The core
+            // pack is therefore mode-gated, not keyword-gated.
+            if mode != AgentMode::Inspect {
+                add_game_mutation_tools(
+                    &mut pack,
+                    PromptIntent {
+                        authoring: true,
+                        ..intent
+                    },
+                );
+                add_game_program_tools(&mut pack);
+            }
+            add_game_scripting_tools(&mut pack, catalog, language, mode);
+        }
+        Some(ProjectType::Electronics) => {
+            pack.push_native("electronics_lab_simulate",
                     "Run cancellable DC analysis of the current schematic. Returns currents and pin voltages with convergence evidence.",
                     serde_json::json!({"type":"object","properties":{},"additionalProperties":false}), AgentToolKind::Read, None);
-                pack.push_native("electronics_lab_probe",
+            pack.push_native("electronics_lab_probe",
                     "Read a page of DC measurements. Optionally filter by component reference or UUID. Check stale before comparing.",
                     serde_json::json!({"type":"object","properties":{"component":{"type":"string"},"offset":{"type":"integer","minimum":0}},"additionalProperties":false}), AgentToolKind::Read, None);
-                pack.push_native("electronics_lab_signals",
+            pack.push_native("electronics_lab_signals",
                     "Inspect serial status and latest measured channels for the active Electronics document.",
                     serde_json::json!({"type":"object","properties":{},"additionalProperties":false}), AgentToolKind::Read, None);
-                let names: &[&str] = if mode != AgentMode::Inspect && intent.authoring {
-                    if intent.pcb {
-                        &[
-                            "pcb.describe",
-                            "pcb.sync",
-                            "pcb.route_airwire",
-                            "pcb.set_board",
-                            "pcb.move",
-                            "pcb.rotate",
-                        ]
-                    } else {
-                        &[
-                            "electronics.describe",
-                            "electronics.add_part",
-                            "electronics.wire",
-                            "electronics.set_value",
-                            "electronics.rotate",
-                            "electronics.delete",
-                            "electronics.generate_circuit",
-                            "electronics.autolayout",
-                        ]
-                    }
+            let names: &[&str] = if mode != AgentMode::Inspect && intent.authoring {
+                if intent.pcb {
+                    &[
+                        "pcb.describe",
+                        "pcb.sync",
+                        "pcb.route_airwire",
+                        "pcb.set_board",
+                        "pcb.move",
+                        "pcb.rotate",
+                    ]
                 } else {
                     &[
                         "electronics.describe",
-                        "electronics.netlist",
-                        "electronics.bom",
-                        "pcb.describe",
+                        "electronics.add_part",
+                        "electronics.wire",
+                        "electronics.set_value",
+                        "electronics.rotate",
+                        "electronics.delete",
+                        "electronics.generate_circuit",
+                        "electronics.autolayout",
                     ]
-                };
-                for name in names {
-                    if let Some(command) = catalog.find(name) {
-                        pack.push_catalog(command, language, catalog_tool_kind(command));
-                    }
+                }
+            } else {
+                &[
+                    "electronics.describe",
+                    "electronics.netlist",
+                    "electronics.bom",
+                    "pcb.describe",
+                ]
+            };
+            for name in names {
+                if let Some(command) = catalog.find(name) {
+                    pack.push_catalog(command, language, catalog_tool_kind(command));
                 }
             }
-            None => {}
         }
-
-        // Provider quality degrades sharply when every command is advertised.
-        // Keep the contextual pack bounded and deterministic.
-        order_contextual_tools(&mut pack.tools);
-        // Intent-critical scripting must survive the contextual tool budget.
-        // Stable sorting retains the perception/scene order within each group.
-        if intent.scripting || intent.gameplay {
-            pack.tools.sort_by_key(|tool| {
-                !(matches!(
-                    tool.function.name.as_str(),
-                    "script_write"
-                        | "script_create"
-                        | "script_attach"
-                        | "script_detach"
-                        | "script_validate"
-                        | "script_run"
-                        | "behavior_attach"
-                        | "behavior_detach"
-                        | "behavior_parameter"
-                        | "prefab_capture"
-                        | "prefab_instantiate"
-                ) || (intent.authoring
-                    && matches!(
-                        tool.function.name.as_str(),
-                        "scene_build" | "scene_reconcile" | "scene_batch" | "scene_verify"
-                    )))
-            });
-        }
-        // Perception, gameplay, lighting, and capture must coexist for a
-        // complete game request. The pack stays bounded, but 26 was too small
-        // to keep scripting and the visual loop in the same turn.
-        // The pack now carries perception, a complete authoring core, World
-        // Program tools, scripting and visual verification in one run. Fifty-two
-        // compact schemas stay below the former context blow-up while avoiding
-        // the old failure mode where a gameplay prompt dropped scene_build or
-        // game_completion_audit from the same turn.
-        const MAX_CONTEXTUAL_TOOLS: usize = 60;
-        if pack.tools.len() > MAX_CONTEXTUAL_TOOLS {
-            pack.tools.truncate(MAX_CONTEXTUAL_TOOLS);
-            let visible = pack
-                .tools
-                .iter()
-                .map(|tool| tool.function.name.as_str())
-                .collect::<std::collections::HashSet<_>>();
-            pack.routes
-                .retain(|name, _| visible.contains(name.as_str()));
-        }
-        pack
+        None => {}
     }
+
+    // Provider quality degrades sharply when every command is advertised.
+    // Keep the contextual pack bounded and deterministic.
+    order_contextual_tools(&mut pack.tools);
+    // Intent-critical scripting must survive the contextual tool budget.
+    // Stable sorting retains the perception/scene order within each group.
+    if intent.scripting || intent.gameplay {
+        pack.tools.sort_by_key(|tool| {
+            !(matches!(
+                tool.function.name.as_str(),
+                "script_write"
+                    | "script_create"
+                    | "script_attach"
+                    | "script_detach"
+                    | "script_validate"
+                    | "script_run"
+                    | "behavior_attach"
+                    | "behavior_detach"
+                    | "behavior_parameter"
+                    | "prefab_capture"
+                    | "prefab_instantiate"
+            ) || (intent.authoring
+                && matches!(
+                    tool.function.name.as_str(),
+                    "scene_build" | "scene_reconcile" | "scene_batch" | "scene_verify"
+                )))
+        });
+    }
+    // Perception, gameplay, lighting, and capture must coexist for a
+    // complete game request. The pack stays bounded, but 26 was too small
+    // to keep scripting and the visual loop in the same turn.
+    // The pack now carries perception, a complete authoring core, World
+    // Program tools, scripting and visual verification in one run, plus the
+    // 0.12 closure tools (light_create/update, mesh_asset_inspect/place and
+    // camera_activate). Sixty-six compact schemas stay below the former
+    // context blow-up while avoiding the old failure mode where a gameplay
+    // prompt dropped scene_build or game_completion_audit from the same
+    // turn.
+    // Mesh and Assembly authoring added required tools. The cap stays a
+    // hard context safeguard rather than silently returning everything.
+    const MAX_CONTEXTUAL_TOOLS: usize = 78;
+    if pack.tools.len() > MAX_CONTEXTUAL_TOOLS {
+        pack.tools.truncate(MAX_CONTEXTUAL_TOOLS);
+        let visible = pack
+            .tools
+            .iter()
+            .map(|tool| tool.function.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        pack.routes
+            .retain(|name, _| visible.contains(name.as_str()));
+    }
+    pack
+}
 
 fn add_asset_generation_tools(pack: &mut AgentToolPack) {
     let image_schema = object_schema(Map::from_iter([
@@ -252,6 +269,36 @@ fn add_asset_generation_tools(pack: &mut AgentToolPack) {
             ("style", enum_schema("Existing local preset.", &["icon", "badge", "sprite", "texture"])),
             ("transparent", serde_json::json!({"type": "boolean"})),
         ].map(|(key, value)| (key.to_string(), value))), &["prompt", "name"]), AgentToolKind::Mutation, Some("asset.generate_local_png"));
+    pack.push_native(
+        "particles_generate",
+        "Create a data-driven .rafparticle asset in assets/particles. Prefer a built-in template for common effects, or pass a complete ParticleSystemAsset definition with emitters, curves and budgets. Validates and clamps values; never overwrites an existing asset. Use a project-relative texture such as particles/textures/soft.png.",
+        object_schema(
+            Map::from_iter([
+                (
+                    "name",
+                    string_schema("Project particle asset name; never a host path."),
+                ),
+                (
+                    "template",
+                    enum_schema(
+                        "Built-in template used when `definition` is omitted.",
+                        &["blank", "fire", "smoke", "sparks", "rain", "dust", "magic"],
+                    ),
+                ),
+                (
+                    "definition",
+                    serde_json::json!({
+                        "type": "object",
+                        "description": "Complete ParticleSystemAsset JSON. Takes precedence over `template`."
+                    }),
+                ),
+            ]
+            .map(|(key, value)| (key.to_string(), value))),
+            &["name"],
+        ),
+        AgentToolKind::Mutation,
+        Some("particles.generate"),
+    );
     pack.push_native("external_studio_install", "Download the public Git repository configured by the user in AI Providers into its separate installation directory. Never overwrites a directory or installs dependencies/runs package hooks. Use before external generation when not installed.", object_schema(Map::new(), &[]), AgentToolKind::Mutation, None);
 }
 
@@ -369,9 +416,24 @@ fn add_project_read_tools(
             AgentToolKind::Read,
             None,
         );
+        if intent.assets || intent.prefab || intent.gameplay {
+            pack.push_native(
+                "mesh_asset_inspect",
+                "Inspect a static .glb or .gltf mesh asset before placement: decoded node count, mesh/material summary, local bounds and unit scale. The path is relative to the project assets directory. This is not the generic asset catalog.",
+                object_schema(
+                    Map::from_iter([(
+                        "path".to_string(),
+                        string_schema("Mesh path under assets, for example models/shelf.glb."),
+                    )]),
+                    &["path"],
+                ),
+                AgentToolKind::Read,
+                Some("game.mesh_asset"),
+            );
+        }
         pack.push_native(
             "scene_design_audit",
-            "Audit whether a bounded scene scope reads as an intentional real-world place: floor, enclosure, entrance, circulation, primary modules, details, and meaningful 3D extent. This is read-only evidence for the next repair step.",
+            "Audit whether a bounded scene scope reads as an intentional real-world place: floor, enclosure, entrance, circulation, primary modules, details, imported 3D assets, authored point/spot lights, an active camera and meaningful 3D extent. This is read-only evidence for the next repair step.",
             object_schema(
                 Map::from_iter([
                     (
@@ -635,7 +697,7 @@ fn add_project_read_tools(
         );
         pack.push_native(
             "game_completion_audit",
-            "Audit whether the Game foundation is actually playable rather than geometry alone. Reports renderable geometry, camera/startup camera, authored lighting, attached scripts, gameplay signals, enabled systems, missing pieces, and the next required actions. Call this after a gameplay build and before claiming completion.",
+            "Audit whether the Game foundation is actually playable rather than geometry alone. Reports renderable geometry, imported 3D mesh assets, entity point/spot lights, the active look-through camera and startup camera, authored world lighting, attached scripts, gameplay signals, enabled systems, missing pieces, and the next required actions. Call this after a gameplay build and before claiming completion.",
             object_schema(Map::new(), &[]),
             AgentToolKind::Read,
             None,
@@ -770,9 +832,7 @@ impl AgentToolExecutor<'_> {
             .catalog
             .commands
             .iter()
-            .filter(|command| {
-                command.domain == "shared" || Some(command.domain.as_str()) == domain
-            })
+            .filter(|command| command.domain == "shared" || Some(command.domain.as_str()) == domain)
             .filter(|command| {
                 query.is_empty()
                     || command.name.to_ascii_lowercase().contains(&query)
@@ -782,7 +842,10 @@ impl AgentToolExecutor<'_> {
                         .any(|alias| alias.to_ascii_lowercase().contains(&query))
                     || command.category.to_ascii_lowercase().contains(&query)
                     || command.domain.to_ascii_lowercase().contains(&query)
-                    || command.description_key.to_ascii_lowercase().contains(&query)
+                    || command
+                        .description_key
+                        .to_ascii_lowercase()
+                        .contains(&query)
                     || command
                         .examples
                         .iter()

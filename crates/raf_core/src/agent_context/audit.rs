@@ -95,8 +95,12 @@ pub fn scene_navigation_audit(
         });
         return result;
     };
-    let columns = (((max.x - min.x) / resolution).ceil() as usize).saturating_add(1).clamp(2, 256);
-    let rows = (((max.z - min.z) / resolution).ceil() as usize).saturating_add(1).clamp(2, 256);
+    let columns = (((max.x - min.x) / resolution).ceil() as usize)
+        .saturating_add(1)
+        .clamp(2, 256);
+    let rows = (((max.z - min.z) / resolution).ceil() as usize)
+        .saturating_add(1)
+        .clamp(2, 256);
     let cell_center = |column: usize, row: usize| {
         Vec3::new(
             min.x + column as f32 * resolution,
@@ -116,7 +120,11 @@ pub fn scene_navigation_audit(
         for column in 0..columns {
             let point = cell_center(column, row);
             let index = row * columns + column;
-            if has_walkable_surfaces && !walkable_nodes.iter().any(|bounds| inside(*bounds, point, 0.01)) {
+            if has_walkable_surfaces
+                && !walkable_nodes
+                    .iter()
+                    .any(|bounds| inside(*bounds, point, 0.01))
+            {
                 walkable[index] = false;
             }
             if obstacle_nodes
@@ -140,16 +148,20 @@ pub fn scene_navigation_audit(
         }
     }
     let cell_of = |point: Vec3| {
-        let column = (((point.x - min.x) / resolution).round() as i64)
-            .clamp(0, columns as i64 - 1) as usize;
-        let row = (((point.z - min.z) / resolution).round() as i64)
-            .clamp(0, rows as i64 - 1) as usize;
+        let column =
+            (((point.x - min.x) / resolution).round() as i64).clamp(0, columns as i64 - 1) as usize;
+        let row =
+            (((point.z - min.z) / resolution).round() as i64).clamp(0, rows as i64 - 1) as usize;
         (column, row)
     };
     let node_center = |id: SceneNodeId| {
         world_bounds(scene, id)
             .map(|bounds| (bounds.0 + bounds.1) * 0.5)
-            .or_else(|| scene.get(id).map(|_| scene.world_matrix(id).col(3).truncate()))
+            .or_else(|| {
+                scene
+                    .get(id)
+                    .map(|_| scene.world_matrix(id).col(3).truncate())
+            })
     };
     let spawn_target = string_arg(args, "spawn");
     let spawn_id = spawn_target
@@ -198,7 +210,11 @@ pub fn scene_navigation_audit(
         for (dc, dr) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
             let next_column = column as i64 + dc;
             let next_row = row as i64 + dr;
-            if next_column < 0 || next_row < 0 || next_column >= columns as i64 || next_row >= rows as i64 {
+            if next_column < 0
+                || next_row < 0
+                || next_column >= columns as i64
+                || next_row >= rows as i64
+            {
                 continue;
             }
             let next_column = next_column as usize;
@@ -230,7 +246,10 @@ pub fn scene_navigation_audit(
         .iter()
         .filter(|goal| goal.get("reachable").and_then(Value::as_bool) == Some(true))
         .count();
-    let visited = distances.iter().filter(|distance| **distance != usize::MAX).count();
+    let visited = distances
+        .iter()
+        .filter(|distance| **distance != usize::MAX)
+        .count();
     let walkable_count = walkable.iter().filter(|value| **value).count();
     let narrow = distances
         .iter()
@@ -269,9 +288,7 @@ pub fn scene_navigation_audit(
     let mut result = AgentObservationResult::new(
         "Scene navigation audit",
         if !has_goals {
-            format!(
-                "Walkability sampled on {walkable_count} cell(s); no goals were declared."
-            )
+            format!("Walkability sampled on {walkable_count} cell(s); no goals were declared.")
         } else {
             format!(
                 "{reachable_goals}/{} goal(s) reachable from spawn on a {}x{} grid.",
@@ -303,7 +320,14 @@ pub fn scene_navigation_audit(
         }),
     );
     result.verification = Some(VerificationSummary {
-        status: if !has_goals { "not_checked" } else if all_reachable { "passed" } else { "failed" }.to_string(),
+        status: if !has_goals {
+            "not_checked"
+        } else if all_reachable {
+            "passed"
+        } else {
+            "failed"
+        }
+        .to_string(),
         checks: vec![format!(
             "{walkable_count} walkable cell(s), {visited} visited, {narrow} narrow."
         )],

@@ -70,9 +70,18 @@ impl NativeEditorApplication {
             self.ensure_agent_surface();
             let projects = self.agent_projects();
             let mut intents = Vec::new();
-            let mounted = self.project.as_ref().zip(self.workbench.as_ref())
+            let mounted = self
+                .project
+                .as_ref()
+                .zip(self.workbench.as_ref())
                 .zip(self.electronics_editor.as_ref())
-                .map(|((project, workbench), editor)| (project.path.as_path(), workbench.active_session_id(), editor));
+                .map(|((project, workbench), editor)| {
+                    (
+                        project.path.as_path(),
+                        workbench.active_session_id(),
+                        editor,
+                    )
+                });
             let laboratory = self.agents.selected_lab(mounted);
             if let (Some(runtime), Some(surface)) =
                 (self.runtime.as_mut(), self.agent_surface.as_mut())
@@ -209,7 +218,27 @@ impl NativeEditorApplication {
                     .as_ref()
                     .is_some_and(|workbench| workbench.captures_keyboard_input())
             };
+            // Particle previews animate in the editable viewport. Keep the
+            // retained canvas fresh only while an active system can move.
+            let preview = &self.settings_state.particle_preview;
+            let particles_active = preview.enabled
+                && !preview.paused
+                && !preview.frozen
+                && !preview.stopped
+                && self.scene.iter().any(|(_, node)| {
+                    node.particle_system.as_ref().is_some_and(|component| {
+                        component.visible
+                            && component.playback == raf_core::scene::ParticlePlayback::Playing
+                    })
+                });
+            runtime.set_continuous_particle_preview(particles_active);
             if let Some(workbench) = self.workbench.as_mut() {
+                let animation_preview_playing = workbench.tick_animation_preview(
+                    &self.scene,
+                    &selected_before_input,
+                    redraw_started_at,
+                    !self.settings_open && !self.exit_confirmation_open,
+                );
                 workbench.set_runtime_notice(self.runtime_notice.clone());
                 workbench.set_inspector_transform_drag_active(
                     runtime.project_type() == ProjectType::Game
@@ -285,12 +314,18 @@ impl NativeEditorApplication {
                     } else {
                         inspector
                     };
-                    let old_canvas = runtime.layout().electronics_canvas_for_pcb(self.electronics_editor.as_ref().is_some_and(|e| e.active_surface() == raf_electronics::CadSurfaceKind::Pcb));
+                    let old_canvas = runtime.layout().electronics_canvas_for_pcb(
+                        self.electronics_editor.as_ref().is_some_and(|e| {
+                            e.active_surface() == raf_electronics::CadSurfaceKind::Pcb
+                        }),
+                    );
                     runtime.configure_electronics_workspace(library, inspector);
                     if let Some(editor) = self.electronics_editor.as_mut() {
                         editor.preserve_camera_for_canvas_change(
                             old_canvas,
-                            runtime.layout().electronics_canvas_for_pcb(editor.active_surface() == raf_electronics::CadSurfaceKind::Pcb),
+                            runtime.layout().electronics_canvas_for_pcb(
+                                editor.active_surface() == raf_electronics::CadSurfaceKind::Pcb,
+                            ),
                         );
                     }
                 }
@@ -312,17 +347,25 @@ impl NativeEditorApplication {
                     compass_state,
                     self.electronics_editor.as_ref(),
                 );
-                let old_canvas = runtime.layout().electronics_canvas_for_pcb(self.electronics_editor.as_ref().is_some_and(|e| e.active_surface() == raf_electronics::CadSurfaceKind::Pcb));
+                let old_canvas = runtime.layout().electronics_canvas_for_pcb(
+                    self.electronics_editor.as_ref().is_some_and(|e| {
+                        e.active_surface() == raf_electronics::CadSurfaceKind::Pcb
+                    }),
+                );
                 synchronize_bottom_dock_layout(runtime, workbench);
                 if runtime.project_type() == ProjectType::Electronics {
                     if let Some(editor) = self.electronics_editor.as_mut() {
                         editor.preserve_camera_for_canvas_change(
                             old_canvas,
-                            runtime.layout().electronics_canvas_for_pcb(editor.active_surface() == raf_electronics::CadSurfaceKind::Pcb),
+                            runtime.layout().electronics_canvas_for_pcb(
+                                editor.active_surface() == raf_electronics::CadSurfaceKind::Pcb,
+                            ),
                         );
                     }
                 }
-                if !self.settings_open {
+                if !self.settings_open && workbench.lighting_eyedropper_target().is_some() {
+                    cursor_hint = Some(raf_ui::UiCursorIcon::Crosshair);
+                } else if !self.settings_open {
                     cursor_hint = Some(workbench.cursor_hint());
                 }
                 if self.settings_open || self.exit_confirmation_open || exit_confirmation_was_open {
@@ -342,7 +385,14 @@ impl NativeEditorApplication {
                         self.input.snapshot().pointer_position.is_some_and(|point| {
                             let canvas = match runtime.project_type() {
                                 ProjectType::Game => runtime.layout().canvas,
-                                ProjectType::Electronics => runtime.layout().electronics_canvas_for_pcb(self.electronics_editor.as_ref().is_some_and(|e| e.active_surface() == raf_electronics::CadSurfaceKind::Pcb)),
+                                ProjectType::Electronics => {
+                                    runtime.layout().electronics_canvas_for_pcb(
+                                        self.electronics_editor.as_ref().is_some_and(|e| {
+                                            e.active_surface()
+                                                == raf_electronics::CadSurfaceKind::Pcb
+                                        }),
+                                    )
+                                }
                             };
                             canvas.contains(point)
                         }) && [
@@ -414,6 +464,11 @@ impl NativeEditorApplication {
                             ) => {
                                 self.settings_state = settings;
                                 persist_agent_settings = true;
+                            }
+                            crate::native_workbench::NativeWorkbenchIntent::ImportAssetFile => {
+                                if let Some(path) = crate::folder_picker::pick_asset_file() {
+                                    workbench.open_assets_import(Some(path));
+                                }
                             }
                             crate::native_workbench::NativeWorkbenchIntent::OpenProjectFolder => {
                                 if let Some(project) = self.project.as_ref() {
@@ -574,7 +629,9 @@ impl NativeEditorApplication {
                     }
                     if runtime.project_type() == ProjectType::Electronics {
                         if let Some(editor) = self.electronics_editor.as_mut() {
-                            let electronics_canvas = runtime.layout().electronics_canvas_for_pcb(editor.active_surface() == raf_electronics::CadSurfaceKind::Pcb);
+                            let electronics_canvas = runtime.layout().electronics_canvas_for_pcb(
+                                editor.active_surface() == raf_electronics::CadSurfaceKind::Pcb,
+                            );
                             for intent in &domain_intents {
                                 if let crate::native_workbench::NativeWorkbenchIntent::Command(
                                     command,
@@ -700,13 +757,19 @@ impl NativeEditorApplication {
                             }
                         }
                     }
-                    let old_canvas = runtime.layout().electronics_canvas_for_pcb(self.electronics_editor.as_ref().is_some_and(|e| e.active_surface() == raf_electronics::CadSurfaceKind::Pcb));
+                    let old_canvas = runtime.layout().electronics_canvas_for_pcb(
+                        self.electronics_editor.as_ref().is_some_and(|e| {
+                            e.active_surface() == raf_electronics::CadSurfaceKind::Pcb
+                        }),
+                    );
                     synchronize_bottom_dock_layout(runtime, workbench);
                     if runtime.project_type() == ProjectType::Electronics {
                         if let Some(editor) = self.electronics_editor.as_mut() {
                             editor.preserve_camera_for_canvas_change(
                                 old_canvas,
-                                runtime.layout().electronics_canvas_for_pcb(editor.active_surface() == raf_electronics::CadSurfaceKind::Pcb),
+                                runtime.layout().electronics_canvas_for_pcb(
+                                    editor.active_surface() == raf_electronics::CadSurfaceKind::Pcb,
+                                ),
                             );
                         }
                     }
@@ -723,23 +786,34 @@ impl NativeEditorApplication {
                         }
                     }
                     if runtime.project_type() == ProjectType::Electronics {
-                        let electronics_canvas_rect = runtime.layout().electronics_canvas_for_pcb(self.electronics_editor.as_ref().is_some_and(|e| e.active_surface() == raf_electronics::CadSurfaceKind::Pcb));
+                        let electronics_canvas_rect = runtime.layout().electronics_canvas_for_pcb(
+                            self.electronics_editor.as_ref().is_some_and(|e| {
+                                e.active_surface() == raf_electronics::CadSurfaceKind::Pcb
+                            }),
+                        );
                         // Pointer hover alone is not a keyboard decision. A focused
                         // inspector or navigator text control must keep the
                         // keyboard, otherwise typing "r" rotates the component and
                         // Delete removes the selection while the user is typing.
-                        let canvas_owns_pointer = runtime.input_router_mut().exclusive_pointer_owner()
-                            == Some(raf_core::InputOwner::ElectronicsCanvas);
+                        let canvas_owns_pointer =
+                            runtime.input_router_mut().exclusive_pointer_owner()
+                                == Some(raf_core::InputOwner::ElectronicsCanvas);
                         // A pending outline/wire deliberately holds no pointer
                         // capture between clicks. Passive panel hover must not
                         // swallow its Escape, while a text field or search that
                         // owned the keyboard at frame start keeps priority.
                         let cancel_canvas_gesture = !text_input_owned
-                            && self.input.snapshot().key_pressed(raf_core::InputKey::Escape)
-                            && self.electronics_editor.as_ref().is_some_and(NativeElectronicsEditor::has_pending_gesture);
-                        if (cancel_canvas_gesture || ((!workbench.has_interactive_hover() || canvas_owns_pointer)
-                            && (!workbench.captures_keyboard_input() || canvas_owns_pointer)))
-
+                            && self
+                                .input
+                                .snapshot()
+                                .key_pressed(raf_core::InputKey::Escape)
+                            && self
+                                .electronics_editor
+                                .as_ref()
+                                .is_some_and(NativeElectronicsEditor::has_pending_gesture);
+                        if (cancel_canvas_gesture
+                            || ((!workbench.has_interactive_hover() || canvas_owns_pointer)
+                                && (!workbench.captures_keyboard_input() || canvas_owns_pointer)))
                         {
                             if let Some(editor) = self.electronics_editor.as_mut() {
                                 let result = editor.process_input(
@@ -760,6 +834,7 @@ impl NativeEditorApplication {
                     }
                     runtime.set_continuous_ui_motion(
                         has_active_motion
+                            || animation_preview_playing
                             || has_active_text_repeat
                             || self
                                 .electronics_editor
@@ -826,8 +901,7 @@ impl NativeEditorApplication {
                     .is_some();
                 match electronics_shortcut_command(
                     self.input.snapshot(),
-                    text_input_focused
-,
+                    text_input_focused,
                     has_electronics_selection,
                 ) {
                     Some(value) if value == crate::application_menu::command::PROJECT_SAVE => {
@@ -910,7 +984,35 @@ impl NativeEditorApplication {
                                 self.settings_state.language,
                             ),
                             Vec::new(),
-                            serde_json::json!({"available":false,"planned_version":"0.12"}),
+                            serde_json::json!({"available":true,"reason":"single_primitive_required"}),
+                        ));
+                    }
+                }
+                if viewport_update.mesh_session_started {
+                    if let Some(workbench) = self.workbench.as_mut() {
+                        workbench.log_console_output(crate::commands::CommandOutput::info(
+                            raf_core::i18n::t(
+                                "authoring.mesh_edit_help",
+                                self.settings_state.language,
+                            ),
+                            Vec::new(),
+                            serde_json::json!({"mode": "mesh"}),
+                        ));
+                    }
+                }
+                if viewport_update.mesh_session_finished {
+                    if let Some(workbench) = self.workbench.as_mut() {
+                        let key = if viewport_update.mesh_session_cancelled {
+                            "authoring.mesh_edit_cancelled"
+                        } else {
+                            "authoring.mesh_edit_applied"
+                        };
+                        workbench.log_console_output(crate::commands::CommandOutput::info(
+                            raf_core::i18n::t(key, self.settings_state.language),
+                            Vec::new(),
+                            serde_json::json!({
+                                "cancelled": viewport_update.mesh_session_cancelled
+                            }),
                         ));
                     }
                 }
@@ -990,7 +1092,11 @@ impl NativeEditorApplication {
             };
             Some(canvas_layer)
         } else if project_open {
-            let electronics_canvas_rect = runtime.layout().electronics_canvas_for_pcb(self.electronics_editor.as_ref().is_some_and(|e| e.active_surface() == raf_electronics::CadSurfaceKind::Pcb));
+            let electronics_canvas_rect = runtime.layout().electronics_canvas_for_pcb(
+                self.electronics_editor
+                    .as_ref()
+                    .is_some_and(|e| e.active_surface() == raf_electronics::CadSurfaceKind::Pcb),
+            );
             let canvas_target =
                 electronics_canvas_rect.to_physical(self.input.scale_factor() as f32, target_size);
             sync_electronics_canvas(
@@ -1033,11 +1139,18 @@ impl NativeEditorApplication {
                 |key| raf_core::i18n::t(key, self.settings_state.language),
             );
             observe_editor_presentation(host, &rendered);
-            frame_was_deferred = rendered.as_ref().is_ok_and(|frame| frame.metrics.presents == 0);
+            frame_was_deferred = rendered
+                .as_ref()
+                .is_ok_and(|frame| frame.metrics.presents == 0);
             #[cfg(windows)]
             if let (Some(accessibility), Some(window)) = (&mut self.accessibility, &self.window) {
-                accessibility.publish(window, std::slice::from_mut(&mut layer), false, ui_language,
-                    |key| raf_core::i18n::t(key, ui_language));
+                accessibility.publish(
+                    window,
+                    std::slice::from_mut(&mut layer),
+                    false,
+                    ui_language,
+                    |key| raf_core::i18n::t(key, ui_language),
+                );
             }
         } else if self.agents_open {
             let Some(surface) = self.agent_surface.as_mut() else {
@@ -1080,11 +1193,18 @@ impl NativeEditorApplication {
                     raf_core::i18n::t(key, ui_language)
                 });
             observe_editor_presentation(host, &rendered);
-            frame_was_deferred = rendered.as_ref().is_ok_and(|frame| frame.metrics.presents == 0);
+            frame_was_deferred = rendered
+                .as_ref()
+                .is_ok_and(|frame| frame.metrics.presents == 0);
             #[cfg(windows)]
             if let (Some(accessibility), Some(window)) = (&mut self.accessibility, &self.window) {
-                accessibility.publish(window, &mut layers, self.settings_open || self.exit_confirmation_open, ui_language,
-                    |key| raf_core::i18n::t(key, ui_language));
+                accessibility.publish(
+                    window,
+                    &mut layers,
+                    self.settings_open || self.exit_confirmation_open,
+                    ui_language,
+                    |key| raf_core::i18n::t(key, ui_language),
+                );
             }
         } else if project_open {
             let Some(workbench) = self.workbench.as_mut() else {
@@ -1095,21 +1215,45 @@ impl NativeEditorApplication {
             if runtime.project_type() == ProjectType::Electronics {
                 workbench.sync_electronics_overlay(
                     self.electronics_editor.as_ref(),
-                    runtime.layout().electronics_canvas_for_pcb(self.electronics_editor.as_ref().is_some_and(|e| e.active_surface() == raf_electronics::CadSurfaceKind::Pcb)),
+                    runtime.layout().electronics_canvas_for_pcb(
+                        self.electronics_editor.as_ref().is_some_and(|e| {
+                            e.active_surface() == raf_electronics::CadSurfaceKind::Pcb
+                        }),
+                    ),
                 );
             }
             // Input commits can change the document after the pre-input sync.
             // Present and publish the resulting surface in this same frame.
             if refresh_workbench_after_input {
                 let selected = runtime.game_viewport().selected.clone();
-                let compass = if runtime.project_type() == ProjectType::Game && runtime.game_viewport().mode == NativeViewportMode::View3d {
-                    ViewportCompassState::from_orbit(runtime.game_viewport().bridge().orbit_yaw(), runtime.game_viewport().bridge().orbit_pitch())
-                } else { ViewportCompassState::hidden() };
-                workbench.sync(runtime.layout(), &self.scene, &selected,
-                    runtime.history().can_undo(), runtime.history().can_redo(), runtime.has_clipboard(),
-                    runtime.node_graph(), runtime.selected_graph_node(), runtime.node_graph_revision(),
-                    runtime.can_undo_node_graph(), runtime.can_redo_node_graph(), runtime.node_validation(),
-                    self.project.as_ref(), now, compass, self.electronics_editor.as_ref());
+                let compass = if runtime.project_type() == ProjectType::Game
+                    && runtime.game_viewport().mode == NativeViewportMode::View3d
+                {
+                    ViewportCompassState::from_orbit(
+                        runtime.game_viewport().bridge().orbit_yaw(),
+                        runtime.game_viewport().bridge().orbit_pitch(),
+                    )
+                } else {
+                    ViewportCompassState::hidden()
+                };
+                workbench.sync(
+                    runtime.layout(),
+                    &self.scene,
+                    &selected,
+                    runtime.history().can_undo(),
+                    runtime.history().can_redo(),
+                    runtime.has_clipboard(),
+                    runtime.node_graph(),
+                    runtime.selected_graph_node(),
+                    runtime.node_graph_revision(),
+                    runtime.can_undo_node_graph(),
+                    runtime.can_redo_node_graph(),
+                    runtime.node_validation(),
+                    self.project.as_ref(),
+                    now,
+                    compass,
+                    self.electronics_editor.as_ref(),
+                );
             }
             let mut layers =
                 workbench.compositor_layers(self.input.scale_factor() as f32, target_size);
@@ -1132,15 +1276,24 @@ impl NativeEditorApplication {
                 host.render_editor_layers(compositor, canvas_layer, &mut layers, |key| {
                     studio_model
                         .as_ref()
-                        .map(|model| crate::native_studio::resolve_hub_text(key, model, ui_language))
+                        .map(|model| {
+                            crate::native_studio::resolve_hub_text(key, model, ui_language)
+                        })
                         .unwrap_or_else(|| raf_core::i18n::t(key, ui_language))
                 });
             observe_editor_presentation(host, &rendered);
-            frame_was_deferred = rendered.as_ref().is_ok_and(|frame| frame.metrics.presents == 0);
+            frame_was_deferred = rendered
+                .as_ref()
+                .is_ok_and(|frame| frame.metrics.presents == 0);
             #[cfg(windows)]
             if let (Some(accessibility), Some(window)) = (&mut self.accessibility, &self.window) {
-                accessibility.publish(window, &mut layers, self.settings_open || self.exit_confirmation_open, ui_language,
-                    |key| raf_core::i18n::t(key, ui_language));
+                accessibility.publish(
+                    window,
+                    &mut layers,
+                    self.settings_open || self.exit_confirmation_open,
+                    ui_language,
+                    |key| raf_core::i18n::t(key, ui_language),
+                );
             }
         } else {
             let Some(studio) = self.studio.as_mut() else {
@@ -1169,17 +1322,31 @@ impl NativeEditorApplication {
                 host.render_editor_layers(compositor, canvas_layer, &mut layers, |key| {
                     studio_model
                         .as_ref()
-                        .map(|model| crate::native_studio::resolve_hub_text(key, model, ui_language))
+                        .map(|model| {
+                            crate::native_studio::resolve_hub_text(key, model, ui_language)
+                        })
                         .unwrap_or_else(|| raf_core::i18n::t(key, ui_language))
                 });
             observe_editor_presentation(host, &rendered);
-            frame_was_deferred = rendered.as_ref().is_ok_and(|frame| frame.metrics.presents == 0);
+            frame_was_deferred = rendered
+                .as_ref()
+                .is_ok_and(|frame| frame.metrics.presents == 0);
             #[cfg(windows)]
             if let (Some(accessibility), Some(window)) = (&mut self.accessibility, &self.window) {
-                accessibility.publish(window, &mut layers, self.settings_open || self.exit_confirmation_open, ui_language, |key| {
-                    studio_model.as_ref().map(|model| crate::native_studio::resolve_hub_text(key, model, ui_language))
-                        .unwrap_or_else(|| raf_core::i18n::t(key, ui_language))
-                });
+                accessibility.publish(
+                    window,
+                    &mut layers,
+                    self.settings_open || self.exit_confirmation_open,
+                    ui_language,
+                    |key| {
+                        studio_model
+                            .as_ref()
+                            .map(|model| {
+                                crate::native_studio::resolve_hub_text(key, model, ui_language)
+                            })
+                            .unwrap_or_else(|| raf_core::i18n::t(key, ui_language))
+                    },
+                );
             }
         }
         if frame_was_deferred {
@@ -1224,4 +1391,3 @@ impl NativeEditorApplication {
         }
     }
 }
-

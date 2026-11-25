@@ -60,6 +60,8 @@ impl CapabilityDefinition {
             || name == "scene.navigation_audit"
             || name == "scene.visual_review"
             || name == "game.animation.sample"
+            || name == "game.animation.bake"
+            || name == "game.animation.retarget"
             || name == "game.plan"
             || name == "world.brief"
             || name == "task.get"

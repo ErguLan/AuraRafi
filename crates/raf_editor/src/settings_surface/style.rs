@@ -87,6 +87,48 @@ pub(super) fn settings_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             )
             .when(UiStyleRuleState::Always),
             UiStyleRule::new(
+                UiStyleSelector::Class("settings-impact-filter".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    text: Some(tokens.text_muted),
+                    border_width: Some(1.0),
+                    radius: Some(4.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-impact-filter".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-impact-filter-active".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.selection),
+                    border: Some(tokens.accent),
+                    text: Some(tokens.accent),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-impact-filter-active".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent_hot),
+                    text: Some(tokens.accent_hot),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
                 UiStyleSelector::Class("settings-select-trigger".to_string()),
                 UiStylePatch {
                     fill: Some(tokens.surface_alt),

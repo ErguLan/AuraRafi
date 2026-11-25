@@ -47,7 +47,11 @@ pub use components::{
     tooltip_node, tree_row, tree_row_with_icon, UiSegmentedOption, UiSegmentedOrientation,
     UiStatusTone,
 };
-pub use components::{UiButtonVariant, UiComponents, UiImageView, UiImageViewShape};
+pub use components::{
+    color_field, color_field_rules, color_popover, number_field, number_field_rules,
+    UiButtonVariant, UiColorFieldSpec, UiComponents, UiImageView, UiImageViewShape,
+    UiNumberFieldSpec, COLOR_PICKER_POPOVER_HEIGHT, COLOR_PICKER_POPOVER_WIDTH,
+};
 pub use editing::{UiTextBinding, UiTextDraftBank};
 pub use controls::{
     UiColorPicker, UiColorPickerHit, UiControl, UiImage, UiImageFit, UiImageInsets, UiImageOptions,

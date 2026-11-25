@@ -1,8 +1,8 @@
 //! Sandboxed Rhai authoring scripts for world plans.
 
+use super::super::query::{parsed_command_from_params, text_argument};
 use super::compile::compile_world_program;
 use super::plan::{append_journal, sha256_hex};
-use super::super::query::{parsed_command_from_params, text_argument};
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -88,10 +88,7 @@ fn world_script_program(source: &str, scene: &SceneGraph) -> Result<(Value, usiz
             if query.is_empty() {
                 return Ok(0);
             }
-            Ok(texts
-                .iter()
-                .filter(|text| text.contains(&query))
-                .count() as i64)
+            Ok(texts.iter().filter(|text| text.contains(&query)).count() as i64)
         },
     );
     let world = state.clone();
@@ -104,7 +101,9 @@ fn world_script_program(source: &str, scene: &SceneGraph) -> Result<(Value, usiz
             if world.groups.len() >= 512 {
                 return Err(script_error("The plan already has 512 groups."));
             }
-            world.groups.push(serde_json::json!({"name": name.to_string()}));
+            world
+                .groups
+                .push(serde_json::json!({"name": name.to_string()}));
             Ok(())
         },
     );
@@ -120,116 +119,202 @@ fn world_script_program(source: &str, scene: &SceneGraph) -> Result<(Value, usiz
         },
     );
     let world = state.clone();
-    world_module.set_native_fn("parent_clear", move || -> Result<(), Box<rhai::EvalAltResult>> {
-        let mut world = world
-            .lock()
-            .map_err(|_| script_error("Authoring script state was poisoned."))?;
-        world.parent = None;
-        Ok(())
-    });
+    world_module.set_native_fn(
+        "parent_clear",
+        move || -> Result<(), Box<rhai::EvalAltResult>> {
+            let mut world = world
+                .lock()
+                .map_err(|_| script_error("Authoring script state was poisoned."))?;
+            world.parent = None;
+            Ok(())
+        },
+    );
     let world = state.clone();
     world_module.set_native_fn(
         "camera",
-        move |name: rhai::ImmutableString, x: f64, y: f64, z: f64, fov: f64| -> Result<(), Box<rhai::EvalAltResult>> {
+        move |name: rhai::ImmutableString,
+              x: f64,
+              y: f64,
+              z: f64,
+              fov: f64|
+              -> Result<(), Box<rhai::EvalAltResult>> {
             if !fov.is_finite() || !(1.0..=179.0).contains(&fov) {
                 return Err(script_error("world::camera fov must be between 1 and 179."));
             }
-            world.lock().map_err(|_| script_error("Authoring script state was poisoned."))?.push(serde_json::json!({
-                "op": "camera",
-                "name": name.to_string(),
-                "position": [x, y, z],
-                "fov": fov,
-            }));
+            world
+                .lock()
+                .map_err(|_| script_error("Authoring script state was poisoned."))?
+                .push(serde_json::json!({
+                    "op": "camera",
+                    "name": name.to_string(),
+                    "position": [x, y, z],
+                    "fov": fov,
+                }));
             Ok(())
         },
     );
     let world = state.clone();
     world_module.set_native_fn(
         "script",
-        move |target: rhai::ImmutableString, file: rhai::ImmutableString| -> Result<(), Box<rhai::EvalAltResult>> {
+        move |target: rhai::ImmutableString,
+              file: rhai::ImmutableString|
+              -> Result<(), Box<rhai::EvalAltResult>> {
             if file.trim().is_empty() {
                 return Err(script_error("world::script requires a script file."));
             }
-            world.lock().map_err(|_| script_error("Authoring script state was poisoned."))?.push(serde_json::json!({
-                "op": "script",
-                "target": target.to_string(),
-                "file": file.to_string(),
-            }));
+            world
+                .lock()
+                .map_err(|_| script_error("Authoring script state was poisoned."))?
+                .push(serde_json::json!({
+                    "op": "script",
+                    "target": target.to_string(),
+                    "file": file.to_string(),
+                }));
             Ok(())
         },
     );
     let world = state.clone();
     world_module.set_native_fn(
         "place",
-        move |archetype: rhai::ImmutableString, x: f64, y: f64, z: f64| -> Result<(), Box<rhai::EvalAltResult>> {
-            world.lock().map_err(|_| script_error("Authoring script state was poisoned."))?.push(serde_json::json!({
-                "op": "place",
-                "archetype": archetype.to_string(),
-                "position": [x, y, z],
-            }));
+        move |archetype: rhai::ImmutableString,
+              x: f64,
+              y: f64,
+              z: f64|
+              -> Result<(), Box<rhai::EvalAltResult>> {
+            world
+                .lock()
+                .map_err(|_| script_error("Authoring script state was poisoned."))?
+                .push(serde_json::json!({
+                    "op": "place",
+                    "archetype": archetype.to_string(),
+                    "position": [x, y, z],
+                }));
             Ok(())
         },
     );
     let world = state.clone();
     world_module.set_native_fn(
         "place_named",
-        move |archetype: rhai::ImmutableString, name: rhai::ImmutableString, x: f64, y: f64, z: f64| -> Result<(), Box<rhai::EvalAltResult>> {
-            world.lock().map_err(|_| script_error("Authoring script state was poisoned."))?.push(serde_json::json!({
-                "op": "place",
-                "archetype": archetype.to_string(),
-                "name": name.to_string(),
-                "position": [x, y, z],
-            }));
+        move |archetype: rhai::ImmutableString,
+              name: rhai::ImmutableString,
+              x: f64,
+              y: f64,
+              z: f64|
+              -> Result<(), Box<rhai::EvalAltResult>> {
+            world
+                .lock()
+                .map_err(|_| script_error("Authoring script state was poisoned."))?
+                .push(serde_json::json!({
+                    "op": "place",
+                    "archetype": archetype.to_string(),
+                    "name": name.to_string(),
+                    "position": [x, y, z],
+                }));
             Ok(())
         },
     );
     let world = state.clone();
     world_module.set_native_fn(
         "grid",
-        move |archetype: rhai::ImmutableString, count_x: i64, count_z: i64, spacing_x: f64, spacing_z: f64| -> Result<(), Box<rhai::EvalAltResult>> {
-            push_script_grid(&world, archetype.as_str(), count_x, count_z, spacing_x, spacing_z, 0.0, 0.0)
+        move |archetype: rhai::ImmutableString,
+              count_x: i64,
+              count_z: i64,
+              spacing_x: f64,
+              spacing_z: f64|
+              -> Result<(), Box<rhai::EvalAltResult>> {
+            push_script_grid(
+                &world,
+                archetype.as_str(),
+                count_x,
+                count_z,
+                spacing_x,
+                spacing_z,
+                0.0,
+                0.0,
+            )
         },
     );
     let world = state.clone();
     world_module.set_native_fn(
         "grid_at",
-        move |archetype: rhai::ImmutableString, count_x: i64, count_z: i64, spacing_x: f64, spacing_z: f64, origin_x: f64, origin_z: f64| -> Result<(), Box<rhai::EvalAltResult>> {
-            push_script_grid(&world, archetype.as_str(), count_x, count_z, spacing_x, spacing_z, origin_x, origin_z)
+        move |archetype: rhai::ImmutableString,
+              count_x: i64,
+              count_z: i64,
+              spacing_x: f64,
+              spacing_z: f64,
+              origin_x: f64,
+              origin_z: f64|
+              -> Result<(), Box<rhai::EvalAltResult>> {
+            push_script_grid(
+                &world,
+                archetype.as_str(),
+                count_x,
+                count_z,
+                spacing_x,
+                spacing_z,
+                origin_x,
+                origin_z,
+            )
         },
     );
     let world = state.clone();
     world_module.set_native_fn(
         "line",
-        move |archetype: rhai::ImmutableString, x1: f64, z1: f64, x2: f64, z2: f64, spacing: f64| -> Result<(), Box<rhai::EvalAltResult>> {
+        move |archetype: rhai::ImmutableString,
+              x1: f64,
+              z1: f64,
+              x2: f64,
+              z2: f64,
+              spacing: f64|
+              -> Result<(), Box<rhai::EvalAltResult>> {
             if !spacing.is_finite() || spacing <= 0.0 {
-                return Err(script_error("world::line spacing must be greater than zero."));
+                return Err(script_error(
+                    "world::line spacing must be greater than zero.",
+                ));
             }
-            world.lock().map_err(|_| script_error("Authoring script state was poisoned."))?.push(serde_json::json!({
-                "op": "along",
-                "archetype": archetype.to_string(),
-                "points": [[x1, 0.0, z1], [x2, 0.0, z2]],
-                "spacing": spacing,
-            }));
+            world
+                .lock()
+                .map_err(|_| script_error("Authoring script state was poisoned."))?
+                .push(serde_json::json!({
+                    "op": "along",
+                    "archetype": archetype.to_string(),
+                    "points": [[x1, 0.0, z1], [x2, 0.0, z2]],
+                    "spacing": spacing,
+                }));
             Ok(())
         },
     );
     let world = state.clone();
     world_module.set_native_fn(
         "scatter",
-        move |archetype: rhai::ImmutableString, count: i64, min_x: f64, min_z: f64, max_x: f64, max_z: f64, seed: i64| -> Result<(), Box<rhai::EvalAltResult>> {
+        move |archetype: rhai::ImmutableString,
+              count: i64,
+              min_x: f64,
+              min_z: f64,
+              max_x: f64,
+              max_z: f64,
+              seed: i64|
+              -> Result<(), Box<rhai::EvalAltResult>> {
             if count <= 0 || count > 4096 {
-                return Err(script_error("world::scatter count must be between 1 and 4096."));
+                return Err(script_error(
+                    "world::scatter count must be between 1 and 4096.",
+                ));
             }
             if min_x > max_x || min_z > max_z {
-                return Err(script_error("world::scatter min must be <= max on both axes."));
+                return Err(script_error(
+                    "world::scatter min must be <= max on both axes.",
+                ));
             }
-            world.lock().map_err(|_| script_error("Authoring script state was poisoned."))?.push(serde_json::json!({
-                "op": "scatter",
-                "archetype": archetype.to_string(),
-                "count": count,
-                "region": {"min": [min_x, 0.0, min_z], "max": [max_x, 0.0, max_z]},
-                "seed": seed.max(1),
-            }));
+            world
+                .lock()
+                .map_err(|_| script_error("Authoring script state was poisoned."))?
+                .push(serde_json::json!({
+                    "op": "scatter",
+                    "archetype": archetype.to_string(),
+                    "count": count,
+                    "region": {"min": [min_x, 0.0, min_z], "max": [max_x, 0.0, max_z]},
+                    "seed": seed.max(1),
+                }));
             Ok(())
         },
     );
@@ -238,7 +323,9 @@ fn world_script_program(source: &str, scene: &SceneGraph) -> Result<(Value, usiz
         "assert_max_entities",
         move |max: i64| -> Result<(), Box<rhai::EvalAltResult>> {
             if max < 0 {
-                return Err(script_error("world::assert_max_entities requires a positive budget."));
+                return Err(script_error(
+                    "world::assert_max_entities requires a positive budget.",
+                ));
             }
             let mut world = world
                 .lock()
@@ -303,13 +390,16 @@ fn push_script_grid(
     if !spacing_x.is_finite() || !spacing_z.is_finite() {
         return Err(script_error("world::grid spacing must be finite."));
     }
-    world.lock().map_err(|_| script_error("Authoring script state was poisoned."))?.push(serde_json::json!({
-        "op": "grid",
-        "archetype": archetype,
-        "count": [count_x, 1, count_z],
-        "spacing": [spacing_x, 0.0, spacing_z],
-        "origin": [origin_x, 0.0, origin_z],
-    }));
+    world
+        .lock()
+        .map_err(|_| script_error("Authoring script state was poisoned."))?
+        .push(serde_json::json!({
+            "op": "grid",
+            "archetype": archetype,
+            "count": [count_x, 1, count_z],
+            "spacing": [spacing_x, 0.0, spacing_z],
+            "origin": [origin_x, 0.0, origin_z],
+        }));
     Ok(())
 }
 
@@ -352,8 +442,8 @@ pub(crate) fn execute_world_script(
             .or_else(|| request.arg("script").map(str::to_string))
         {
             (source, "inline".to_string())
-        } else if let Some(file) = text_argument(request, "file")
-            .or_else(|| text_argument(request, "path"))
+        } else if let Some(file) =
+            text_argument(request, "file").or_else(|| text_argument(request, "path"))
         {
             let source = read_authoring_script(&root, &file)?;
             (source, file)
@@ -370,9 +460,8 @@ pub(crate) fn execute_world_script(
         );
         let absolute_script = root.join(&script_path);
         if let Some(parent) = absolute_script.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                format!("Could not create the world script directory: {error}")
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create the world script directory: {error}"))?;
         }
         if !absolute_script.exists() {
             std::fs::write(&absolute_script, source.as_bytes())
@@ -384,15 +473,10 @@ pub(crate) fn execute_world_script(
             .and_then(Value::as_array)
             .map(Vec::len)
             .unwrap_or(0);
-        let plan_request = parsed_command_from_params(
-            "game.plan",
-            serde_json::json!({"program": program}),
-        );
+        let plan_request =
+            parsed_command_from_params("game.plan", serde_json::json!({"program": program}));
         let mut output = execute_plan(&plan_request, ctx);
-        if matches!(
-            output.level,
-            crate::commands::output::CommandLevel::Error
-        ) {
+        if matches!(output.level, crate::commands::output::CommandLevel::Error) {
             return Ok(output);
         }
         let plan_id = output.json.get("plan_id").cloned().unwrap_or(Value::Null);

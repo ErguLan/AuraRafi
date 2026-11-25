@@ -34,7 +34,7 @@ pub fn build_tab_strip_surface(
     collapsed: bool,
     preview: Option<&BottomTabDragPreview>,
 ) -> UiSurface {
-    build_tab_strip_surface_sized(palette, group, collapsed, preview, f32::INFINITY)
+    build_tab_strip_surface_sized(palette, group, collapsed, preview, 0, f32::INFINITY)
 }
 
 pub fn build_tab_strip_surface_sized(
@@ -42,12 +42,18 @@ pub fn build_tab_strip_surface_sized(
     group: &DockTabGroup,
     collapsed: bool,
     preview: Option<&BottomTabDragPreview>,
+    console_errors: usize,
     width: f32,
 ) -> UiSurface {
     let console_controls = group.active_tab == "console" && !collapsed;
     let compact = width
         < group.tabs.iter().map(|tab| tab_width(tab)).sum::<f32>()
-            + if console_controls { 164.0 } else { 40.0 };
+            + if console_controls { 164.0 } else { 40.0 }
+            + if group.tabs.iter().any(|tab| tab.id == "console") && console_errors > 0 {
+                24.0
+            } else {
+                0.0
+            };
     let tokens = palette.tokens();
     let mut root = UiNode::new("bottom.tabs", UiNodeKind::Toolbar)
         .with_class("bottom-tabs")
@@ -89,7 +95,20 @@ pub fn build_tab_strip_surface_sized(
         // captures the pointer on that node, so removing it here would make a
         // later pointer release unable to dispatch DragEnd.
         let active = group.active_tab == tab.id;
-        let mut button = tab_button(group, tab, active, compact, width < 340.0, tokens.accent);
+        let badge = if tab.id == "console" {
+            console_errors
+        } else {
+            0
+        };
+        let mut button = tab_button(
+            group,
+            tab,
+            active,
+            compact,
+            width < 340.0,
+            tokens.accent,
+            badge,
+        );
         if preview.is_some_and(|preview| {
             preview.source_group_id == group.id && preview.source_tab_id == tab.id
         }) {
@@ -427,6 +446,7 @@ fn tab_button(
     compact: bool,
     icon_only_active: bool,
     accent: [u8; 4],
+    badge: usize,
 ) -> UiNode {
     let class = if active {
         "bottom-tab bottom-tab-active"
@@ -437,7 +457,7 @@ fn tab_button(
         32.0
     } else {
         tab_width(tab)
-    };
+    } + if badge > 0 { 24.0 } else { 0.0 };
     let mut node = UiNode::new(
         format!("bottom.tab.{}|{}", group.id, tab.id),
         UiNodeKind::Button,
@@ -494,6 +514,28 @@ fn tab_button(
     if !compact || (active && !icon_only_active) {
         node = node.with_text_key(tab.title_key.clone());
     }
+    if badge > 0 {
+        node = node.with_child(
+            UiNode::new(
+                format!("bottom.tab.{}|{}.badge", group.id, tab.id),
+                UiNodeKind::Label,
+            )
+            .with_class("bottom-tab-badge")
+            .with_text_value(if badge > 99 {
+                "99+".to_string()
+            } else {
+                badge.to_string()
+            })
+            .with_text_style(UiTextStyle {
+                size_px: 10.0,
+                line_height_px: 14.0,
+                ..UiTextStyle::body([255, 255, 255, 255])
+            })
+            .with_layout(UiLayout::fixed(20.0, 16.0))
+            .with_tooltip_key("console.error_badge")
+            .with_accessibility_label_key("console.error_badge"),
+        );
+    }
     node
 }
 
@@ -523,6 +565,7 @@ mod tests {
             &group,
             false,
             None,
+            0,
             360.0,
         );
         let frame = surface.build_frame(360, 34, [0, 0, 0, 255]);
@@ -672,5 +715,31 @@ mod tests {
 
         assert_eq!(tab.layout.basis, [124.0, 28.0]);
         assert_eq!(tab.text_key.as_deref(), Some("app.studio_project"));
+    }
+
+    #[test]
+    fn console_tab_shows_an_error_badge() {
+        let group = DockTabGroup::new(
+            "workspace",
+            vec![
+                DockTab::new("console", "app.studio_console", UiIconId::Console),
+                DockTab::new("assets", "app.studio_assets", UiIconId::Assets),
+            ],
+        );
+        let surface = build_tab_strip_surface_sized(
+            StudioUiPalette::IndustrialDark,
+            &group,
+            false,
+            None,
+            7,
+            900.0,
+        );
+        let badge = child(&surface.root, "bottom.tab.workspace|console.badge");
+
+        assert_eq!(badge.text_value.as_deref(), Some("7"));
+        assert!(badge
+            .classes
+            .iter()
+            .any(|class| class == "bottom-tab-badge"));
     }
 }

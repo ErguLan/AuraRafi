@@ -14,14 +14,69 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  formatting:
+    name: Formatting (changed files)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # The repository still has legacy unformatted files. Gate the files this
+      # change actually touches instead of reformatting unrelated history.
+      - name: Check changed Rust formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$base" ]; then
+            base="${{ github.event.before }}"
+          fi
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base="$(git rev-parse HEAD^ 2>/dev/null || git rev-parse HEAD)"
+          fi
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$base"...HEAD -- '*.rs')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No Rust files changed."
+            exit 0
+          fi
+          printf 'Checking %s Rust file(s):\n' "${#files[@]}"
+          printf '  %s\n' "${files[@]}"
+          rustfmt --edition 2021 --check "${files[@]}"
+
+  clippy:
+    name: Clippy strict (raf_net)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # Strict clippy starts with the transport crate, which is warning-free.
+      # The remaining workspace warning debt is tracked in docs/ROADMAP.md
+      # under the TEMP post-0.12 section until it can become a full gate.
+      - name: Clippy raf_net
+        run: cargo clippy -p raf_net --lib --no-deps -- -D warnings
+
   linux:
     name: Linux check and test
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      # .cargo/config.toml targets x86_64-pc-windows-gnu for local Windows
-      # builds. CI overrides it instead of editing the repository file.
-      CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
       CARGO_TARGET_DIR: target_gnu
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
@@ -66,13 +121,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-target-gnu-
 
-      # The repository still contains pre-existing unformatted files outside
-      # this delivery. Report formatting drift without blocking the Linux gate;
-      # edited files are formatted before commit.
-      - name: Check formatting
-        continue-on-error: true
-        run: cargo fmt --all -- --check
-
+      # No CARGO_BUILD_TARGET here: Linux must use its host target after the
+      # build.target removal from .cargo/config.toml.
       - name: Check core crates
         run: cargo check -p raf_core -p raf_runtime -p raf_render -p raf_ui -p raf_net -p raf_web
 
@@ -85,8 +135,9 @@ jobs:
       - name: Check editor binary
         run: cargo check -p aura_rafi_editor
 
-      # Focused crates only. The workspace test suite is intentionally not run
-      # here because unrelated in-flight areas must not block this gate.
+      # Stable test subset. Full `cargo test --workspace` is intentionally not
+      # used while integration harnesses and in-flight crates are still under
+      # repair; the excluded areas are tracked in docs/ROADMAP.md.
       - name: Test raf_core
         run: cargo test -p raf_core --lib
 
@@ -98,6 +149,15 @@ jobs:
 
       - name: Test raf_render
         run: cargo test -p raf_render --lib
+
+      - name: Test raf_script
+        run: cargo test -p raf_script --lib
+
+      - name: Test raf_player
+        run: cargo test -p raf_player --lib
+
+      - name: Test raf_agb
+        run: cargo test -p raf_agb --lib
 
       - name: Build player binary
         run: cargo build -p raf_player --bin aurarafi-player
@@ -114,6 +174,95 @@ jobs:
           path: target_gnu/x86_64-unknown-linux-gnu/debug/aurarafi-player
           if-no-files-found: error
           retention-days: 7
+
+  windows:
+    name: Windows GNU check and test
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
+      CARGO_TARGET_DIR: target_gnu
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install MinGW
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc
+
+      - name: Add MinGW to PATH
+        shell: bash
+        run: echo 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+          components: rustfmt
+
+      - name: Cache target_gnu
+        uses: actions/cache@v4
+        with:
+          path: target_gnu
+          key: ${{ runner.os }}-target-gnu-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-target-gnu-
+
+      - name: Check core crates
+        run: cargo check -p raf_core -p raf_runtime -p raf_render -p raf_ui -p raf_net
+
+      - name: Check player
+        run: cargo check -p raf_player --bins
+
+      - name: Check editor library
+        run: cargo check -p raf_editor
+
+      - name: Check editor binary
+        run: cargo check -p aura_rafi_editor
+
+      - name: Test stable subset
+        shell: bash
+        run: |
+          set -e
+          cargo test -p raf_core --lib
+          cargo test -p raf_net --lib
+          cargo test -p raf_runtime --lib
+          cargo test -p raf_render --lib
+          cargo test -p raf_script --lib
+          cargo test -p raf_player --lib
+          cargo test -p raf_agb --lib
+
+  macos-core:
+    name: macOS core checks
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # Scope: platform-neutral core crates. Editor/window bring-up on macOS is
+      # tracked separately; this job proves the clone no longer forces Windows.
+      - name: Check portable crates
+        run: cargo check -p raf_core -p raf_net
+
+      - name: Test portable crates
+        run: |
+          cargo test -p raf_core --lib
+          cargo test -p raf_net --lib
 
   headless-smoke:
     name: Headless smoke

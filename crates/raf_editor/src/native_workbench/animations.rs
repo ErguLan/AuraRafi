@@ -1,13 +1,15 @@
 //! Retained animation dock and isolated viewport pose preview.
 
 use super::*;
-use crate::commands::game::animation::preview;
+use crate::commands::game::animation::{prepare_preview, preview, sample_preview};
 use raf_assets::animation_asset;
 use raf_core::scene::animation::{
     resolve_path, AnimationChannel, AnimationKey, AnimationLayer, AnimationRig, AnimationTrack,
 };
 use raf_core::scene::SceneNode;
+use raf_runtime::animation::AnimationPlayback;
 use raf_ui::{UiAlign, UiOverflow, UiRange, UiSizeMode, UiSpacing, UiTextOverflow, UiTextStyle};
+use std::time::{Duration, Instant};
 
 const TAB: &str = "animations";
 const PLAYHEAD: &str = "animations.time";
@@ -18,7 +20,21 @@ pub(super) struct AnimationPanel {
     time: f32,
     layer: usize,
     preview: Option<(u64, uuid::Uuid, SceneGraph)>,
+    playing: Option<PlayingPreview>,
     status: Option<(&'static str, Option<String>)>,
+    key_edit: Option<KeyEdit>,
+    key_revision: u32,
+}
+
+struct PlayingPreview {
+    sampled_at: Instant,
+    evaluator: AnimationPlayback,
+}
+
+struct KeyEdit {
+    track: usize,
+    key: usize,
+    values: [String; 4],
 }
 
 struct OpenAsset {
@@ -41,6 +57,7 @@ impl NativeGameWorkbench {
     pub(super) fn open_animation_asset(&mut self, row: &str) {
         self.assets_surface.close_menus();
         self.assets_surface.close_modals();
+        self.assets_import = None;
         self.assets_surface.selected_asset = Some(row.to_owned());
         self.bottom_dock.select(TAB);
         self.animations = AnimationPanel::default();
@@ -79,6 +96,30 @@ impl NativeGameWorkbench {
             .map(|(_, _, preview)| preview)
     }
 
+    pub(crate) fn tick_animation_preview(
+        &mut self,
+        scene: &SceneGraph,
+        selected: &[SceneNodeId],
+        now: Instant,
+        editor_active: bool,
+    ) -> bool {
+        if self.animations.playing.is_none() {
+            return false;
+        }
+        let active = editor_active
+            && !self.bottom_dock.is_collapsed()
+            && self.bottom_dock.has_active_tab(TAB);
+        let old_time = self.animations.time;
+        let playing = active && self.animations.tick_preview(scene, selected, now);
+        if !playing {
+            self.animations.playing = None;
+        }
+        if !playing || self.animations.time != old_time {
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        }
+        playing
+    }
+
     pub(super) fn handle_animation_action(
         &mut self,
         action: &UiAction,
@@ -87,8 +128,26 @@ impl NativeGameWorkbench {
         intents: &mut Vec<NativeWorkbenchIntent>,
     ) -> bool {
         let name = match action {
+            UiAction::SetText { key, value } if key.starts_with("animations.key-value.") => {
+                if let Some(index) = key
+                    .rsplit('.')
+                    .next()
+                    .and_then(|index| index.parse::<usize>().ok())
+                {
+                    if let Some(field) = self
+                        .animations
+                        .key_edit
+                        .as_mut()
+                        .and_then(|edit| edit.values.get_mut(index))
+                    {
+                        *field = value.clone();
+                    }
+                }
+                return true;
+            }
             UiAction::SetRange { key, value } if key == PLAYHEAD => {
                 if value.is_finite() && *value != self.animations.time {
+                    self.animations.playing = None;
                     self.animations.time = value.clamp(0.0, self.animations.duration());
                     self.animations.update_preview(scene, selected);
                     self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -101,6 +160,9 @@ impl NativeGameWorkbench {
         };
         let selected_node = selection(scene, selected);
         let project = self.assets_project_root.clone();
+        if name != "animations.play" {
+            self.animations.playing = None;
+        }
         match name {
             "animations.open" => {
                 self.open_menu = None;
@@ -144,11 +206,45 @@ impl NativeGameWorkbench {
                     if !asset.rig.layers.is_empty() {
                         self.animations.layer =
                             (self.animations.layer + 1) % asset.rig.layers.len();
+                        self.animations.key_edit = None;
                     }
                 }
             }
             "animations.preview" => self.animations.update_preview(scene, selected),
+            "animations.play" => {
+                if self.animations.playing.take().is_none() {
+                    if let Some((id, node)) = selected_node {
+                        if let Err(error) = self.animations.start_preview(scene, id, node) {
+                            self.animations.error(error);
+                        }
+                    }
+                }
+            }
             "animations.reset-preview" => self.animations.preview = None,
+            "animations.save-key" => {
+                if let Some(root) = project.as_deref() {
+                    match self.animations.save_key(root) {
+                        Ok(()) => self.animations.update_preview(scene, selected),
+                        Err(error) => self.animations.error(error),
+                    }
+                }
+            }
+            "animations.bake" => {
+                if let (Some(project), Some((id, _)), Some(open)) =
+                    (project.as_deref(), selected_node, &self.animations.asset)
+                {
+                    let result =
+                        crate::commands::game::animation::bake_rig(scene, id, &open.rig, 30)
+                            .and_then(|rig| animation_asset::create(project, "baked", &rig));
+                    match result {
+                        Ok(path) => {
+                            self.project_catalog.refresh();
+                            self.open_animation_asset(&path);
+                        }
+                        Err(error) => self.animations.error(error),
+                    }
+                }
+            }
             "animations.capture" => {
                 if let (Some(project), Some((id, _))) = (project.as_deref(), selected_node) {
                     match self.animations.capture(project, scene, id) {
@@ -191,7 +287,29 @@ impl NativeGameWorkbench {
                     }
                 }
             }
-            _ => return false,
+            _ => {
+                if let Some((track, key)) = name
+                    .strip_prefix("animations.key:")
+                    .and_then(|raw| raw.split_once(':'))
+                    .and_then(|(track, key)| {
+                        Some((track.parse::<usize>().ok()?, key.parse::<usize>().ok()?))
+                    })
+                {
+                    self.animations.edit_key(track, key);
+                    self.animations.update_preview(scene, selected);
+                } else if let Some(index) = name
+                    .strip_prefix("animations.interpolation:")
+                    .and_then(|value| value.parse::<usize>().ok())
+                {
+                    if let Some(project) = project.as_deref() {
+                        if let Err(error) = self.animations.switch_interpolation(project, index) {
+                            self.animations.error(error);
+                        }
+                    }
+                } else {
+                    return false;
+                }
+            }
         }
         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         intents.push(NativeWorkbenchIntent::Command("animations.redraw".into()));
@@ -200,6 +318,132 @@ impl NativeGameWorkbench {
 }
 
 impl AnimationPanel {
+    fn start_preview(
+        &mut self,
+        scene: &SceneGraph,
+        id: SceneNodeId,
+        node: &SceneNode,
+    ) -> Result<(), String> {
+        let asset = self.asset.as_ref().ok_or("Open an animation asset")?;
+        let (mut snapshot, mut evaluator) = prepare_preview(scene, id, &asset.rig)?;
+        if self.time >= self.duration() {
+            self.time = 0.0;
+        }
+        sample_preview(&mut snapshot, &mut evaluator, id, f64::from(self.time))?;
+        self.preview = Some((scene.document_revision(), node.uuid, snapshot));
+        self.playing = Some(PlayingPreview {
+            sampled_at: Instant::now(),
+            evaluator,
+        });
+        self.status = None;
+        Ok(())
+    }
+
+    fn tick_preview(&mut self, scene: &SceneGraph, selected: &[SceneNodeId], now: Instant) -> bool {
+        let duration = self.duration();
+        let Some((id, node)) = selection(scene, selected) else {
+            return false;
+        };
+        let Some((revision, owner, snapshot)) = self.preview.as_mut() else {
+            return false;
+        };
+        if *revision != scene.document_revision() || *owner != node.uuid {
+            return false;
+        }
+        let Some(playing) = self.playing.as_mut() else {
+            return false;
+        };
+        let elapsed = now.saturating_duration_since(playing.sampled_at);
+        if elapsed < Duration::from_secs_f32(1.0 / 30.0) {
+            return true;
+        }
+        let next = (self.time + elapsed.as_secs_f32()).min(duration);
+        playing.sampled_at = now;
+        if let Err(error) = sample_preview(snapshot, &mut playing.evaluator, id, f64::from(next)) {
+            self.error(error);
+            return false;
+        }
+        self.time = next;
+        next < duration
+    }
+
+    fn edit_key(&mut self, track: usize, key: usize) {
+        let Some(layer) = self
+            .asset
+            .as_ref()
+            .and_then(|asset| asset.rig.layers.get(self.layer))
+        else {
+            return;
+        };
+        let Some(sample) = layer
+            .tracks
+            .get(track)
+            .and_then(|track| track.keys.get(key))
+        else {
+            return;
+        };
+        self.time = layer.start + sample.time;
+        self.key_revision = self.key_revision.wrapping_add(1);
+        self.key_edit = Some(KeyEdit {
+            track,
+            key,
+            values: [sample.time, sample.value.x, sample.value.y, sample.value.z]
+                .map(|value| value.to_string()),
+        });
+    }
+
+    fn save_key(&mut self, project: &std::path::Path) -> Result<(), String> {
+        let asset = self.asset.as_mut().ok_or("Open an animation asset")?;
+        let edit = self.key_edit.as_ref().ok_or("Choose an animation key")?;
+        let mut rig = asset.rig.clone();
+        let mut values = [0.0; 4];
+        for (output, input) in values.iter_mut().zip(&edit.values) {
+            *output = input
+                .trim()
+                .parse::<f32>()
+                .map_err(|_| "Key fields must contain finite decimal values")?;
+        }
+        let layer = rig
+            .layers
+            .get_mut(self.layer)
+            .ok_or("Animation layer was removed")?;
+        let track = layer
+            .tracks
+            .get_mut(edit.track)
+            .ok_or("Animation track was removed")?;
+        let key = track
+            .keys
+            .get_mut(edit.key)
+            .ok_or("Animation key was removed")?;
+        *key = AnimationKey {
+            time: values[0],
+            value: glam::Vec3::new(values[1], values[2], values[3]),
+        };
+        track.keys.sort_by(|a, b| a.time.total_cmp(&b.time));
+        let index = track.keys.partition_point(|key| key.time < values[0]);
+        animation_asset::save(project, &asset.path, &asset.rig, &rig)?;
+        asset.rig = rig;
+        self.edit_key(edit.track, index);
+        Ok(())
+    }
+    fn switch_interpolation(
+        &mut self,
+        project: &std::path::Path,
+        track: usize,
+    ) -> Result<(), String> {
+        let open = self.asset.as_mut().ok_or("Open an animation asset")?;
+        let mut rig = open.rig.clone();
+        let track = rig
+            .layers
+            .get_mut(self.layer)
+            .and_then(|layer| layer.tracks.get_mut(track))
+            .ok_or("Animation track was removed")?;
+        track.stepped = !track.stepped;
+        animation_asset::save(project, &open.path, &open.rig, &rig)?;
+        open.rig = rig;
+        self.preview = None;
+        Ok(())
+    }
     fn error(&mut self, detail: String) {
         self.status = Some(("animation.error", Some(detail)));
     }
@@ -346,8 +590,12 @@ impl AnimationPanel {
             root = root.with_child(
                 row("animations.timeline")
                     .with_child(button(
-                        "preview",
-                        "animation.preview",
+                        "play",
+                        if self.playing.is_some() {
+                            "animation.pause"
+                        } else {
+                            "animation.play"
+                        },
                         target.is_some(),
                         palette,
                     ))
@@ -387,7 +635,8 @@ impl AnimationPanel {
                         "animation.capture",
                         target.is_some() && !layer.additive,
                         palette,
-                    )),
+                    ))
+                    .with_child(button("bake", "animation.bake", target.is_some(), palette)),
             );
             for (index, track) in layer.tracks.iter().enumerate() {
                 let name = track.path.join(" / ");
@@ -396,28 +645,90 @@ impl AnimationPanel {
                     AnimationChannel::Rotation => "animation.rotation",
                     AnimationChannel::Scale => "animation.scale",
                 };
-                let times = track
-                    .keys
-                    .iter()
-                    .take(8)
-                    .map(|key| format!("{:.3}", key.time))
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                root = root.with_child(
-                    row(&format!("animations.track.{index}"))
-                        .with_child(
-                            UiNode::new(format!("animations.channel.{index}"), UiNodeKind::Label)
-                                .with_text_key(channel)
-                                .with_layout(UiLayout::fixed(80.0, 22.0)),
-                        )
-                        .with_child(label(&format!("animations.path.{index}"), &name, palette))
-                        .with_child(label(
-                            &format!("animations.keys.{index}"),
-                            &format!("{}  |  {times}", track.keys.len()),
-                            palette,
-                        )),
-                );
+                let mut lane = row(&format!("animations.track.{index}"))
+                    .with_child(
+                        UiNode::new(format!("animations.channel.{index}"), UiNodeKind::Label)
+                            .with_text_key(channel)
+                            .with_layout(UiLayout::fixed(80.0, 22.0)),
+                    )
+                    .with_child(label(&format!("animations.path.{index}"), &name, palette))
+                    .with_child(button(
+                        &format!("interpolation:{index}"),
+                        if track.stepped {
+                            "animation.step"
+                        } else {
+                            "animation.linear"
+                        },
+                        true,
+                        palette,
+                    ));
+                let playhead = self.time - layer.start;
+                let cursor = track.keys.partition_point(|key| key.time < playhead);
+                let first = cursor
+                    .saturating_sub(7)
+                    .min(track.keys.len().saturating_sub(16));
+                for (key, sample) in track.keys.iter().enumerate().skip(first).take(16) {
+                    let time = layer.start + sample.time;
+                    let command = format!("animations.key:{index}:{key}");
+                    lane = lane.with_child(
+                        UiNode::new(format!("animations.key.{index}.{key}"), UiNodeKind::Button)
+                            .with_text_value(format!("{time:.3}"))
+                            .with_layout(UiLayout::fit_content().with_text_safe_area(true))
+                            .focusable()
+                            .with_event(raf_ui::UiEventBinding::command(
+                                raf_ui::UiEventKind::Click,
+                                &command,
+                            ))
+                            .with_event(raf_ui::UiEventBinding::command(
+                                raf_ui::UiEventKind::KeyPress("enter".into()),
+                                &command,
+                            )),
+                    );
+                }
+                root = root.with_child(lane);
             }
+        }
+        if let Some(edit) = &self.key_edit {
+            let mut controls = row("animations.key-editor");
+            for (index, name) in [
+                "animation.key_time",
+                "animation.key_x",
+                "animation.key_y",
+                "animation.key_z",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let id = format!("animations.key-value.{}.{index}", self.key_revision);
+                controls = controls
+                    .with_child(
+                        UiNode::new(format!("{id}.label"), UiNodeKind::Label)
+                            .with_text_key(name)
+                            .with_layout(UiLayout::fit_content()),
+                    )
+                    .with_child(
+                        UiNode::text_input(
+                            &id,
+                            raf_ui::UiTextInput {
+                                value_key: id.clone(),
+                                placeholder_key: None,
+                                max_length: 24,
+                                multiline: false,
+                                password: false,
+                                submit_command: Some("animations.save-key".into()),
+                            },
+                        )
+                        .with_text_value(&edit.values[index])
+                        .with_accessibility_label_key(name)
+                        .with_layout(UiLayout::fixed(76.0, 24.0)),
+                    );
+            }
+            root = root.with_child(controls.with_child(button(
+                "save-key",
+                "animation.save_key",
+                true,
+                palette,
+            )));
         }
         UiSurface::new("animations", palette, root)
     }
@@ -450,6 +761,9 @@ fn rig_from_pose(node: &SceneNode) -> AnimationRig {
     .collect();
     AnimationRig {
         impact: None,
+        contacts: Vec::new(),
+        motion_match: None,
+        physics_follow: Vec::new(),
         layers: vec![AnimationLayer {
             name: node.name.chars().take(32).collect(),
             duration: 1.0,
@@ -459,6 +773,8 @@ fn rig_from_pose(node: &SceneNode) -> AnimationRig {
             fade_in: 0.0,
             fade_out: 0.0,
             motion_speed: None,
+            motion_heading_degrees: 0.0,
+            action: None,
             additive: false,
             tracks,
         }],
@@ -545,6 +861,18 @@ mod tests {
         assert_eq!(*previewed_revision, revision);
         assert_eq!(snapshot.get(id).unwrap().position, glam::Vec3::Y * 0.5);
         assert_eq!(scene.get(id).unwrap().position, glam::Vec3::ZERO);
+        panel
+            .start_preview(&scene, id, scene.get(id).unwrap())
+            .unwrap();
+        let start = panel.playing.as_ref().unwrap().sampled_at;
+        assert!(panel.tick_preview(&scene, &[id], start + Duration::from_millis(250)));
+        assert_eq!(panel.time, 0.75);
+        assert_eq!(
+            panel.preview.as_ref().unwrap().2.get(id).unwrap().position,
+            0.75 * glam::Vec3::Y
+        );
+        assert!(!panel.tick_preview(&scene, &[], start + Duration::from_millis(500)));
+        assert_eq!(scene.document_revision(), revision);
         let surface = panel.surface(StudioUiPalette::IndustrialDark, &scene, &[id], 640.0);
         assert!(surface
             .root

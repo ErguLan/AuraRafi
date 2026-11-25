@@ -1,9 +1,6 @@
 //! Retained Hierarchy row nodes: overlap, guides, labels and row actions.
 
-use raf_core::scene::Primitive;
-use raf_render::api_graphic_basic::ui_surface::{
-    StudioUiPalette, UiIcon, UiIconId, UiIconSize,
-};
+use raf_render::api_graphic_basic::ui_surface::{StudioUiPalette, UiIcon, UiIconId, UiIconSize};
 use raf_ui::{
     UiAction, UiAlign, UiEventBinding, UiEventKind, UiFlow, UiFontWeight, UiJustify, UiLayout,
     UiNode, UiNodeKind, UiOverflow, UiSizeMode, UiSpacing, UiStyle, UiTextInput, UiTextOverflow,
@@ -24,6 +21,7 @@ pub(super) fn row_node(
     show_icons: bool,
     show_visibility: bool,
     show_locked: bool,
+    show_script_indicators: bool,
     drop_target: Option<raf_core::scene::SceneNodeId>,
 ) -> UiNode {
     let is_selected = selected.contains(&row.id);
@@ -268,6 +266,14 @@ pub(super) fn row_node(
         format!("hierarchy.navigate:down:{}", row.id.0),
     ))
     .with_event(UiEventBinding::command(
+        UiEventKind::KeyPress("arrowleft".to_string()),
+        format!("hierarchy.navigate:left:{}", row.id.0),
+    ))
+    .with_event(UiEventBinding::command(
+        UiEventKind::KeyPress("arrowright".to_string()),
+        format!("hierarchy.navigate:right:{}", row.id.0),
+    ))
+    .with_event(UiEventBinding::command(
         UiEventKind::KeyPress("home".to_string()),
         format!("hierarchy.navigate:home:{}", row.id.0),
     ))
@@ -294,6 +300,21 @@ pub(super) fn row_node(
                 .with_icon(UiIcon::new(UiIconId::Add).with_size(UiIconSize::Small))
                 .with_tooltip_key("hierarchy.insertion_parent")
                 .with_layout(UiLayout::fixed(18.0, row_height - 2.0)),
+        );
+    }
+    if show_script_indicators && row.has_scripts {
+        root = root.with_child(
+            UiNode::new(
+                format!("hierarchy.script-indicator.{}", row.id.0),
+                UiNodeKind::Label,
+            )
+            .with_icon(
+                UiIcon::new(UiIconId::Script)
+                    .with_size(UiIconSize::Small)
+                    .with_tint(palette.tokens().accent_hot),
+            )
+            .with_tooltip_key("hierarchy.badge.scripts")
+            .with_layout(UiLayout::fixed(16.0, row_height - 2.0)),
         );
     }
     root = badges::append_badges(root, row, row_height);
@@ -380,20 +401,9 @@ pub(super) fn compact_body_style(color: [u8; 4]) -> UiTextStyle {
 }
 
 pub(super) fn row_icon(row: &HierarchyRow) -> UiIconId {
-    if row.is_camera {
-        return UiIconId::Camera;
-    }
-    if row.is_folder {
-        return UiIconId::Folder;
-    }
-    match row.primitive {
-        Primitive::Empty => UiIconId::Node,
-        Primitive::Cube => UiIconId::Cube,
-        Primitive::Sphere => UiIconId::Sphere,
-        Primitive::Plane => UiIconId::Plane,
-        Primitive::Cylinder => UiIconId::Cylinder,
-        Primitive::Capsule => UiIconId::Capsule,
-    }
+    // The kind registry owns the icon mapping so queries, badges and rows
+    // cannot drift apart.
+    row.kind.icon(row.primitive)
 }
 
 fn indent_guide(
@@ -426,7 +436,10 @@ fn indent_guide(
             text: tokens.border,
             border_width: 0.0,
             radius: 0.0,
-            opacity: 0.28,
+            // Indentation is a rhythm cue, not a divider. The prescribed
+            // hierarchy guide alpha keeps nested trees readable without
+            // competing with row selection.
+            opacity: 0.16,
         }),
     )
 }

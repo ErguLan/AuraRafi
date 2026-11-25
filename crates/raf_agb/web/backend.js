@@ -1,5 +1,6 @@
-// Matches RasterUniforms: mat4 view_projection plus six vec4 fields.
-const CAMERA_BYTES = 160;
+// Matches RasterUniforms: mat4 view_projection, seven vec4 fields and 32
+// local-light vec4 slots plus the light-count vec4 (688 bytes, 16-aligned).
+const CAMERA_BYTES = 688;
 // Pipeline, texture, first, count, first instance, instances, indexed, scene.
 const DRAW_WORDS = 8;
 const DEPTH = "depth32float";
@@ -55,17 +56,24 @@ export async function openGpu(canvas, source) {
     { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
   ] });
   const layout = device.createPipelineLayout({ bindGroupLayouts: [bindings] });
-  const makePipeline = (scene, writeDepth) => device.createRenderPipelineAsync({
+  const makePipeline = (scene, writeDepth, cullMode, depthCompare) => device.createRenderPipelineAsync({
     layout,
     vertex: { module: shader, entryPoint: scene ? "scene" : "overlay", buffers: VERTEX_LAYOUT },
     fragment: { module: shader, entryPoint: "paint", targets: [{ format, blend: BLEND }] },
-    depthStencil: { format: DEPTH, depthWriteEnabled: writeDepth, depthCompare: scene ? "less-equal" : "always" },
+    primitive: { frontFace: "ccw", cullMode },
+    depthStencil: { format: DEPTH, depthWriteEnabled: writeDepth, depthCompare },
   });
-  const scene = await makePipeline(true, true);
-  const readDepth = await makePipeline(true, false);
-  const overlay = await makePipeline(false, false);
+  // Keep this order in sync with the pipeline index in backends/webgpu.rs.
+  const scene = await makePipeline(true, true, "back", "less-equal");
+  const sceneTwoSided = await makePipeline(true, true, "none", "less-equal");
+  const overlay = await makePipeline(false, false, "none", "always");
+  const readDepth = await makePipeline(true, false, "none", "less-equal");
+  const sceneTransparent = await makePipeline(true, false, "back", "less-equal");
+  const sceneTransparentTwoSided = await makePipeline(true, false, "none", "less-equal");
   const info = adapter.info;
-  return new BrowserGpu(canvas, context, format, device, bindings, [scene, overlay, readDepth], info);
+  return new BrowserGpu(canvas, context, format, device, bindings, [
+    scene, sceneTwoSided, overlay, readDepth, sceneTransparent, sceneTransparentTwoSided,
+  ], info);
 }
 
 class BrowserGpu {

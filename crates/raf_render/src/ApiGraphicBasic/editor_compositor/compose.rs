@@ -678,7 +678,7 @@ impl SceneFingerprint {
 enum CanvasFingerprint {
     None,
     Scene {
-        ptr: usize,
+        content: u64,
         rect: [u32; 4],
         source_size: [u32; 2],
     },
@@ -703,7 +703,7 @@ impl CanvasFingerprint {
         ];
         match layer.output.as_ref() {
             SceneFrameOutput::Scene(frame) => Self::Scene {
-                ptr: Arc::as_ptr(&layer.output) as *const () as usize,
+                content: frame.commands.content_hash(),
                 rect,
                 source_size: [frame.width, frame.height],
             },
@@ -863,8 +863,12 @@ mod tests {
     }
 
     fn retained_canvas(size: [u32; 2]) -> Arc<SceneFrameOutput> {
+        retained_canvas_with_clear(size, [12, 18, 24, 255])
+    }
+
+    fn retained_canvas_with_clear(size: [u32; 2], clear: [u8; 4]) -> Arc<SceneFrameOutput> {
         let mut commands = BasicCommandList::new();
-        commands.clear([12, 18, 24, 255]);
+        commands.clear(clear);
         let mesh = Arc::new(BasicMesh::new(
             vec![
                 BasicVertex {
@@ -1001,7 +1005,7 @@ mod tests {
         assert_ne!(draw[1], first_ui);
         let second_ui = draw[1];
 
-        let replacement = retained_canvas(size);
+        let replacement = retained_canvas_with_clear(size, [30, 18, 24, 255]);
         let scene_frame = compose(
             &mut compositor,
             &mut device,

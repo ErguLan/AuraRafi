@@ -335,8 +335,11 @@ pub fn build_electronics_canvas_overlay_surface(
             }
 
             let physical_label = physical_labels.get(&index);
-            if pcb_surface && object.kind == CadObjectKind::Component
-                && object.source_id.is_some() && physical_label.is_none() {
+            if pcb_surface
+                && object.kind == CadObjectKind::Component
+                && object.source_id.is_some()
+                && physical_label.is_none()
+            {
                 continue;
             }
             let label = physical_label.map(|p| p.text.as_str()).unwrap_or(label);
@@ -400,7 +403,8 @@ pub fn build_electronics_canvas_overlay_surface(
             };
 
             let id = format!("electronics.canvas.label.{index}");
-            let label_rect = physical_label.map(|p| p.rect)
+            let label_rect = physical_label
+                .map(|p| p.rect)
                 .unwrap_or_else(|| UiRect::new(x, y, width, label_height));
             let text_style = UiTextStyle {
                 role: UiTextRole::Label,
@@ -423,7 +427,9 @@ pub fn build_electronics_canvas_overlay_surface(
                     UiNode::new(id, UiNodeKind::Label)
                         .with_layout(UiLayout::absolute(label_rect).with_z_index(LABEL_Z_INDEX))
                         .with_text_value(label.to_string())
-                        .with_tooltip_value(object.label.clone().unwrap_or_else(|| label.to_string()))
+                        .with_tooltip_value(
+                            object.label.clone().unwrap_or_else(|| label.to_string()),
+                        )
                         // A canvas label is a runtime value, so the overflow
                         // policy is what keeps a long designator inside its
                         // own track instead of painting outside it.
@@ -481,41 +487,84 @@ pub fn build_electronics_canvas_overlay_surface(
 }
 
 fn place_pcb_labels(
-    editor: &NativeElectronicsEditor, size: Vec2,
+    editor: &NativeElectronicsEditor,
+    size: Vec2,
 ) -> std::collections::HashMap<usize, pcb_labels::LabelPlacement> {
     let (reference, value) = editor.pcb_label_visibility();
-    if !reference && !value { return std::collections::HashMap::new(); }
-    let components: std::collections::HashMap<_, _> = editor.pcb().components.iter()
-        .map(|c| (c.component_id, c)).collect();
+    if !reference && !value {
+        return std::collections::HashMap::new();
+    }
+    let components: std::collections::HashMap<_, _> = editor
+        .pcb()
+        .components
+        .iter()
+        .map(|c| (c.component_id, c))
+        .collect();
     let viewport = UiRect::new(0.0, 0.0, size.x, size.y);
     let camera = editor.camera();
-    let requests = editor.scene().objects.iter().enumerate().filter_map(|(index, object)| {
-        if object.kind != CadObjectKind::Component || object.label.is_none() { return None; }
-        let id = object.source_id?;
-        let component = components.get(&id)?;
-        let rect = object.rect?;
-        let center = camera.screen_from_world(rect.center, size);
-        let (sin, cos) = object.rotation_degrees.to_radians().sin_cos();
-        let extent = Vec2::new(rect.size.x*cos.abs()+rect.size.y*sin.abs(),
-            rect.size.x*sin.abs()+rect.size.y*cos.abs()) * camera.zoom;
-        if !center.is_finite() || !extent.is_finite() { return None; }
-        let body = UiRect::new(center.x-extent.x*0.5-3.0, center.y-extent.y*0.5-3.0,
-            extent.x+6.0, extent.y+6.0);
-        if body.intersection(viewport).is_empty() { return None; }
-        let text = match (reference, value) {
-            (true,true) => format!("{}\n{}", component.designator, component.value),
-            (true,false) => component.designator.clone(),
-            _ => component.value.clone(),
-        };
-        let width = text.lines().map(|l| label_track_width(l, pcb_labels::FONT_SIZE, None))
-            .fold(0.0_f32, f32::max);
-        Some(pcb_labels::LabelRequest { index, body: body.intersection(viewport), text, width,
-            selected: editor.selection().is_some_and(|s| s.source_id==id) })
-    }).collect();
+    let requests = editor
+        .scene()
+        .objects
+        .iter()
+        .enumerate()
+        .filter_map(|(index, object)| {
+            if object.kind != CadObjectKind::Component || object.label.is_none() {
+                return None;
+            }
+            let id = object.source_id?;
+            let component = components.get(&id)?;
+            let rect = object.rect?;
+            let center = camera.screen_from_world(rect.center, size);
+            let (sin, cos) = object.rotation_degrees.to_radians().sin_cos();
+            let extent = Vec2::new(
+                rect.size.x * cos.abs() + rect.size.y * sin.abs(),
+                rect.size.x * sin.abs() + rect.size.y * cos.abs(),
+            ) * camera.zoom;
+            if !center.is_finite() || !extent.is_finite() {
+                return None;
+            }
+            let body = UiRect::new(
+                center.x - extent.x * 0.5 - 3.0,
+                center.y - extent.y * 0.5 - 3.0,
+                extent.x + 6.0,
+                extent.y + 6.0,
+            );
+            if body.intersection(viewport).is_empty() {
+                return None;
+            }
+            let text = match (reference, value) {
+                (true, true) => format!("{}\n{}", component.designator, component.value),
+                (true, false) => component.designator.clone(),
+                _ => component.value.clone(),
+            };
+            let width = text
+                .lines()
+                .map(|l| label_track_width(l, pcb_labels::FONT_SIZE, None))
+                .fold(0.0_f32, f32::max);
+            Some(pcb_labels::LabelRequest {
+                index,
+                body: body.intersection(viewport),
+                text,
+                width,
+                selected: editor.selection().is_some_and(|s| s.source_id == id),
+            })
+        })
+        .collect();
     let mut reserved = Vec::new();
-    if let Some(bounds) = editor.minimap_rects(size) { reserved.push(bounds.panel); }
-    let hint_height = if editor.pcb_routing_hint().is_some() { 100.0 } else { 42.0 };
-    reserved.push(UiRect::new(0.0, (size.y-hint_height).max(0.0), size.x, hint_height));
+    if let Some(bounds) = editor.minimap_rects(size) {
+        reserved.push(bounds.panel);
+    }
+    let hint_height = if editor.pcb_routing_hint().is_some() {
+        100.0
+    } else {
+        42.0
+    };
+    reserved.push(UiRect::new(
+        0.0,
+        (size.y - hint_height).max(0.0),
+        size.x,
+        hint_height,
+    ));
     pcb_labels::place_labels(requests, size, &reserved)
 }
 
@@ -1135,10 +1184,15 @@ mod tests {
         let size = Vec2::new(800.0, 600.0);
         let expanded = editor.minimap_rects(size).unwrap();
         let expanded_surface = build_electronics_canvas_overlay_surface(
-            StudioUiPalette::IndustrialDark, &editor,
+            StudioUiPalette::IndustrialDark,
+            &editor,
             EditorRect::new(0.0, 0.0, 800.0, 600.0),
-            ElectronicsCanvasOverlayParams::new(1.0, Language::English));
-        let mut host = raf_render::api_graphic_basic::ui_surface::CpuUiSurfaceHost::new(expanded_surface, [0, 0, 0, 0]);
+            ElectronicsCanvasOverlayParams::new(1.0, Language::English),
+        );
+        let mut host = raf_render::api_graphic_basic::ui_surface::CpuUiSurfaceHost::new(
+            expanded_surface,
+            [0, 0, 0, 0],
+        );
         host.render([800, 600], |key| i18n::t(key, Language::English));
         assert!(editor.apply_ui_command("electronics.minimap.toggle"));
         let collapsed = editor.minimap_rects(size).unwrap();
@@ -1158,11 +1212,19 @@ mod tests {
             .is_none());
         host.set_surface(surface.clone());
         let frame = host.render([800, 600], |key| i18n::t(key, Language::English));
-        let old_image_point = [expanded.image.x + expanded.image.width * 0.5,
-            expanded.image.y + expanded.image.height * 0.5];
-        assert!(raf_ui::hit_test(&frame.frame.hit_regions, old_image_point,
-            raf_ui::UiHitTestMode::InteractiveOnly).is_none(),
-            "Collapsed minimap must release actual retained hit regions below its header");
+        let old_image_point = [
+            expanded.image.x + expanded.image.width * 0.5,
+            expanded.image.y + expanded.image.height * 0.5,
+        ];
+        assert!(
+            raf_ui::hit_test(
+                &frame.frame.hit_regions,
+                old_image_point,
+                raf_ui::UiHitTestMode::InteractiveOnly
+            )
+            .is_none(),
+            "Collapsed minimap must release actual retained hit regions below its header"
+        );
 
         assert!(
             surface

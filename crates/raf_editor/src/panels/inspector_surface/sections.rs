@@ -1,17 +1,19 @@
 //! Inspector content composition and read-only metadata/debug sections.
 
-use super::*;
 use super::behavior::build_behavior_sections;
 use super::components::{
-    metadata_key_line, metadata_line, node_info, session_context_bar, sessions_content,
-    status_row,
+    metadata_key_line, metadata_line, node_info, session_context_bar, sessions_content, status_row,
 };
 use super::fields::{
     color_picker, dropdown_field, primitive_options, range_labeled, section_label,
     texture_dropdown, toggle_row,
 };
-use super::runtime::{audio_section, camera_section, physics_section};
+use super::runtime::{
+    audio_section, camera_section, light_section, particle_section, physics_section,
+    surface_section,
+};
 use super::transform::{transform_actions, vector_row};
+use super::*;
 
 fn metadata_section(
     palette: StudioUiPalette,
@@ -307,6 +309,7 @@ pub(super) fn content(
                 100.0,
                 1.0,
             ))
+            .with_child(surface_section(palette, id, node))
             .with_child(toggle_row(
                 palette,
                 "lighting.cast_shadows",
@@ -329,6 +332,10 @@ pub(super) fn content(
     ));
     if view.components {
         scroll = scroll.with_child(camera_section(palette, node));
+        scroll = scroll.with_child(light_section(palette, node));
+        if node.particle_system.is_some() {
+            scroll = scroll.with_child(particle_section(palette, id, node));
+        }
         for child in build_behavior_sections(palette, scene, id, node, project_assets, view) {
             scroll = scroll.with_child(child);
         }

@@ -1,7 +1,7 @@
 //! World plan cancellation.
 
-use super::plan::{append_journal, load_planned_world, plan_cache, update_persisted_plan};
 use super::super::query::text_argument;
+use super::plan::{append_journal, load_planned_world, plan_cache, update_persisted_plan};
 use super::*;
 
 pub(crate) fn execute_cancel(request: &ParsedCommand) -> CommandOutput {

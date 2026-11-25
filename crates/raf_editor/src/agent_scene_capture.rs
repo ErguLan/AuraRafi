@@ -78,29 +78,21 @@ pub(crate) fn capture_scene_angle(
     }
 
     let (width, height) = bounded_size(request.width, request.height, graphics.is_some());
-    let (camera, bounds, framed_ids) =
-        match frame_camera(scene, selection, focus, request) {
-            Ok(value) => value,
-            Err(error) => {
-                let mut result = failure(
-                    language,
-                    "agent.viewport_capture.no_frame",
-                    "agent.viewport_capture.no_frame_detail",
-                );
-                result.details.push(error);
-                return result;
-            }
-        };
+    let (camera, bounds, framed_ids) = match frame_camera(scene, selection, focus, request) {
+        Ok(value) => value,
+        Err(error) => {
+            let mut result = failure(
+                language,
+                "agent.viewport_capture.no_frame",
+                "agent.viewport_capture.no_frame_detail",
+            );
+            result.details.push(error);
+            return result;
+        }
+    };
     let highlight = request.highlight_selection && !selection.is_empty();
     let capture = match render_capture(
-        graphics,
-        scene,
-        project,
-        &camera,
-        width,
-        height,
-        selection,
-        highlight,
+        graphics, scene, project, &camera, width, height, selection, highlight,
     ) {
         Ok(capture) => capture,
         Err(error) => {
@@ -233,9 +225,7 @@ fn frame_camera(
         };
         if let Some((min, max)) = node_bounds {
             bounds = Some(match bounds {
-                Some((current_min, current_max)) => {
-                    (current_min.min(min), current_max.max(max))
-                }
+                Some((current_min, current_max)) => (current_min.min(min), current_max.max(max)),
                 None => (min, max),
             });
         }
@@ -368,7 +358,8 @@ fn save_capture(
     if let Some(parent) = absolute_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let Some(image) = image::RgbaImage::from_raw(capture.width, capture.height, capture.rgba8.clone())
+    let Some(image) =
+        image::RgbaImage::from_raw(capture.width, capture.height, capture.rgba8.clone())
     else {
         return Err("The capture RGBA buffer has an invalid size.".into());
     };
@@ -561,8 +552,7 @@ mod tests {
             view: "top".into(),
             ..SceneCaptureRequest::default()
         };
-        let (_, bounds, framed) =
-            frame_camera(&scene, &[], &[], &request).expect("scene camera");
+        let (_, bounds, framed) = frame_camera(&scene, &[], &[], &request).expect("scene camera");
         assert_eq!(framed.len(), 2);
         assert!(bounds.1.x - bounds.0.x > 10.0);
     }

@@ -115,8 +115,9 @@ impl NativeEditorApplication {
             };
             if let Err(error) = result {
                 if let Some(workbench) = &mut self.workbench {
-                    workbench
-                        .log_console_output(crate::commands::CommandOutput::error("Runtime", error));
+                    workbench.log_console_output(crate::commands::CommandOutput::error(
+                        "Runtime", error,
+                    ));
                 }
             }
         }

@@ -187,11 +187,7 @@ pub fn read_bounded_tail(path: &Path, limit: usize) -> String {
         return String::new();
     }
     let mut bytes = Vec::new();
-    if file
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)
-        .is_err()
-    {
+    if file.take(limit as u64 + 1).read_to_end(&mut bytes).is_err() {
         return String::new();
     }
     let text = String::from_utf8_lossy(&bytes).into_owned();
@@ -407,23 +403,15 @@ fn probe_version_output(path: &Path) -> Result<String, RuntimeDiagnostic> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
-    let mut child = command.spawn().map_err(|error| {
-        launch_failed(format!("player --version could not start: {error}"))
-    })?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| launch_failed(format!("player --version could not start: {error}")))?;
     let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
     loop {
         match child.try_wait() {
             Ok(Some(_status)) => {
-                let stdout = child
-                    .stdout
-                    .take()
-                    .map(read_child_pipe)
-                    .unwrap_or_default();
-                let stderr = child
-                    .stderr
-                    .take()
-                    .map(read_child_pipe)
-                    .unwrap_or_default();
+                let stdout = child.stdout.take().map(read_child_pipe).unwrap_or_default();
+                let stderr = child.stderr.take().map(read_child_pipe).unwrap_or_default();
                 let mut output = stdout;
                 if !stderr.is_empty() {
                     if !output.is_empty() && !output.ends_with('\n') {
@@ -468,8 +456,7 @@ mod tests {
     use uuid::Uuid;
 
     fn temporary_directory(label: &str) -> PathBuf {
-        let directory =
-            std::env::temp_dir().join(format!("raf-editor-{label}-{}", Uuid::new_v4()));
+        let directory = std::env::temp_dir().join(format!("raf-editor-{label}-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&directory).expect("temporary directory");
         directory
     }
@@ -535,11 +522,10 @@ mod tests {
         assert!(tail.text.len() <= 1024);
         assert!(tail.lines.len() <= LOG_TAIL_MAX_LINES);
         assert!(tail.truncated);
-        assert!(
-            tail.lines
-                .iter()
-                .all(|line| line.chars().count() <= LOG_TAIL_MAX_LINE_CHARS)
-        );
+        assert!(tail
+            .lines
+            .iter()
+            .all(|line| line.chars().count() <= LOG_TAIL_MAX_LINE_CHARS));
 
         logs.cleanup();
         let _ = std::fs::remove_dir(directory);
@@ -559,11 +545,9 @@ mod tests {
             lines.last().map(String::as_str),
             Some("console.runtime_log_truncated")
         );
-        assert!(
-            lines[..lines.len() - 1]
-                .iter()
-                .all(|line| line.chars().count() <= LOG_TAIL_MAX_LINE_CHARS)
-        );
+        assert!(lines[..lines.len() - 1]
+            .iter()
+            .all(|line| line.chars().count() <= LOG_TAIL_MAX_LINE_CHARS));
         assert!(lines.iter().any(|line| line.ends_with('…')));
 
         logs.cleanup();

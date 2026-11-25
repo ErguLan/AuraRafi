@@ -3,8 +3,8 @@
 use raf_core::project::ProjectType;
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiAlign, UiCompactMode, UiEventKind, UiFlow, UiImage, UiImageFit,
-    UiImageSource, UiJustify, UiLayout, UiNode, UiNodeKind, UiResponsiveRule, UiSpacing,
-    UiStyle, UiTextStyle,
+    UiImageSource, UiJustify, UiLayout, UiNode, UiNodeKind, UiResponsiveRule, UiSpacing, UiStyle,
+    UiTextStyle,
 };
 
 use super::*;
@@ -49,7 +49,10 @@ pub(crate) fn hub_showcase_surface(palette: StudioUiPalette, model: &HubSurfaceM
     row.with_child(side)
 }
 
-pub(crate) fn hub_showcase_featured(palette: StudioUiPalette, project: &HubSurfaceProject) -> UiNode {
+pub(crate) fn hub_showcase_featured(
+    palette: StudioUiPalette,
+    project: &HubSurfaceProject,
+) -> UiNode {
     let tokens = hub_tokens(palette);
     let preview_key = match project.project_type {
         ProjectType::Game => "editor.hub.preview-game",
@@ -211,7 +214,10 @@ pub(crate) fn hub_showcase_empty(palette: StudioUiPalette, model: &HubSurfaceMod
 }
 
 #[allow(dead_code)]
-pub(crate) fn hub_featured_project(palette: StudioUiPalette, project: &HubSurfaceProject) -> UiNode {
+pub(crate) fn hub_featured_project(
+    palette: StudioUiPalette,
+    project: &HubSurfaceProject,
+) -> UiNode {
     let tokens = palette.tokens();
     let preview_key = match project.project_type {
         ProjectType::Game => "editor.hub.preview-game",
@@ -589,7 +595,10 @@ pub(crate) fn hub_project_menu_button(project: &HubSurfaceProject, card_id: &str
 }
 
 #[allow(dead_code)]
-pub(crate) fn project_thumbnail_style(palette: StudioUiPalette, project_type: ProjectType) -> UiStyle {
+pub(crate) fn project_thumbnail_style(
+    palette: StudioUiPalette,
+    project_type: ProjectType,
+) -> UiStyle {
     let mut style = palette.subtle_panel_style();
     style.radius = 5.0;
     style.fill = match palette {

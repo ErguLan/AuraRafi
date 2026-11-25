@@ -1,8 +1,6 @@
-- Built with AI-assisted development, but shaped through deliberate architectural decisions, iterative validation, and manual integration work.
-- Thanks for taking the time to inspect the project and its current real state.
+[![CI](https://github.com/ErguLan/AuraRafi/actions/workflows/ci.yml/badge.svg)](https://github.com/ErguLan/AuraRafi/actions/workflows/ci.yml)
 
-
-#  Rafi (Project)
+# Rafi (Project)
 
 Open-source hybrid engine for video games and electronic design.
 
@@ -22,7 +20,7 @@ acceptance, or performance work pending.
 - **Electronics Design**: Schematic editor, simulation, DRC, exports, and synchronized PCB 2D workspace, unified under the same shared graphics runtime
 - **Modern Editor**: Dark/light themes, modular panels, intuitive layout
 - **AI Agent**: integrated contextual tool-calling with Inspect, Plan (sandboxed preview), and Active (apply) modes, plus structured verification
-- **Modular**: 9 workspace crates plus the main editor binary, with clean domain boundaries
+- **Modular**: 16 workspace crates plus the main editor binary, with clean domain boundaries
 - **Multilingual**: English and Spanish support
 - **Tested Modules**: Inline Rust tests are distributed across core, render, electronics, nodes, and AI crates
 
@@ -33,7 +31,7 @@ acceptance, or performance work pending.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Clone and build
-git clone https://github.com/AuraRafi/AuraRafi.git
+git clone https://github.com/ErguLan/AuraRafi.git
 cd AuraRafi
 cargo check -p raf_editor
 

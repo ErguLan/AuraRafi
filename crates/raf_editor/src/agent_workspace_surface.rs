@@ -62,7 +62,16 @@ pub(crate) fn build_workspace_surface_with_layout(
     layout: &WorkspaceLayout,
 ) -> UiSurface {
     build_workspace_surface_with_laboratory(
-        palette, service, projects, settings, size, scroll, step, evidence, review_open, layout,
+        palette,
+        service,
+        projects,
+        settings,
+        size,
+        scroll,
+        step,
+        evidence,
+        review_open,
+        layout,
         service.selected_lab(None),
     )
 }
@@ -85,8 +94,8 @@ pub(crate) fn build_workspace_surface_with_laboratory(
     let height = size[1].max(1.0);
     let ready = service.selected_workspace().filter(|w| !w.closing);
     let is_lab = laboratory.is_some();
-    let lab_chat = laboratory
-        .is_some_and(|editor| editor.lab.view == crate::electronics_lab::LabView::Chat);
+    let lab_chat =
+        laboratory.is_some_and(|editor| editor.lab.view == crate::electronics_lab::LabView::Chat);
     let geometry = layout.resolve(
         size,
         review_open && ready.is_some() && !is_lab,
@@ -160,14 +169,7 @@ pub(crate) fn build_workspace_surface_with_laboratory(
         }
     } else if !is_lab {
         root = root.with_child(chat::empty_state(
-            palette,
-            &tokens,
-            service,
-            settings,
-            step,
-            rail,
-            width,
-            height,
+            palette, &tokens, service, settings, step, rail, width, height,
         ));
     }
     let root = layout::append_dividers(root, geometry, &tokens, is_lab);

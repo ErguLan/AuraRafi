@@ -70,6 +70,7 @@ pub enum GraphicCommand {
     /// call when the backend supports it.
     DrawMeshBatch {
         mesh_id: usize,
+        texture_id: Option<usize>,
         instances: Vec<BasicMeshInstance>,
     },
     /// Draw a 3D line.
@@ -128,6 +129,8 @@ pub struct BasicCommandList {
     pub environment: Option<crate::environment_frame::EnvironmentFrame>,
     pub shadows: Option<crate::shadow_frame::ShadowFrame>,
     pub shadow_budget_exceeded: bool,
+    /// Bounded local point/spot lights for this frame.
+    pub entity_lights: crate::entity_lights_frame::EntityLightFrame,
     commands: Vec<GraphicCommand>,
     meshes: Vec<Arc<BasicMesh>>,
     textures: Vec<Arc<CpuTexture>>,
@@ -159,6 +162,7 @@ impl BasicCommandList {
             environment: None,
             shadows: None,
             shadow_budget_exceeded: false,
+            entity_lights: Default::default(),
             commands: Vec::with_capacity(command_capacity),
             meshes: Vec::with_capacity(mesh_capacity),
             textures: Vec::new(),
@@ -168,6 +172,182 @@ impl BasicCommandList {
             current_pipeline: BasicPipelineKind::FlatColor,
             shadow_receiver: true,
         }
+    }
+
+    /// Stable content hash for compositor packet reuse. Camera matrices and
+    /// environment uniforms are intentionally excluded: they are frame
+    /// uniforms and do not require rebuilding or re-uploading scene geometry.
+    pub fn content_hash(&self) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        let mut mix = |value: u64| {
+            hash = (hash ^ value).wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        let bits = |value: f32| value.to_bits() as u64;
+        mix(self.commands.len() as u64);
+        for command in &self.commands {
+            match command {
+                GraphicCommand::Clear { r, g, b, a } => {
+                    mix(1);
+                    mix(u64::from(*r)
+                        | (u64::from(*g) << 8)
+                        | (u64::from(*b) << 16)
+                        | (u64::from(*a) << 24));
+                }
+                GraphicCommand::SetPipeline(pipeline) => {
+                    mix(2);
+                    mix(*pipeline as u64);
+                }
+                GraphicCommand::SetShadowReceiver(value) => {
+                    mix(3);
+                    mix(u64::from(*value));
+                }
+                GraphicCommand::DrawMesh {
+                    mesh_id,
+                    transform,
+                    color,
+                    texture_id,
+                } => {
+                    mix(4);
+                    mix(*mesh_id as u64);
+                    mix(texture_id.map(|id| id as u64).unwrap_or(u64::MAX));
+                    mix(u64::from(color[0])
+                        | (u64::from(color[1]) << 8)
+                        | (u64::from(color[2]) << 16)
+                        | (u64::from(color[3]) << 24));
+                    for column in transform.to_cols_array() {
+                        mix(bits(column));
+                    }
+                }
+                GraphicCommand::DrawMeshBatch {
+                    mesh_id,
+                    texture_id,
+                    instances,
+                } => {
+                    mix(5);
+                    mix(*mesh_id as u64);
+                    mix(texture_id.map(|id| id as u64).unwrap_or(u64::MAX));
+                    mix(instances.len() as u64);
+                    for instance in instances {
+                        mix(u64::from(instance.color[0])
+                            | (u64::from(instance.color[1]) << 8)
+                            | (u64::from(instance.color[2]) << 16)
+                            | (u64::from(instance.color[3]) << 24));
+                        for column in instance.transform.to_cols_array() {
+                            mix(bits(column));
+                        }
+                    }
+                }
+                GraphicCommand::DrawLine {
+                    start,
+                    end,
+                    color,
+                    width,
+                    no_depth_test,
+                    depth_bias,
+                } => {
+                    mix(6);
+                    for value in [start.x, start.y, start.z, end.x, end.y, end.z] {
+                        mix(bits(value));
+                    }
+                    mix(u64::from(color[0])
+                        | (u64::from(color[1]) << 8)
+                        | (u64::from(color[2]) << 16)
+                        | (u64::from(color[3]) << 24));
+                    mix(bits(*width));
+                    mix(u64::from(*no_depth_test));
+                    mix(bits(*depth_bias));
+                }
+                GraphicCommand::DrawLineBatch {
+                    lines,
+                    no_depth_test,
+                } => {
+                    mix(7);
+                    mix(u64::from(*no_depth_test));
+                    mix(lines.len() as u64);
+                    for line in lines {
+                        for value in [
+                            line.start.x,
+                            line.start.y,
+                            line.start.z,
+                            line.end.x,
+                            line.end.y,
+                            line.end.z,
+                        ] {
+                            mix(bits(value));
+                        }
+                        mix(u64::from(line.color[0])
+                            | (u64::from(line.color[1]) << 8)
+                            | (u64::from(line.color[2]) << 16)
+                            | (u64::from(line.color[3]) << 24));
+                        mix(bits(line.width));
+                        mix(bits(line.depth_bias));
+                    }
+                }
+                GraphicCommand::DrawScreenTriangleBatch { triangles } => {
+                    mix(8);
+                    mix(triangles.len() as u64);
+                    for triangle in triangles {
+                        for point in triangle.points {
+                            mix(bits(point[0]));
+                            mix(bits(point[1]));
+                        }
+                        mix(u64::from(triangle.color[0])
+                            | (u64::from(triangle.color[1]) << 8)
+                            | (u64::from(triangle.color[2]) << 16)
+                            | (u64::from(triangle.color[3]) << 24));
+                    }
+                }
+                GraphicCommand::DrawGrid {
+                    grid_y,
+                    spacing,
+                    no_depth_test,
+                } => {
+                    mix(9);
+                    mix(bits(*grid_y));
+                    mix(bits(*spacing));
+                    mix(u64::from(*no_depth_test));
+                }
+            }
+        }
+        if let Some(shadow) = &self.shadows {
+            mix(10);
+            mix(shadow.geometry.key);
+            mix(u64::from(shadow.geometry.resolution));
+            mix(u64::from(shadow.settings.enabled));
+            mix(bits(shadow.settings.distance));
+        }
+        if let Some(environment) = &self.environment {
+            // Sky/ambient values are frame uniforms on the GPU, but the CPU
+            // recovery path consumes them from the command list. Include a
+            // compact fingerprint so a lighting edit refreshes both paths.
+            mix(11);
+            for value in [
+                environment.sky_top.x,
+                environment.sky_top.y,
+                environment.sky_top.z,
+                environment.sky_horizon.x,
+                environment.sky_horizon.y,
+                environment.sky_horizon.z,
+                environment.sky_ground.x,
+                environment.sky_ground.y,
+                environment.sky_ground.z,
+                environment.sun.x,
+                environment.sun.y,
+                environment.sun.z,
+                environment.ambient.x,
+                environment.ambient.y,
+                environment.ambient.z,
+            ] {
+                mix(bits(value));
+            }
+        }
+        mix(self.entity_lights.count as u64);
+        for word in &self.entity_lights.words {
+            for value in word {
+                mix(bits(*value));
+            }
+        }
+        hash
     }
 
     /// Add a clear command.
@@ -241,6 +421,7 @@ impl BasicCommandList {
             self.commands.last(),
             Some(GraphicCommand::DrawMeshBatch {
                 mesh_id: batch_mesh_id,
+                texture_id: None,
                 instances,
             }) if *batch_mesh_id == mesh_id
                 && color[3] == u8::MAX
@@ -273,6 +454,7 @@ impl BasicCommandList {
             {
                 self.commands.push(GraphicCommand::DrawMeshBatch {
                     mesh_id,
+                    texture_id: None,
                     instances: vec![BasicMeshInstance { transform, color }, instance],
                 });
                 return;
@@ -332,10 +514,34 @@ impl BasicCommandList {
                 let instance = instances[0];
                 self.draw_mesh(mesh_id, instance.transform, instance.color);
             }
-            _ => self
-                .commands
-                .push(GraphicCommand::DrawMeshBatch { mesh_id, instances }),
+            _ => self.commands.push(GraphicCommand::DrawMeshBatch {
+                mesh_id,
+                texture_id: None,
+                instances,
+            }),
         }
+    }
+
+    /// Draw one instanced particle batch with an explicit texture and the
+    /// particle pipeline. Alpha is preserved; the opaque batching path is not
+    /// used because particles intentionally blend.
+    pub fn draw_particle_batch<I>(
+        &mut self,
+        mesh_id: usize,
+        texture_id: Option<usize>,
+        instances: I,
+    ) where
+        I: IntoIterator<Item = BasicMeshInstance>,
+    {
+        let instances = instances.into_iter().collect::<Vec<_>>();
+        if instances.is_empty() {
+            return;
+        }
+        self.commands.push(GraphicCommand::DrawMeshBatch {
+            mesh_id,
+            texture_id,
+            instances,
+        });
     }
 
     /// Add a line drawing command.
@@ -574,8 +780,11 @@ mod tests {
 
         assert!(matches!(
             &commands.commands()[0],
-            GraphicCommand::DrawMeshBatch { mesh_id: id, instances }
-                if *id == mesh_id && instances.len() == 2
+            GraphicCommand::DrawMeshBatch {
+                mesh_id: id,
+                instances,
+                ..
+            } if *id == mesh_id && instances.len() == 2
         ));
     }
 

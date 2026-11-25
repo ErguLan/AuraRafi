@@ -271,6 +271,74 @@ impl NodeHandle {
         Ok(())
     }
 
+    fn particle_component_mut<'a>(
+        &self,
+        ctx: &'a mut ScriptContext<'_>,
+    ) -> ScriptResult<&'a mut raf_core::scene::ParticleSystemComponent> {
+        let id = self.resolve(ctx)?;
+        ctx.scene
+            .get_mut(id)
+            .ok_or_else(|| ScriptError::InvalidHandle(self.id))?
+            .particle_system
+            .as_mut()
+            .ok_or_else(|| ScriptError::InvalidArgument("entity has no particle system".into()))
+    }
+
+    pub fn particle_play(&self, ctx: &mut ScriptContext<'_>) -> ScriptResult<()> {
+        self.particle_component_mut(ctx)?.playback = raf_core::scene::ParticlePlayback::Playing;
+        Ok(())
+    }
+
+    pub fn particle_pause(&self, ctx: &mut ScriptContext<'_>) -> ScriptResult<()> {
+        self.particle_component_mut(ctx)?.playback = raf_core::scene::ParticlePlayback::Paused;
+        Ok(())
+    }
+
+    pub fn particle_stop(&self, ctx: &mut ScriptContext<'_>) -> ScriptResult<()> {
+        self.particle_component_mut(ctx)?.playback = raf_core::scene::ParticlePlayback::Stopped;
+        Ok(())
+    }
+
+    pub fn particle_freeze(&self, ctx: &mut ScriptContext<'_>) -> ScriptResult<()> {
+        self.particle_component_mut(ctx)?.playback = raf_core::scene::ParticlePlayback::Frozen;
+        Ok(())
+    }
+
+    /// Requests extra one-shot particles on the next rendered frame.
+    pub fn particle_emit(&self, ctx: &mut ScriptContext<'_>, count: u32) -> ScriptResult<()> {
+        if count > 100_000 {
+            return Err(ScriptError::InvalidArgument(
+                "emit count is capped at 100000".into(),
+            ));
+        }
+        self.particle_component_mut(ctx)?.request_emit(count);
+        Ok(())
+    }
+
+    pub fn particle_set_rate(&self, ctx: &mut ScriptContext<'_>, scale: f32) -> ScriptResult<()> {
+        if !scale.is_finite() {
+            return Err(ScriptError::InvalidArgument(
+                "particle rate scale must be finite".into(),
+            ));
+        }
+        self.particle_component_mut(ctx)?.rate_scale = scale.clamp(0.0, 8.0);
+        Ok(())
+    }
+
+    pub fn particle_set_time_scale(
+        &self,
+        ctx: &mut ScriptContext<'_>,
+        scale: f32,
+    ) -> ScriptResult<()> {
+        if !scale.is_finite() {
+            return Err(ScriptError::InvalidArgument(
+                "particle time scale must be finite".into(),
+            ));
+        }
+        self.particle_component_mut(ctx)?.time_scale = scale.clamp(0.0, 8.0);
+        Ok(())
+    }
+
     /// Get a custom property by key.
     pub fn get_property(&self, ctx: &ScriptContext<'_>, key: &str) -> ScriptResult<ScriptValue> {
         let node = ctx
@@ -289,6 +357,47 @@ impl NodeHandle {
                 let c = node.color;
                 Ok(ScriptValue::Color([c.r, c.g, c.b, c.a]))
             }
+            "audio.enabled" => Ok(ScriptValue::Bool(node.audio_source.enabled)),
+            "audio.clip" => Ok(ScriptValue::String(node.audio_source.clip.clone())),
+            "audio.volume" => Ok(ScriptValue::Float(node.audio_source.volume)),
+            "audio.looping" => Ok(ScriptValue::Bool(node.audio_source.looping)),
+            "audio.autoplay" => Ok(ScriptValue::Bool(node.audio_source.autoplay)),
+            "audio.bus" => Ok(ScriptValue::String(
+                node.audio_source.bus.slug().to_string(),
+            )),
+            "audio.spatial" => Ok(ScriptValue::Bool(node.audio_source.spatial)),
+            "audio.min_distance" => Ok(ScriptValue::Float(node.audio_source.min_distance)),
+            "audio.max_distance" => Ok(ScriptValue::Float(node.audio_source.max_distance)),
+            "particles.playing" | "particles.paused" | "particles.stopped" | "particles.frozen" => {
+                Ok(match node.particle_system.as_ref().map(|p| p.playback) {
+                    Some(playback) => ScriptValue::Bool(match key {
+                        "particles.playing" => {
+                            playback == raf_core::scene::ParticlePlayback::Playing
+                        }
+                        "particles.paused" => playback == raf_core::scene::ParticlePlayback::Paused,
+                        "particles.stopped" => {
+                            playback == raf_core::scene::ParticlePlayback::Stopped
+                        }
+                        _ => playback == raf_core::scene::ParticlePlayback::Frozen,
+                    }),
+                    None => ScriptValue::None,
+                })
+            }
+            "particles.time_scale" => Ok(node
+                .particle_system
+                .as_ref()
+                .map(|p| ScriptValue::Float(p.time_scale))
+                .unwrap_or(ScriptValue::None)),
+            "particles.rate_scale" => Ok(node
+                .particle_system
+                .as_ref()
+                .map(|p| ScriptValue::Float(p.rate_scale))
+                .unwrap_or(ScriptValue::None)),
+            "particles.asset" => Ok(node
+                .particle_system
+                .as_ref()
+                .map(|p| ScriptValue::String(p.asset.clone()))
+                .unwrap_or(ScriptValue::None)),
             _ => Ok(match node.get_variable(key) {
                 Some(VariableValue::Bool(value)) => ScriptValue::Bool(*value),
                 Some(VariableValue::Number(value)) => ScriptValue::Float(*value),
@@ -325,6 +434,44 @@ impl NodeHandle {
             } else {
                 node.receives_shadows = value;
             }
+            return Ok(());
+        }
+        if let Some(audio_key) = key.strip_prefix("audio.") {
+            let node = ctx
+                .scene
+                .get_mut(id)
+                .ok_or(ScriptError::InvalidHandle(self.id))?;
+            match (audio_key, value) {
+                ("enabled", ScriptValue::Bool(value)) => node.audio_source.enabled = value,
+                ("looping", ScriptValue::Bool(value)) => node.audio_source.looping = value,
+                ("autoplay", ScriptValue::Bool(value)) => node.audio_source.autoplay = value,
+                ("spatial", ScriptValue::Bool(value)) => node.audio_source.spatial = value,
+                ("clip", ScriptValue::String(value)) => node.audio_source.clip = value,
+                ("bus", ScriptValue::String(value)) => {
+                    node.audio_source.bus = raf_core::scene::AudioBus::from_slug(&value)
+                        .ok_or_else(|| ScriptError::InvalidArgument("unknown audio bus".into()))?;
+                }
+                ("volume", ScriptValue::Float(value)) => {
+                    node.audio_source.volume = value.clamp(0.0, 1.0)
+                }
+                ("volume", ScriptValue::Int(value)) => {
+                    node.audio_source.volume = (value as f32).clamp(0.0, 1.0)
+                }
+                ("min_distance", ScriptValue::Float(value)) => {
+                    node.audio_source.min_distance = value.max(0.001)
+                }
+                ("max_distance", ScriptValue::Float(value)) => {
+                    node.audio_source.max_distance = value.max(0.002)
+                }
+                _ => {
+                    return Err(ScriptError::InvalidArgument(
+                        "audio property requires its matching value type".into(),
+                    ))
+                }
+            }
+            node.audio_source
+                .validate()
+                .map_err(|error| ScriptError::InvalidArgument(error.into()))?;
             return Ok(());
         }
         if key.is_empty()

@@ -65,6 +65,10 @@ pub(super) fn primitive_options(current: Primitive) -> (Vec<UiSelectOption>, usi
         Primitive::Plane,
         Primitive::Cylinder,
         Primitive::Capsule,
+        Primitive::Wedge,
+        Primitive::Torus,
+        Primitive::Prism,
+        Primitive::Sphere2D,
     ];
     let selected_index = primitives
         .iter()
@@ -487,7 +491,12 @@ pub(super) fn range_labeled(
         )
 }
 
-pub(super) fn toggle_row(palette: StudioUiPalette, label_key: &str, value_key: &str, value: bool) -> UiNode {
+pub(super) fn toggle_row(
+    palette: StudioUiPalette,
+    label_key: &str,
+    value_key: &str,
+    value: bool,
+) -> UiNode {
     UiNode::new(format!("{value_key}.row"), UiNodeKind::Toolbar)
         .with_layout(UiLayout {
             flow: UiFlow::Row,
@@ -548,5 +557,9 @@ pub(super) fn primitive_label_key(primitive: Primitive) -> &'static str {
         Primitive::Plane => "app.primitive_plane",
         Primitive::Cylinder => "app.primitive_cylinder",
         Primitive::Capsule => "app.primitive_capsule",
+        Primitive::Wedge => "app.primitive_wedge",
+        Primitive::Torus => "app.primitive_torus",
+        Primitive::Prism => "app.primitive_prism",
+        Primitive::Sphere2D => "app.primitive_sphere2d",
     }
 }

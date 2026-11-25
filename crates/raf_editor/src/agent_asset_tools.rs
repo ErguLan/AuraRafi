@@ -95,6 +95,9 @@ impl AgentAssetTools {
             }
             let tool = match request.name.as_str() {
                 "asset.generate_image" | "asset.image" => "asset_generate_image",
+                "particles.generate" | "particle.generate" | "particle.generate_asset" => {
+                    "particles_generate"
+                }
                 "asset.generate_local_png" | "asset.local_png" | "asset.icon" => {
                     "asset_generate_local_png"
                 }
@@ -228,6 +231,27 @@ impl AgentAssetTools {
             .ok_or_else(|| t("app.agent_asset_project_required", language))?
             .canonicalize()
             .map_err(|error| asset_error(language, &error.to_string()))?;
+        if name == "particles_generate" {
+            let output_name = required_string(args, "name")?;
+            let row = if let Some(definition) = args.get("definition") {
+                let asset: raf_particles::ParticleSystemAsset =
+                    serde_json::from_value(definition.clone())
+                        .map_err(|error| format!("invalid particle definition: {error}"))?;
+                crate::particle_assets::write_particle_asset(&root, output_name, &asset)
+            } else {
+                let template = args
+                    .get("template")
+                    .and_then(Value::as_str)
+                    .unwrap_or("blank");
+                crate::particle_assets::create_particle_asset(&root, template, output_name)
+            }
+            .map_err(|error| asset_error(language, &error))?;
+            self.catalog_dirty = true;
+            return Ok(AgentToolResult::success(
+                t("app.agent_particle_ready", language),
+                json!({"asset_path": row, "catalog_refresh_requested": true}),
+            ));
+        }
         if name == "external_studio_install" {
             let child = install_studio(studio).map_err(|error| asset_error(language, &error))?;
             if let Some(child) = child {

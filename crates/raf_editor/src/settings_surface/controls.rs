@@ -9,10 +9,11 @@ use raf_render::api_graphic_basic::ui_surface::{
 use raf_ui::components::select_trigger;
 use raf_ui::{UiFontWeight, UiRect, UiTextRole};
 
+use super::impact;
 use super::{
     CONTROL_WIDTH, SEGMENT_MIN_WIDTH, SETTINGS_COMPACT_BREAKPOINT, SETTINGS_CONTENT_MAX_WIDTH,
-    SETTINGS_CONTROL_MIN_WIDTH, SETTINGS_RANGE_MIN_WIDTH, SETTINGS_ROW_HEIGHT,
-    SETTINGS_STACKED_ROW_HEIGHT,
+    SETTINGS_CONTROL_MIN_WIDTH, SETTINGS_IMPACT_ROW_HEIGHT, SETTINGS_IMPACT_STACKED_ROW_HEIGHT,
+    SETTINGS_RANGE_MIN_WIDTH, SETTINGS_ROW_HEIGHT, SETTINGS_STACKED_ROW_HEIGHT,
 };
 
 pub(super) fn group_label(palette: StudioUiPalette, text_key: &str) -> UiNode {
@@ -510,6 +511,8 @@ pub(super) fn row_with_breakpoint(
     compact_breakpoint: f32,
 ) -> UiNode {
     let tokens = palette.tokens();
+    let setting_impact = impact::setting_impact(&id);
+    let has_impact = setting_impact.is_some();
     let mut copy = UiNode::new(format!("{id}.copy"), UiNodeKind::Panel)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
@@ -522,8 +525,12 @@ pub(super) fn row_with_breakpoint(
             UiNode::new(format!("{id}.label"), UiNodeKind::Label)
                 .with_text_key(label_key)
                 .with_text_style(UiTextStyle::body(tokens.text))
-                .with_layout(UiLayout::fit_content()),
+                .with_text_overflow(UiTextOverflow::Ellipsis)
+                .with_layout(UiLayout::fixed(0.0, 18.0).with_width_mode(UiSizeMode::Fill)),
         );
+    if let Some(impact) = setting_impact {
+        copy = copy.with_child(impact::badges(palette, &id, impact));
+    }
     if let Some(value) = value {
         copy = copy.with_child(
             UiNode::new(format!("{id}.display"), UiNodeKind::Label)
@@ -559,13 +566,28 @@ pub(super) fn row_with_breakpoint(
             responsive: vec![raf_ui::UiResponsiveRule {
                 max_width: compact_breakpoint,
                 flow: Some(UiFlow::Column),
-                basis: Some([0.0, SETTINGS_STACKED_ROW_HEIGHT]),
+                basis: Some([
+                    0.0,
+                    if has_impact {
+                        SETTINGS_IMPACT_STACKED_ROW_HEIGHT
+                    } else {
+                        SETTINGS_STACKED_ROW_HEIGHT
+                    },
+                ]),
                 padding: Some(UiSpacing::xy(8.0, 6.0)),
                 gap: Some(6.0),
                 compact: Some(UiCompactMode::Stack),
                 grid_columns: None,
             }],
-            ..UiLayout::fixed(0.0, SETTINGS_ROW_HEIGHT).with_width_mode(UiSizeMode::Fill)
+            ..UiLayout::fixed(
+                0.0,
+                if has_impact {
+                    SETTINGS_IMPACT_ROW_HEIGHT
+                } else {
+                    SETTINGS_ROW_HEIGHT
+                },
+            )
+            .with_width_mode(UiSizeMode::Fill)
         })
         .with_child(copy)
         .with_child(control)

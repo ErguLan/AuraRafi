@@ -15,20 +15,27 @@ use crate::script_support::is_script_file;
 
 use super::{
     AssetFilter, AssetSort, AssetViewMode, AssetsMotion, AssetsStatus, AssetsStatusKind,
-    ASSET_CARD_GAP, ASSET_CARD_HEIGHT, ASSET_CARD_PITCH, ASSET_CARD_WIDTH, ASSET_LIST_PITCH,
+    ASSET_CARD_GAP, ASSET_CARD_HEIGHT, ASSET_CARD_PITCH, ASSET_CARD_WIDTH,
+    ASSET_GRID_FALLBACK_WIDTH, ASSET_GRID_PADDING_X, ASSET_LIST_PITCH, ASSET_LIST_ROW_GAP,
     ASSET_LIST_ROW_HEIGHT, ASSET_SELECTION_BAR_HEIGHT, ASSET_TOOLBAR_HEIGHT,
 };
 
 /// Virtual assets that are always available in a Game project. They are
 /// authoring shortcuts, not files on disk; opening or dropping one still
 /// executes the real scene-creation path in the application boundary.
-pub const BUILTIN_ASSET_ROWS: [&str; 11] = [
+pub const BUILTIN_ASSET_ROWS: [&str; 17] = [
     "builtin://primitive/cube",
     "builtin://primitive/sphere",
     "builtin://primitive/cylinder",
     "builtin://primitive/capsule",
     "builtin://primitive/plane",
+    "builtin://primitive/wedge",
+    "builtin://primitive/torus",
+    "builtin://primitive/prism",
+    "builtin://primitive/sphere2d",
     "builtin://camera",
+    "builtin://light/point",
+    "builtin://light/spot",
     "builtin://interface/frame",
     "builtin://interface/label",
     "builtin://interface/image",
@@ -36,14 +43,55 @@ pub const BUILTIN_ASSET_ROWS: [&str; 11] = [
     "builtin://interface/input",
 ];
 
+/// Virtual rows that can be inserted from the Assets panel.
+pub const BUILTIN_LIGHT_ROWS: [&str; 2] = ["builtin://light/point", "builtin://light/spot"];
+
 pub fn asset_rows_with_builtins(asset_rows: &[String]) -> Vec<String> {
     raf_core::scene::geometry::CREATABLE_PRIMITIVES
         .into_iter()
         .map(|shape| shape.descriptor().source.to_string())
         .chain(std::iter::once("builtin://camera".to_string()))
-        .chain(BUILTIN_ASSET_ROWS.iter().filter(|s|s.starts_with("builtin://interface/")).map(|s|s.to_string()))
+        .chain(BUILTIN_LIGHT_ROWS.iter().map(|row| row.to_string()))
+        .chain(
+            BUILTIN_ASSET_ROWS
+                .iter()
+                .filter(|s| s.starts_with("builtin://interface/"))
+                .map(|s| s.to_string()),
+        )
         .chain(asset_rows.iter().cloned())
         .collect()
+}
+
+pub fn is_builtin_light_row(row: &str) -> bool {
+    BUILTIN_LIGHT_ROWS.contains(&row)
+}
+
+/// Command the host must execute to create this virtual row.
+///
+/// Lights are the only built-ins without an `assets.open:` entry in the host:
+/// the card emits `hierarchy.create-light:point|spot` directly. The lead wires
+/// those commands to the scene light creation path.
+pub fn builtin_asset_command(row: &str) -> Option<String> {
+    match row {
+        "builtin://light/point" => Some("hierarchy.create-light:point".to_string()),
+        "builtin://light/spot" => Some("hierarchy.create-light:spot".to_string()),
+        _ => None,
+    }
+}
+
+pub(super) fn asset_open_command(row: &str) -> String {
+    if let Some(command) = builtin_asset_command(row) {
+        return command;
+    }
+    let lower = row.to_ascii_lowercase();
+    // Opening a model or an Assembly means placing it in the scene. Only
+    // documents that have their own viewer (images, animations, interfaces)
+    // fall through to `assets.open`.
+    if lower.ends_with(".glb") || lower.ends_with(".gltf") || lower.ends_with(".prefab.ron") {
+        format!("assets.insert:{row}")
+    } else {
+        format!("assets.open:{row}")
+    }
 }
 
 pub(crate) fn asset_scroll_projection_changed(
@@ -79,6 +127,31 @@ pub(super) fn asset_toolbar(
             padding: UiSpacing::xy(10.0, 3.0),
             ..UiLayout::fixed(0.0, ASSET_TOOLBAR_HEIGHT).with_width_mode(UiSizeMode::Fill)
         })
+        .with_child(
+            // Primary entry point for the declarative import modal. The host
+            // listens for `assets.import-open`, opens the modal and focuses
+            // `assets.import.name`. The actual file dialog/drop path remains
+            // native because RafUI surfaces never touch the filesystem.
+            UiNode::new("assets.import-trigger", UiNodeKind::Button)
+                .with_class("asset-action asset-import-trigger")
+                .with_text_key("electronics.footprint.import_file")
+                .with_accessibility_label_key("electronics.footprint.import_file")
+                .with_icon(UiIcon::new(UiIconId::Add).with_size(UiIconSize::Small))
+                .with_layout(UiLayout::fixed(88.0, 26.0))
+                .focusable()
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    "assets.import-open",
+                ))
+                .with_event(UiEventBinding::command(
+                    UiEventKind::KeyPress("enter".to_string()),
+                    "assets.import-open",
+                ))
+                .with_event(UiEventBinding::command(
+                    UiEventKind::KeyPress("space".to_string()),
+                    "assets.import-open",
+                )),
+        )
         .with_child(
             UiNode::new("assets.create-trigger", UiNodeKind::Button)
                 .with_class(if create_open {
@@ -338,8 +411,9 @@ pub(super) fn asset_card(
     motion: AssetsMotion,
 ) -> UiNode {
     let tokens = palette.tokens();
-    let open_command = format!("assets.open:{row}");
+    let open_command = asset_open_command(row);
     let select_command = format!("assets.select:{row}");
+    let builtin_light = is_builtin_light_row(row);
     let mut class = String::from("asset-card");
     if selected {
         class.push_str(" asset-card-selected");
@@ -372,37 +446,58 @@ pub(super) fn asset_card(
         )
     };
 
+    let mut node = node
+        .with_event(UiEventBinding::command(
+            UiEventKind::DragStart,
+            format!("assets.drag-start:{row}"),
+        ))
+        .with_event(UiEventBinding::command(
+            UiEventKind::DragMove,
+            "assets.drag-move",
+        ))
+        .with_event(UiEventBinding::command(
+            UiEventKind::DragEnd,
+            "assets.drag-end",
+        ))
+        .with_tooltip_value(format!("{row}"))
+        .with_accessibility_label_key(name.clone())
+        .with_accessibility_role(UiAccessibilityRole::Button)
+        .with_accessibility_selected(selected)
+        .focusable();
+    if builtin_light {
+        // `hierarchy.create-light:point|spot` is the documented integration
+        // point. The Assets host must forward it to scene light creation; the
+        // panel intentionally keeps no scene state.
+        node = node
+            .with_event(UiEventBinding::command(
+                UiEventKind::Click,
+                open_command.clone(),
+            ))
+            .with_event(UiEventBinding::command(
+                UiEventKind::KeyPress("enter".to_string()),
+                open_command.clone(),
+            ))
+            .with_event(UiEventBinding::command(
+                UiEventKind::KeyPress("space".to_string()),
+                open_command.clone(),
+            ));
+    } else {
+        node = node
+            .with_event(UiEventBinding::command(UiEventKind::Click, select_command))
+            .with_event(UiEventBinding::command(
+                UiEventKind::DoubleClick,
+                open_command.clone(),
+            ))
+            .with_event(UiEventBinding::command(
+                UiEventKind::KeyPress("enter".to_string()),
+                open_command.clone(),
+            ))
+            .with_event(UiEventBinding::command(
+                UiEventKind::KeyPress("space".to_string()),
+                open_command,
+            ));
+    }
     node.with_event(UiEventBinding::command(
-        UiEventKind::DragStart,
-        format!("assets.drag-start:{row}"),
-    ))
-    .with_event(UiEventBinding::command(
-        UiEventKind::DragMove,
-        "assets.drag-move",
-    ))
-    .with_event(UiEventBinding::command(
-        UiEventKind::DragEnd,
-        "assets.drag-end",
-    ))
-    .with_tooltip_value(format!("{row}"))
-    .with_accessibility_label_key(name.clone())
-    .with_accessibility_role(UiAccessibilityRole::Button)
-    .with_accessibility_selected(selected)
-    .focusable()
-    .with_event(UiEventBinding::command(UiEventKind::Click, select_command))
-    .with_event(UiEventBinding::command(
-        UiEventKind::DoubleClick,
-        open_command.clone(),
-    ))
-    .with_event(UiEventBinding::command(
-        UiEventKind::KeyPress("enter".to_string()),
-        open_command.clone(),
-    ))
-    .with_event(UiEventBinding::command(
-        UiEventKind::KeyPress("space".to_string()),
-        open_command,
-    ))
-    .with_event(UiEventBinding::command(
         UiEventKind::ContextMenu,
         format!("assets.context-menu:{row}"),
     ))
@@ -664,25 +759,34 @@ fn asset_card_meta(
 
 /// Action bar for the selected row. It keeps the common file operations one
 /// click away instead of hiding every one of them behind a context menu.
-pub(super) fn selection_action_bar(palette: StudioUiPalette, row: &str, highlight: Option<&str>) -> UiNode {
+pub(super) fn selection_action_bar(
+    palette: StudioUiPalette,
+    row: &str,
+    highlight: Option<&str>,
+) -> UiNode {
     let tokens = palette.tokens();
     if row.is_empty() {
         return UiNode::new("assets.selection", UiNodeKind::Panel)
             .with_layout(UiLayout::fixed(0.0, 0.0).with_width_mode(UiSizeMode::Fill));
     }
     let builtin = is_builtin_row(row);
+    let light = is_builtin_light_row(row);
+    let open_command = asset_open_command(row);
+    let placeable = open_command.starts_with("assets.insert:");
     let mut actions: Vec<(UiIconId, &'static str, String)> = vec![(
-        if builtin {
+        if placeable || builtin {
             UiIconId::Add
         } else {
             UiIconId::ExternalLink
         },
-        if builtin {
+        if light || placeable {
+            "assets.insert"
+        } else if builtin {
             "app.assets_context_create"
         } else {
             "app.assets_context_open"
         },
-        format!("assets.open:{row}"),
+        open_command,
     )];
     if !builtin {
         actions.extend([
@@ -806,13 +910,21 @@ fn extension_label(extension: &str) -> String {
 }
 
 pub fn asset_file_name(row: &str) -> String {
-    if let Some(kind)=row.strip_prefix("builtin://interface/"){return format!("ui.element.{kind}");}
+    if let Some(kind) = row.strip_prefix("builtin://interface/") {
+        return format!("ui.element.{kind}");
+    }
     if row == "builtin://camera" {
         return "Camera".into();
     }
+    if row == "builtin://light/point" {
+        return "Point Light".into();
+    }
+    if row == "builtin://light/spot" {
+        return "Spot Light".into();
+    }
     if let Some(slug) = row.strip_prefix("builtin://primitive/") {
         return crate::panels::primitive_create::parse_primitive_slug(slug)
-            .map(|primitive| primitive_name(primitive).to_string())
+            .map(|primitive| primitive_card_name(primitive).to_string())
             .unwrap_or_else(|| slug.to_string());
     }
     Path::new(row)
@@ -822,14 +934,38 @@ pub fn asset_file_name(row: &str) -> String {
         .to_string()
 }
 
+/// Display name used on cards and in literals. `primitive_name` only knows the
+/// original five shapes, so the newer primitives keep a readable literal until
+/// their locale keys land.
+pub fn primitive_card_name(primitive: raf_core::scene::Primitive) -> &'static str {
+    match primitive {
+        raf_core::scene::Primitive::Wedge => "Wedge",
+        raf_core::scene::Primitive::Torus => "Torus",
+        raf_core::scene::Primitive::Prism => "Prism",
+        raf_core::scene::Primitive::Sphere2D => "Sphere 2D",
+        other => primitive_name(other),
+    }
+}
+
 pub fn asset_display_name(row: &str) -> String {
     if row == "builtin://camera" {
         return "Built-in / Camera".into();
     }
+    if let Some(kind) = row.strip_prefix("builtin://light/") {
+        return format!("Built-in / {} Light", title_case(kind));
+    }
     row.strip_prefix("builtin://primitive/")
         .and_then(crate::panels::primitive_create::parse_primitive_slug)
-        .map(|primitive| format!("Built-in / {}", primitive_name(primitive)))
+        .map(|primitive| format!("Built-in / {}", primitive_card_name(primitive)))
         .unwrap_or_else(|| row.to_string())
+}
+
+fn title_case(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 pub(super) fn sort_asset_rows(rows: &mut [&String], sort: AssetSort) {
@@ -859,7 +995,11 @@ fn is_builtin_row(row: &str) -> bool {
     row.starts_with("builtin://")
 }
 
-pub(super) fn asset_matches_script_extension(row: &str, filter: AssetFilter, extension: &str) -> bool {
+pub(super) fn asset_matches_script_extension(
+    row: &str,
+    filter: AssetFilter,
+    extension: &str,
+) -> bool {
     if filter != AssetFilter::Scripts || extension.is_empty() || is_builtin_row(row) {
         return true;
     }
@@ -912,7 +1052,113 @@ pub fn visible_asset_rows<'a>(
     filtered
 }
 
-/// Window of rows to materialize for the current scroll offset.
+/// Cards that fit on one grid row for a real grid width.
+///
+/// `viewport_width` is the width of the scroll viewport, padding included.
+/// The grid lays cards with wrap, so its usable content width excludes the
+/// horizontal padding used by `build_assets_surface`.
+pub fn asset_grid_columns(viewport_width: f32) -> usize {
+    if !viewport_width.is_finite() {
+        return 1;
+    }
+    let content = (viewport_width - ASSET_GRID_PADDING_X * 2.0).max(0.0);
+    (((content + ASSET_CARD_GAP) / (ASSET_CARD_WIDTH + ASSET_CARD_GAP)).floor() as usize).max(1)
+}
+
+/// Number of visual rows a wrapped card collection occupies.
+pub fn asset_grid_row_count(card_count: usize, columns: usize) -> usize {
+    if card_count == 0 {
+        return 0;
+    }
+    let columns = columns.max(1);
+    (card_count + columns - 1) / columns
+}
+
+/// Visible row window for a vertical list of equally high rows.
+///
+/// Unlike the old card-based estimate, the scroll offset is clamped against
+/// the whole row count so stale offsets from a taller panel do not materialize
+/// a window beyond the end of the list.
+pub fn asset_grid_row_range(
+    total_rows: usize,
+    scroll_offset: f32,
+    viewport_height: f32,
+    row_pitch: f32,
+    overscan: usize,
+) -> (usize, usize) {
+    if total_rows == 0 || viewport_height <= 0.0 {
+        return (0, 0);
+    }
+    let pitch = row_pitch.max(1.0);
+    let max_scroll = (total_rows as f32 * pitch - viewport_height).max(0.0);
+    let scroll = if scroll_offset.is_finite() {
+        scroll_offset.clamp(0.0, max_scroll)
+    } else {
+        0.0
+    };
+    let range = raf_ui::UiVirtualRange::for_vertical_list(
+        total_rows,
+        scroll,
+        viewport_height,
+        pitch,
+        overscan,
+    );
+    (range.start.min(total_rows), range.end.min(total_rows))
+}
+
+/// Window of cards to materialize for a real grid width.
+///
+/// Grid rows are computed from the card count and `panel_width`, then mapped
+/// back to a row-aligned card range. The surface uses the same width for its
+/// top and bottom spacers, so skipped content occupies exactly the rows it
+/// should. Lists keep their existing one-card-per-row projection.
+pub fn asset_visible_range_for_width(
+    rows: &[String],
+    query: &str,
+    filter: AssetFilter,
+    script_extension: &str,
+    sort: AssetSort,
+    scroll_offset: f32,
+    viewport_height: f32,
+    panel_width: f32,
+    view: AssetViewMode,
+) -> (usize, usize) {
+    let count = visible_asset_rows(rows, query, filter, script_extension, sort).len();
+    if count == 0 || viewport_height <= 0.0 {
+        return (0, 0);
+    }
+    match view {
+        AssetViewMode::List => {
+            let capacity = (viewport_height / ASSET_LIST_PITCH.max(1.0)).ceil() as usize;
+            if capacity >= count {
+                return (0, count);
+            }
+            let (start, end) =
+                asset_grid_row_range(count, scroll_offset, viewport_height, ASSET_LIST_PITCH, 4);
+            (start.min(count), end.min(count))
+        }
+        AssetViewMode::Grid => {
+            let columns = asset_grid_columns(panel_width);
+            let total_rows = asset_grid_row_count(count, columns);
+            let (start_row, end_row) = asset_grid_row_range(
+                total_rows,
+                scroll_offset,
+                viewport_height,
+                ASSET_CARD_PITCH,
+                2,
+            );
+            (
+                (start_row * columns).min(count),
+                (end_row * columns).min(count),
+            )
+        }
+    }
+}
+
+/// Backwards-compatible window for hosts that do not yet pass the real grid
+/// width. The Assets workbench should call
+/// [`asset_visible_range_for_width`] with `content_rect.width` (see the module
+/// comment in `assets_surface.rs`).
 pub fn asset_visible_range(
     rows: &[String],
     query: &str,
@@ -923,37 +1169,58 @@ pub fn asset_visible_range(
     viewport_height: f32,
     view: AssetViewMode,
 ) -> (usize, usize) {
-    let count = visible_asset_rows(rows, query, filter, script_extension, sort).len();
-    if count == 0 || viewport_height <= 0.0 {
-        return (0, 0);
-    }
-    let pitch = match view {
-        AssetViewMode::Grid => ASSET_CARD_PITCH,
-        AssetViewMode::List => ASSET_LIST_PITCH,
-    };
-    let capacity = (viewport_height / pitch.max(1.0)).ceil() as usize;
-    if capacity >= count {
-        return (0, count);
-    }
-    let range = raf_ui::UiVirtualRange::for_vertical_list(
-        count,
-        scroll_offset.max(0.0),
+    asset_visible_range_for_width(
+        rows,
+        query,
+        filter,
+        script_extension,
+        sort,
+        scroll_offset,
         viewport_height,
-        pitch,
-        4,
-    );
-    (range.start.min(count), range.end.min(count))
+        ASSET_GRID_FALLBACK_WIDTH,
+        view,
+    )
 }
 
-pub(super) fn asset_virtual_spacer_height(row_count: usize, view: AssetViewMode) -> f32 {
-    if row_count == 0 {
+fn asset_virtual_row_count(card_count: usize, panel_width: f32, view: AssetViewMode) -> usize {
+    match view {
+        AssetViewMode::Grid => asset_grid_row_count(card_count, asset_grid_columns(panel_width)),
+        AssetViewMode::List => card_count,
+    }
+}
+
+/// Height reserved above the first materialized card. Skipped rows always
+/// start on a row boundary, so no trailing gap is subtracted here.
+pub(super) fn asset_virtual_top_spacer_height(
+    card_count: usize,
+    panel_width: f32,
+    view: AssetViewMode,
+) -> f32 {
+    if card_count == 0 {
         return 0.0;
     }
     let pitch = match view {
         AssetViewMode::Grid => ASSET_CARD_PITCH,
         AssetViewMode::List => ASSET_LIST_PITCH,
     };
-    row_count as f32 * pitch - ASSET_CARD_GAP
+    asset_virtual_row_count(card_count, panel_width, view) as f32 * pitch
+}
+
+/// Height reserved below the last materialized card. The final row does not
+/// contribute its trailing gap to scrollable content.
+pub(super) fn asset_virtual_bottom_spacer_height(
+    card_count: usize,
+    panel_width: f32,
+    view: AssetViewMode,
+) -> f32 {
+    if card_count == 0 {
+        return 0.0;
+    }
+    let (pitch, gap) = match view {
+        AssetViewMode::Grid => (ASSET_CARD_PITCH, ASSET_CARD_GAP),
+        AssetViewMode::List => (ASSET_LIST_PITCH, ASSET_LIST_ROW_GAP),
+    };
+    (asset_virtual_row_count(card_count, panel_width, view) as f32 * pitch - gap).max(0.0)
 }
 
 pub(super) fn asset_matches(row: &str, query: &str, filter: AssetFilter) -> bool {
@@ -969,7 +1236,9 @@ pub(super) fn asset_matches(row: &str, query: &str, filter: AssetFilter) -> bool
         .map(|extension| extension.to_ascii_lowercase());
     match filter {
         AssetFilter::All => true,
-        AssetFilter::Interfaces => row.starts_with("builtin://interface/") || lower.ends_with(".ui.ron"),
+        AssetFilter::Interfaces => {
+            row.starts_with("builtin://interface/") || lower.ends_with(".ui.ron")
+        }
         AssetFilter::Animations => raf_assets::animation_asset::is_animation_asset(row),
         AssetFilter::Images => matches!(
             extension.as_deref(),
@@ -1008,15 +1277,26 @@ pub(super) fn asset_matches(row: &str, query: &str, filter: AssetFilter) -> bool
 }
 
 pub(super) fn asset_icon(name: &str) -> UiIconId {
-    if raf_assets::animation_asset::is_animation_asset(name) { return UiIconId::Play; }
-    if name.starts_with("builtin://interface/") || name.to_ascii_lowercase().ends_with(".ui.ron"){return UiIconId::Frame;}
+    if raf_assets::animation_asset::is_animation_asset(name) {
+        return UiIconId::Play;
+    }
+    if name.starts_with("builtin://interface/") || name.to_ascii_lowercase().ends_with(".ui.ron") {
+        return UiIconId::Frame;
+    }
     if name == "builtin://camera" {
         return UiIconId::Camera;
     }
+    if name.starts_with("builtin://light/") {
+        return UiIconId::Sun;
+    }
     if let Some(slug) = name.strip_prefix("builtin://primitive/") {
         return match crate::panels::primitive_create::parse_primitive_slug(slug) {
-            Some(raf_core::scene::Primitive::Cube) => UiIconId::Cube,
-            Some(raf_core::scene::Primitive::Sphere) => UiIconId::Sphere,
+            Some(raf_core::scene::Primitive::Cube)
+            | Some(raf_core::scene::Primitive::Wedge)
+            | Some(raf_core::scene::Primitive::Prism) => UiIconId::Cube,
+            Some(raf_core::scene::Primitive::Sphere)
+            | Some(raf_core::scene::Primitive::Torus)
+            | Some(raf_core::scene::Primitive::Sphere2D) => UiIconId::Sphere,
             Some(raf_core::scene::Primitive::Capsule) => UiIconId::Capsule,
             Some(raf_core::scene::Primitive::Cylinder) => UiIconId::Cylinder,
             Some(raf_core::scene::Primitive::Plane) => UiIconId::Plane,

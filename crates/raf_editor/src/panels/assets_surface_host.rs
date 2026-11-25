@@ -22,6 +22,8 @@ pub struct AssetsSurfaceHost {
     pub(crate) script_name: String,
     pub(crate) file_menu_open: bool,
     pub(crate) file_name: String,
+    pub(crate) particle_menu_open: bool,
+    pub(crate) particle_name: String,
     pub(crate) refresh_requested: bool,
     pub(crate) primitive_menu_open: bool,
     pub(crate) create_menu_open: bool,
@@ -48,6 +50,8 @@ impl Default for AssetsSurfaceHost {
             script_name: "new_script".to_string(),
             file_menu_open: false,
             file_name: "new_file".to_string(),
+            particle_menu_open: false,
+            particle_name: "new_particle".to_string(),
             refresh_requested: false,
             primitive_menu_open: false,
             create_menu_open: false,
@@ -75,6 +79,7 @@ impl AssetsSurfaceHost {
         self.create_menu_open
             || self.script_menu_open
             || self.file_menu_open
+            || self.particle_menu_open
             || self.primitive_menu_open
             || self.open_asset.is_some()
             || self.rename_asset.is_some()
@@ -87,6 +92,7 @@ impl AssetsSurfaceHost {
         self.create_menu_open
             || self.script_menu_open
             || self.file_menu_open
+            || self.particle_menu_open
             || self.primitive_menu_open
             || self.context_menu.is_some()
     }
@@ -96,6 +102,7 @@ impl AssetsSurfaceHost {
         self.create_menu_open = false;
         self.script_menu_open = false;
         self.file_menu_open = false;
+        self.particle_menu_open = false;
         self.primitive_menu_open = false;
         self.context_menu = None;
         was_open
@@ -113,11 +120,12 @@ impl AssetsSurfaceHost {
     /// True when `target` belongs to an Assets overlay, so an outside-click
     /// pass must not close it before the overlay itself handles the press.
     pub(crate) fn is_overlay_target(target: &str) -> bool {
-        const PREFIXES: [&str; 12] = [
+        const PREFIXES: [&str; 13] = [
             "assets.create-trigger",
             "assets.create-menu",
             "assets.script-popover",
             "assets.file-popover",
+            "assets.particle-popover",
             "assets.primitive-popover",
             "assets.context",
             "assets.modal",

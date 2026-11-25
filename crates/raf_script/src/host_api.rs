@@ -11,6 +11,7 @@
 use raf_core::scene::graph::SceneNodeId;
 use raf_core::scene::SceneGraph;
 
+use crate::errors::ScriptError;
 use crate::node_handle::NodeHandle;
 use crate::value::ScriptValue;
 use crate::ScriptResult;
@@ -154,7 +155,88 @@ pub struct ScriptEventQueue {
 pub enum AudioCommand {
     Play { name: String },
     Stop { name: String },
+    StopAll,
     SetVolume { name: String, volume: f32 },
+    SetBusVolume { bus: raf_core::scene::AudioBus, volume: f32 },
+}
+
+#[cfg(test)]
+mod mesh_tests {
+    use super::*;
+    use crate::{AudioCommandQueue, InputSnapshot, TimeInfo};
+    use crate::host_api::ScriptEventQueue;
+    use raf_core::scene::{EditableMeshData, Primitive, SceneGraph};
+
+    fn context(scene: &mut SceneGraph, run: impl FnOnce(&mut ScriptContext<'_>)) {
+        let mut view = crate::view::RuntimeViewState::default();
+        let input = InputSnapshot::default();
+        let mut audio = AudioCommandQueue::default();
+        let mut events = ScriptEventQueue::default();
+        run(&mut ScriptContext {
+            scene,
+            view: &mut view,
+            input: &input,
+            audio: &mut audio,
+            events: &mut events,
+            time: TimeInfo::default(),
+            instance_id: 1,
+            owner: None,
+            behavior_source: None,
+            entity_limit: 100,
+            cancellation: None,
+            deadline: None,
+        });
+    }
+
+    #[test]
+    fn rhai_style_mesh_operations_mutate_persisted_topology() {
+        let mut scene = SceneGraph::new();
+        let id = scene.add_root_with_primitive("Block", Primitive::Cube);
+        if let Some(node) = scene.get_mut(id) {
+            node.editable_mesh = Some(
+                EditableMeshData::box_mesh(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5))
+                    .expect("box mesh"),
+            );
+        }
+        context(&mut scene, |ctx| {
+            let handle = NodeHandle::scoped(id, ctx);
+            assert_eq!(ctx.mesh_vertex_count(handle).unwrap(), 8);
+            ctx.mesh_set_vertex(handle, 0, 1.0, 2.0, 3.0)
+                .expect("set vertex");
+            assert_eq!(
+                ctx.mesh_vertex(handle, 0).expect("vertex"),
+                ScriptValue::Vec3([1.0, 2.0, 3.0])
+            );
+            let created = ctx.mesh_extrude(handle, 0, 0.25).expect("extrude");
+            assert!(created >= 0);
+            assert!(ctx.mesh_face_count(handle).unwrap() > 12);
+            ctx.mesh_reset(handle).expect("reset");
+            assert_eq!(ctx.mesh_face_count(handle).unwrap(), 0);
+        });
+        assert!(scene.get(id).unwrap().editable_mesh.is_none());
+    }
+}
+
+#[cfg(test)]
+mod audio_queue_tests {
+    use super::*;
+
+    #[test]
+    fn bus_and_stop_all_commands_are_queued() {
+        let mut queue = AudioCommandQueue::default();
+        queue.set_bus_volume(raf_core::scene::AudioBus::Music, 0.4);
+        queue.stop_all();
+        assert!(matches!(
+            queue.commands.as_slice(),
+            [
+                AudioCommand::SetBusVolume {
+                    bus: raf_core::scene::AudioBus::Music,
+                    volume
+                },
+                AudioCommand::StopAll
+            ] if (*volume - 0.4).abs() < 1e-6
+        ));
+    }
 }
 
 impl AudioCommandQueue {
@@ -175,6 +257,14 @@ impl AudioCommandQueue {
             name: name.to_string(),
             volume,
         });
+    }
+
+    pub fn stop_all(&mut self) {
+        self.commands.push(AudioCommand::StopAll);
+    }
+
+    pub fn set_bus_volume(&mut self, bus: raf_core::scene::AudioBus, volume: f32) {
+        self.commands.push(AudioCommand::SetBusVolume { bus, volume });
     }
 
     /// Drain all queued commands (called by the audio system after scripts run).
@@ -375,6 +465,229 @@ impl<'a> ScriptContext<'a> {
         }
     }
 
+    /// Stop every runtime voice.
+    pub fn stop_all_audio(&mut self) {
+        if self.audio.commands.len() < 256 {
+            self.audio.stop_all();
+        }
+    }
+
+    /// Set one project mixer bus. Values are clamped to 0..1.
+    pub fn set_audio_bus_volume(&mut self, bus: raf_core::scene::AudioBus, volume: f32) {
+        if self.audio.commands.len() < 256 {
+            self.audio.set_bus_volume(bus, volume.clamp(0.0, 1.0));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Editable mesh operations (Tab Mode topology)
+    // -----------------------------------------------------------------------
+
+    fn mesh_mut(
+        &mut self,
+        handle: NodeHandle,
+    ) -> ScriptResult<&mut raf_core::scene::EditableMeshData> {
+        let id = handle.resolve(self)?;
+        let node = self
+            .scene
+            .get_mut(id)
+            .ok_or(ScriptError::InvalidHandle(handle.raw()))?;
+        node.editable_mesh.as_mut().ok_or_else(|| {
+            ScriptError::InvalidArgument(
+                "entity has no editable mesh; author it in Tab Mode first".into(),
+            )
+        })
+    }
+
+    pub fn mesh_vertex_count(&self, handle: NodeHandle) -> ScriptResult<i64> {
+        let id = handle.resolve(self)?;
+        let node = self
+            .scene
+            .get(id)
+            .ok_or(ScriptError::InvalidHandle(handle.raw()))?;
+        Ok(node
+            .editable_mesh
+            .as_ref()
+            .map_or(0, |mesh| mesh.vertices.len() as i64))
+    }
+
+    pub fn mesh_face_count(&self, handle: NodeHandle) -> ScriptResult<i64> {
+        let id = handle.resolve(self)?;
+        let node = self
+            .scene
+            .get(id)
+            .ok_or(ScriptError::InvalidHandle(handle.raw()))?;
+        Ok(node
+            .editable_mesh
+            .as_ref()
+            .map_or(0, |mesh| mesh.face_count() as i64))
+    }
+
+    pub fn mesh_revision(&self, handle: NodeHandle) -> ScriptResult<i64> {
+        let id = handle.resolve(self)?;
+        let node = self
+            .scene
+            .get(id)
+            .ok_or(ScriptError::InvalidHandle(handle.raw()))?;
+        Ok(node
+            .editable_mesh
+            .as_ref()
+            .map_or(0, |mesh| mesh.revision as i64))
+    }
+
+    pub fn mesh_vertex(
+        &self,
+        handle: NodeHandle,
+        index: i64,
+    ) -> ScriptResult<ScriptValue> {
+        let id = handle.resolve(self)?;
+        let node = self
+            .scene
+            .get(id)
+            .ok_or(ScriptError::InvalidHandle(handle.raw()))?;
+        let mesh = node.editable_mesh.as_ref().ok_or_else(|| {
+            ScriptError::InvalidArgument(
+                "entity has no editable mesh; author it in Tab Mode first".into(),
+            )
+        })?;
+        if index < 0 {
+            return Err(ScriptError::InvalidArgument(
+                "mesh vertex index must be non-negative".into(),
+            ));
+        }
+        mesh.vertex_position(index as u32)
+            .map(|point| ScriptValue::Vec3(point.to_array()))
+            .ok_or_else(|| ScriptError::InvalidArgument("mesh vertex index is out of range".into()))
+    }
+
+    pub fn mesh_set_vertex(
+        &mut self,
+        handle: NodeHandle,
+        index: i64,
+        x: f32,
+        y: f32,
+        z: f32,
+    ) -> ScriptResult<()> {
+        if !x.is_finite() || !y.is_finite() || !z.is_finite() || index < 0 {
+            return Err(ScriptError::InvalidArgument(
+                "mesh vertex requires a finite position and non-negative index".into(),
+            ));
+        }
+        let mesh = self.mesh_mut(handle)?;
+        let index = index as u32;
+        let current = mesh
+            .vertex_position(index)
+            .ok_or_else(|| ScriptError::InvalidArgument("mesh vertex index is out of range".into()))?;
+        mesh.move_vertices(
+            &[index],
+            [x - current.x, y - current.y, z - current.z],
+        )
+        .map_err(|error| ScriptError::InvalidArgument(error.into()))?;
+        Ok(())
+    }
+
+    pub fn mesh_move_vertex(
+        &mut self,
+        handle: NodeHandle,
+        index: i64,
+        x: f32,
+        y: f32,
+        z: f32,
+    ) -> ScriptResult<()> {
+        if !x.is_finite() || !y.is_finite() || !z.is_finite() || index < 0 {
+            return Err(ScriptError::InvalidArgument(
+                "mesh vertex requires a finite delta and non-negative index".into(),
+            ));
+        }
+        let mesh = self.mesh_mut(handle)?;
+        mesh.move_vertices(&[index as u32], [x, y, z])
+            .map_err(|error| ScriptError::InvalidArgument(error.into()))?;
+        Ok(())
+    }
+
+    pub fn mesh_extrude(
+        &mut self,
+        handle: NodeHandle,
+        face: i64,
+        distance: f32,
+    ) -> ScriptResult<i64> {
+        if face < 0 || !distance.is_finite() {
+            return Err(ScriptError::InvalidArgument(
+                "mesh extrude requires a non-negative face and finite distance".into(),
+            ));
+        }
+        let mesh = self.mesh_mut(handle)?;
+        let outcome = mesh
+            .extrude_faces(&[face as u32], distance)
+            .map_err(|error| ScriptError::InvalidArgument(error.into()))?;
+        Ok(outcome
+            .created_faces
+            .first()
+            .copied()
+            .map_or(-1, |face| face as i64))
+    }
+
+    pub fn mesh_inset(
+        &mut self,
+        handle: NodeHandle,
+        face: i64,
+        amount: f32,
+    ) -> ScriptResult<i64> {
+        if face < 0 || !amount.is_finite() {
+            return Err(ScriptError::InvalidArgument(
+                "mesh inset requires a non-negative face and finite amount".into(),
+            ));
+        }
+        let mesh = self.mesh_mut(handle)?;
+        let outcome = mesh
+            .inset_faces(&[face as u32], amount.clamp(0.0, 0.99))
+            .map_err(|error| ScriptError::InvalidArgument(error.into()))?;
+        Ok(outcome
+            .created_faces
+            .first()
+            .copied()
+            .map_or(-1, |face| face as i64))
+    }
+
+    pub fn mesh_subdivide(&mut self, handle: NodeHandle, face: i64) -> ScriptResult<i64> {
+        if face < 0 {
+            return Err(ScriptError::InvalidArgument(
+                "mesh subdivide requires a non-negative face".into(),
+            ));
+        }
+        let mesh = self.mesh_mut(handle)?;
+        let outcome = mesh
+            .subdivide_faces(&[face as u32])
+            .map_err(|error| ScriptError::InvalidArgument(error.into()))?;
+        Ok(outcome
+            .created_faces
+            .first()
+            .copied()
+            .map_or(-1, |face| face as i64))
+    }
+
+    pub fn mesh_delete_face(&mut self, handle: NodeHandle, face: i64) -> ScriptResult<()> {
+        if face < 0 {
+            return Err(ScriptError::InvalidArgument(
+                "mesh delete requires a non-negative face".into(),
+            ));
+        }
+        let mesh = self.mesh_mut(handle)?;
+        mesh.delete_faces(&[face as u32])
+            .map_err(|error| ScriptError::InvalidArgument(error.into()))?;
+        Ok(())
+    }
+
+    pub fn mesh_reset(&mut self, handle: NodeHandle) -> ScriptResult<()> {
+        let id = handle.resolve(self)?;
+        let node = self
+            .scene
+            .get_mut(id)
+            .ok_or(ScriptError::InvalidHandle(handle.raw()))?;
+        node.editable_mesh = None;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Time operations (host::time_ops)
     // -----------------------------------------------------------------------
@@ -416,6 +729,10 @@ fn parse_primitive(name: &str) -> ScriptResult<raf_core::scene::Primitive> {
         "plane" | "ground" => Primitive::Plane,
         "cylinder" | "tube" => Primitive::Cylinder,
         "capsule" => Primitive::Capsule,
+        "wedge" | "ramp" => Primitive::Wedge,
+        "torus" | "donut" => Primitive::Torus,
+        "prism" => Primitive::Prism,
+        "sphere2d" | "billboard_sphere" | "sphere_2d" => Primitive::Sphere2D,
         // Sprite2D was retired: 2D game content is an orthographic 3D plane.
         "sprite" | "sprite2d" | "billboard" => Primitive::Plane,
         "empty" | "group" => Primitive::Empty,

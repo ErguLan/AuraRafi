@@ -92,7 +92,10 @@ pub fn cube(segments: usize) -> MeshData {
         ),
     ];
 
-    const FACE_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    // Contract: v = 0 is the top of the texture. Corner order is
+    // bottom-left, bottom-right, top-right, top-left, so the top corners
+    // (indices 2 and 3) receive v = 0.
+    const FACE_UVS: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
     for (corners, normal) in &faces {
         let base = mesh.vertex_count() as u32;
         for (index, corner) in corners.iter().enumerate() {
@@ -152,12 +155,12 @@ pub fn cylinder(segments: usize) -> MeshData {
     }
 
     for i in 0..seg {
-        let i0 = side_base + (i as u32) * 2; // top[i]
-        let i1 = i0 + 1; // bot[i]
-        let i2 = side_base + (i as u32 + 1) * 2; // top[i+1]
-        let i3 = i2 + 1; // bot[i+1]
-                         // CCW from outside: bot[i], bot[i+1], top[i+1], top[i]
-        mesh.push_quad(i1, i3, i2, i0);
+        let top_i = side_base + (i as u32) * 2;
+        let bot_i = top_i + 1;
+        let top_next = side_base + (i as u32 + 1) * 2;
+        let bot_next = top_next + 1;
+        // CCW from outside: bot[i], top[i], top[i+1], bot[i+1].
+        mesh.push_quad(bot_i, top_i, top_next, bot_next);
     }
 
     // --- Top cap (fan from center, normal = +Y) ---
@@ -173,11 +176,12 @@ pub fn cylinder(segments: usize) -> MeshData {
     }
     for i in 0..seg {
         let next = (i + 1) % seg;
-        // CCW from above (+Y): center, current, next
+        // The ring runs clockwise when seen from +Y, so reverse it for the
+        // top cap to keep CCW winding from outside.
         mesh.push_triangle(
             top_center,
-            top_ring_base + i as u32,
             top_ring_base + next as u32,
+            top_ring_base + i as u32,
         );
     }
 
@@ -194,11 +198,11 @@ pub fn cylinder(segments: usize) -> MeshData {
     }
     for i in 0..seg {
         let next = (i + 1) % seg;
-        // CCW from below (-Y): center, next, current (reversed because viewing from -Y)
+        // CCW from below (-Y): center, current, next.
         mesh.push_triangle(
             bot_center,
-            bot_ring_base + next as u32,
             bot_ring_base + i as u32,
+            bot_ring_base + next as u32,
         );
     }
 
@@ -247,7 +251,10 @@ pub fn sphere(stacks: usize, slices: usize) -> MeshData {
         }
     }
 
-    // Generate triangles
+    // Generate triangles. Rows advance from the north pole to the south pole,
+    // so the outward (CCW) order of a quad is a-d-c-b. The triangles that
+    // touch a pole edge collapse to zero area and are skipped: the pole is
+    // duplicated per slice for UVs, not for geometry.
     let cols = (sl + 1) as u32;
     for i in 0..st {
         for j in 0..sl {
@@ -256,9 +263,12 @@ pub fn sphere(stacks: usize, slices: usize) -> MeshData {
             let c = b + 1;
             let d = a + 1;
 
-            // Two triangles per quad (CCW)
-            mesh.push_triangle(a, b, c);
-            mesh.push_triangle(a, c, d);
+            if i > 0 {
+                mesh.push_triangle(a, d, c);
+            }
+            if i + 1 < st {
+                mesh.push_triangle(a, c, b);
+            }
         }
     }
 
@@ -284,6 +294,275 @@ pub fn plane(segments: usize) -> MeshData {
     // The XZ vertex order a-b-c-d winds toward -Y, opposite to the authored
     // normals. Reverse it so the front-face winding agrees with +Y.
     mesh.push_quad(a, d, c, b);
+    mesh
+}
+
+// ---------------------------------------------------------------------------
+// Wedge
+// ---------------------------------------------------------------------------
+
+/// Right triangular prism ("ramp") centered at origin, 1x1x1.
+///
+/// The vertical face is at -Z, the slope rises from the front bottom edge
+/// (z = +0.5, y = -0.5) to the back top edge (z = -0.5, y = +0.5).
+/// `segments` is reserved for future subdivision, matching cube/plane.
+pub fn wedge(segments: usize) -> MeshData {
+    let _ = segments;
+    let h = 0.5;
+    let mut mesh = MeshData::with_capacity(18, 24);
+
+    let b0 = Vec3::new(-h, -h, -h);
+    let b1 = Vec3::new(h, -h, -h);
+    let b2 = Vec3::new(h, -h, h);
+    let b3 = Vec3::new(-h, -h, h);
+    let t0 = Vec3::new(-h, h, -h);
+    let t1 = Vec3::new(h, h, -h);
+    let slope_normal = Vec3::new(0.0, 1.0, 1.0).normalize();
+
+    // Bottom (-Y).
+    let base = mesh.vertex_count() as u32;
+    for (corner, uv) in [
+        (b0, [0.0, 0.0]),
+        (b1, [1.0, 0.0]),
+        (b2, [1.0, 1.0]),
+        (b3, [0.0, 1.0]),
+    ] {
+        mesh.push_vertex_uv(corner, Vec3::NEG_Y, uv);
+    }
+    mesh.push_quad(base, base + 1, base + 2, base + 3);
+
+    // Back vertical face (-Z).
+    let base = mesh.vertex_count() as u32;
+    for (corner, uv) in [
+        (b0, [0.0, 1.0]),
+        (t0, [0.0, 0.0]),
+        (t1, [1.0, 0.0]),
+        (b1, [1.0, 1.0]),
+    ] {
+        mesh.push_vertex_uv(corner, Vec3::NEG_Z, uv);
+    }
+    mesh.push_quad(base, base + 1, base + 2, base + 3);
+
+    // Sloped face (+Y/+Z).
+    let base = mesh.vertex_count() as u32;
+    for (corner, uv) in [
+        (b3, [0.0, 1.0]),
+        (b2, [1.0, 1.0]),
+        (t1, [1.0, 0.0]),
+        (t0, [0.0, 0.0]),
+    ] {
+        mesh.push_vertex_uv(corner, slope_normal, uv);
+    }
+    mesh.push_quad(base, base + 1, base + 2, base + 3);
+
+    // Left side triangle (-X).
+    let base = mesh.vertex_count() as u32;
+    for (corner, uv) in [(b0, [0.0, 1.0]), (b3, [1.0, 1.0]), (t0, [0.0, 0.0])] {
+        mesh.push_vertex_uv(corner, Vec3::NEG_X, uv);
+    }
+    mesh.push_triangle(base, base + 1, base + 2);
+
+    // Right side triangle (+X).
+    let base = mesh.vertex_count() as u32;
+    for (corner, uv) in [(b1, [0.0, 1.0]), (t1, [0.0, 0.0]), (b2, [1.0, 1.0])] {
+        mesh.push_vertex_uv(corner, Vec3::X, uv);
+    }
+    mesh.push_triangle(base, base + 1, base + 2);
+
+    mesh
+}
+
+// ---------------------------------------------------------------------------
+// Torus
+// ---------------------------------------------------------------------------
+
+/// Torus on the XZ plane, unit outer diameter, tube thickness 0.4.
+///
+/// Major radius 0.3 plus tube radius 0.2 gives an outer diameter of 1.0 and a
+/// vertical extent of +/-0.2, matching the authored shape descriptor.
+pub fn torus(major_segments: usize, minor_segments: usize) -> MeshData {
+    let major = major_segments.max(3);
+    let minor = minor_segments.max(3);
+    let tau = std::f32::consts::TAU;
+    let major_radius = 0.3f32;
+    let tube_radius = 0.2f32;
+
+    let vert_count = (major + 1) * (minor + 1);
+    let mut mesh = MeshData::with_capacity(vert_count, major * minor * 6);
+    let cols = (minor + 1) as u32;
+
+    for i in 0..=major {
+        let u = tau * (i as f32 / major as f32);
+        let (sin_u, cos_u) = u.sin_cos();
+        for j in 0..=minor {
+            let v = tau * (j as f32 / minor as f32);
+            let (sin_v, cos_v) = v.sin_cos();
+            let ring = major_radius + tube_radius * cos_v;
+            let position = Vec3::new(ring * cos_u, tube_radius * sin_v, ring * sin_u);
+            let normal = Vec3::new(cos_v * cos_u, sin_v, cos_v * sin_u);
+            mesh.push_vertex_uv(
+                position,
+                normal,
+                [i as f32 / major as f32, j as f32 / minor as f32],
+            );
+        }
+    }
+
+    for i in 0..major {
+        for j in 0..minor {
+            let a = (i as u32) * cols + j as u32;
+            let b = a + cols;
+            let c = b + 1;
+            let d = a + 1;
+            // CCW from outside: a-d-c-b.
+            mesh.push_quad(a, d, c, b);
+        }
+    }
+
+    mesh
+}
+
+// ---------------------------------------------------------------------------
+// Prism
+// ---------------------------------------------------------------------------
+
+/// Regular n-sided prism along the Y axis, circumradius 0.5, height 1.0.
+///
+/// Unlike the smooth cylinder, each side uses four duplicated vertices with a
+/// flat outward normal, producing faceted shading.
+pub fn prism(sides: usize) -> MeshData {
+    let sides = sides.clamp(3, 64);
+    let r = 0.5f32;
+    let h = 0.5f32;
+    let tau = std::f32::consts::TAU;
+
+    // Sides: 4 verts / 2 tris each. Caps: center + n ring verts, n tris each.
+    let vert_count = sides * 4 + (sides + 1) * 2;
+    let tri_count = sides * 2 + sides + sides;
+    let mut mesh = MeshData::with_capacity(vert_count, tri_count * 3);
+
+    for i in 0..sides {
+        let angle0 = tau * (i as f32 / sides as f32);
+        let angle1 = tau * ((i + 1) as f32 / sides as f32);
+        let mid = (angle0 + angle1) * 0.5;
+        let normal = Vec3::new(mid.cos(), 0.0, mid.sin());
+        let u0 = i as f32 / sides as f32;
+        let u1 = (i + 1) as f32 / sides as f32;
+        let (p0, p1) = (
+            Vec3::new(r * angle0.cos(), 0.0, r * angle0.sin()),
+            Vec3::new(r * angle1.cos(), 0.0, r * angle1.sin()),
+        );
+        let base = mesh.vertex_count() as u32;
+        mesh.push_vertex_uv(p0 + Vec3::new(0.0, -h, 0.0), normal, [u0, 1.0]);
+        mesh.push_vertex_uv(p0 + Vec3::new(0.0, h, 0.0), normal, [u0, 0.0]);
+        mesh.push_vertex_uv(p1 + Vec3::new(0.0, h, 0.0), normal, [u1, 0.0]);
+        mesh.push_vertex_uv(p1 + Vec3::new(0.0, -h, 0.0), normal, [u1, 1.0]);
+        mesh.push_quad(base, base + 1, base + 2, base + 3);
+    }
+
+    // Top cap (+Y). The ring advances clockwise seen from above, so the fan
+    // is reversed to keep the exterior face CCW.
+    let top_center = mesh.push_vertex_uv(Vec3::new(0.0, h, 0.0), Vec3::Y, [0.5, 0.5]);
+    let top_ring_base = mesh.vertex_count() as u32;
+    for i in 0..sides {
+        let angle = tau * (i as f32 / sides as f32);
+        mesh.push_vertex_uv(
+            Vec3::new(r * angle.cos(), h, r * angle.sin()),
+            Vec3::Y,
+            [0.5 + 0.5 * angle.cos(), 0.5 + 0.5 * angle.sin()],
+        );
+    }
+    for i in 0..sides {
+        let next = (i + 1) % sides;
+        mesh.push_triangle(
+            top_center,
+            top_ring_base + next as u32,
+            top_ring_base + i as u32,
+        );
+    }
+
+    // Bottom cap (-Y).
+    let bot_center = mesh.push_vertex_uv(Vec3::new(0.0, -h, 0.0), Vec3::NEG_Y, [0.5, 0.5]);
+    let bot_ring_base = mesh.vertex_count() as u32;
+    for i in 0..sides {
+        let angle = tau * (i as f32 / sides as f32);
+        mesh.push_vertex_uv(
+            Vec3::new(r * angle.cos(), -h, r * angle.sin()),
+            Vec3::NEG_Y,
+            [0.5 + 0.5 * angle.cos(), 0.5 + 0.5 * angle.sin()],
+        );
+    }
+    for i in 0..sides {
+        let next = (i + 1) % sides;
+        mesh.push_triangle(
+            bot_center,
+            bot_ring_base + i as u32,
+            bot_ring_base + next as u32,
+        );
+    }
+
+    mesh
+}
+
+// ---------------------------------------------------------------------------
+// Sphere 2D (billboard disc)
+// ---------------------------------------------------------------------------
+
+/// Flat disc on the XY plane with sphere-like normals, radius 0.5.
+///
+/// The geometry has no depth (all positions use z = 0), but the normals follow
+/// a unit hemisphere: `n = (2x, 2y, sqrt(1 - 4(x^2 + y^2)))`. Billboarded
+/// toward the camera and rendered two-sided, the disc reads as a shaded sphere.
+pub fn sphere2d(segments: usize, rings: usize) -> MeshData {
+    let segments = segments.max(3);
+    let rings = rings.max(1);
+    let r = 0.5f32;
+    let tau = std::f32::consts::TAU;
+
+    let vert_count = 1 + segments * rings;
+    let tri_count = segments * (2 * rings - 1);
+    let mut mesh = MeshData::with_capacity(vert_count, tri_count * 3);
+
+    let normal_at = |position: Vec3| {
+        let nz = (1.0 - 4.0 * (position.x * position.x + position.y * position.y)).max(0.0);
+        Vec3::new(2.0 * position.x, 2.0 * position.y, nz.sqrt()).normalize()
+    };
+    let center = mesh.push_vertex_uv(Vec3::ZERO, Vec3::Z, [0.5, 0.5]);
+    for ring in 1..=rings {
+        let radius = r * ring as f32 / rings as f32;
+        for i in 0..segments {
+            let angle = tau * (i as f32 / segments as f32);
+            let position = Vec3::new(radius * angle.cos(), radius * angle.sin(), 0.0);
+            mesh.push_vertex_uv(
+                position,
+                normal_at(position),
+                [0.5 + position.x, 0.5 - position.y],
+            );
+        }
+    }
+
+    // Center fan to the first ring (CCW seen from +Z).
+    let first_ring = 1u32;
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        mesh.push_triangle(center, first_ring + i as u32, first_ring + next as u32);
+    }
+
+    // Quad bands between rings. Winding: inner-i, outer-i, outer-next, inner-next.
+    for ring in 1..rings {
+        let inner = 1 + (ring - 1) * segments;
+        let outer = 1 + ring * segments;
+        for i in 0..segments {
+            let next = (i + 1) % segments;
+            mesh.push_quad(
+                (inner + i) as u32,
+                (outer + i) as u32,
+                (outer + next) as u32,
+                (inner + next) as u32,
+            );
+        }
+    }
+
     mesh
 }
 
@@ -400,8 +679,8 @@ mod tests {
     fn sphere_structure() {
         let mesh = sphere(4, 6);
         assert!(mesh.validate().is_ok());
-        // (stacks * slices * 2) triangles = 4 * 6 * 2 = 48
-        assert_eq!(mesh.triangle_count(), 48);
+        // Two triangles per quad except one degenerate triangle per pole row.
+        assert_eq!(mesh.triangle_count(), (4 - 1) * 6 * 2);
     }
 
     #[test]
@@ -428,7 +707,16 @@ mod tests {
 
     #[test]
     fn built_in_meshes_have_finite_uvs_and_curved_seams_are_closed() {
-        let meshes = [cube(1), cylinder(8), sphere(4, 6), plane(1)];
+        let meshes = [
+            cube(1),
+            cylinder(8),
+            sphere(4, 6),
+            plane(1),
+            wedge(1),
+            torus(12, 6),
+            prism(6),
+            sphere2d(16, 4),
+        ];
         for mesh in &meshes {
             assert_eq!(mesh.uvs.len(), mesh.positions.len());
             assert!(mesh.uvs.iter().flatten().all(|value| value.is_finite()));
@@ -502,5 +790,124 @@ mod tests {
         let (min, max) = mesh.aabb();
         assert!((min - Vec3::splat(-0.5)).length() < 0.001);
         assert!((max - Vec3::splat(0.5)).length() < 0.001);
+    }
+
+    fn assert_outward_winding(mesh: &MeshData) {
+        for (triangle_index, triangle) in mesh.indices.chunks_exact(3).enumerate() {
+            let a = triangle[0] as usize;
+            let b = triangle[1] as usize;
+            let c = triangle[2] as usize;
+            let cross = (mesh.positions[b] - mesh.positions[a])
+                .cross(mesh.positions[c] - mesh.positions[a]);
+            assert!(
+                cross.length_squared() > 1e-12,
+                "triangle {triangle_index} is degenerate"
+            );
+            let authored = mesh.normals[a] + mesh.normals[b] + mesh.normals[c];
+            assert!(
+                cross.dot(authored) > 0.0,
+                "triangle {triangle_index} winds inward"
+            );
+        }
+        assert!(mesh
+            .normals
+            .iter()
+            .all(|normal| (normal.length() - 1.0).abs() < 1e-5));
+    }
+
+    #[test]
+    fn closed_primitives_have_exterior_winding() {
+        for mesh in [
+            cylinder(16),
+            sphere(8, 12),
+            wedge(1),
+            torus(16, 8),
+            prism(6),
+        ] {
+            assert_outward_winding(&mesh);
+        }
+    }
+
+    #[test]
+    fn sphere2d_is_a_flat_front_facing_disc() {
+        let mesh = sphere2d(16, 4);
+        assert!(mesh.validate().is_ok());
+        assert!(mesh.positions.iter().all(|position| position.z == 0.0));
+        assert!(mesh
+            .normals
+            .iter()
+            .all(|normal| (normal.length() - 1.0).abs() < 1e-5));
+        for triangle in mesh.indices.chunks_exact(3) {
+            let a = mesh.positions[triangle[0] as usize];
+            let b = mesh.positions[triangle[1] as usize];
+            let c = mesh.positions[triangle[2] as usize];
+            let cross = (b - a).cross(c - a);
+            assert!(cross.length_squared() > 1e-12, "degenerate triangle");
+            assert!(cross.z > 0.0, "disc triangle does not face +Z");
+        }
+        // Rim normals are horizontal, center normal is +Z: spherical shading.
+        assert!((mesh.normals[0] - Vec3::Z).length() < 1e-5);
+        let rim_start = 1 + (4 - 1) * 16;
+        let rim = &mesh.normals[rim_start..rim_start + 16];
+        assert!(rim.iter().all(|normal| normal.z.abs() < 1e-3));
+    }
+
+    #[test]
+    fn sphere_has_no_degenerate_pole_triangles() {
+        let mesh = sphere(8, 12);
+        for triangle in mesh.indices.chunks_exact(3) {
+            let a = mesh.positions[triangle[0] as usize];
+            let b = mesh.positions[triangle[1] as usize];
+            let c = mesh.positions[triangle[2] as usize];
+            assert!((b - a).cross(c - a).length_squared() > 1e-12);
+        }
+    }
+
+    #[test]
+    fn cube_face_uvs_place_v_zero_at_the_top() {
+        let mesh = cube(1);
+        // First face (+Z) corner order: bottom-left, bottom-right,
+        // top-right, top-left.
+        assert_eq!(mesh.uvs[0], [0.0, 1.0]);
+        assert_eq!(mesh.uvs[1], [1.0, 1.0]);
+        assert_eq!(mesh.uvs[2], [1.0, 0.0]);
+        assert_eq!(mesh.uvs[3], [0.0, 0.0]);
+        for face in 0..6 {
+            let base = face * 4;
+            assert_eq!(mesh.uvs[base + 2][1], 0.0);
+            assert_eq!(mesh.uvs[base + 3][1], 0.0);
+        }
+    }
+
+    #[test]
+    fn new_primitives_have_expected_aabbs() {
+        let assert_bounds = |mesh: &MeshData, expected_min: Vec3, expected_max: Vec3| {
+            let (min, max) = mesh.aabb();
+            assert!(
+                (min - expected_min).length() < 1e-5,
+                "min {:?} != {:?}",
+                min,
+                expected_min
+            );
+            assert!(
+                (max - expected_max).length() < 1e-5,
+                "max {:?} != {:?}",
+                max,
+                expected_max
+            );
+        };
+
+        assert_bounds(&wedge(1), Vec3::splat(-0.5), Vec3::splat(0.5));
+        assert_bounds(
+            &torus(32, 16),
+            Vec3::new(-0.5, -0.2, -0.5),
+            Vec3::new(0.5, 0.2, 0.5),
+        );
+        assert_bounds(&prism(4), Vec3::splat(-0.5), Vec3::splat(0.5));
+        assert_bounds(
+            &sphere2d(16, 4),
+            Vec3::new(-0.5, -0.5, 0.0),
+            Vec3::new(0.5, 0.5, 0.0),
+        );
     }
 }

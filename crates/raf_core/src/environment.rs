@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::f32::consts::{FRAC_PI_2, TAU};
 
+mod presets;
+pub use presets::{environment_presets, EnvironmentPreset};
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnvironmentMode {

@@ -60,6 +60,8 @@ pub struct NativeEditorRuntime {
     command_registry: EditorCommandRegistry,
     history: SceneHistory,
     attached_undo: Option<AttachedSceneUndo>,
+    environment_gesture_active: bool,
+    environment_gesture_recorded: bool,
     clipboard: Vec<raf_core::scene::SceneNodeId>,
     node_graph: raf_nodes::NodeGraph,
     node_graph_revision: u64,
@@ -124,6 +126,8 @@ impl NativeEditorRuntime {
             command_registry: EditorCommandRegistry::default(),
             history: SceneHistory::default(),
             attached_undo: None,
+            environment_gesture_active: false,
+            environment_gesture_recorded: false,
             clipboard: Vec::new(),
             node_graph: raf_nodes::NodeGraph::new("Main"),
             node_graph_revision: 1,
@@ -143,8 +147,12 @@ impl NativeEditorRuntime {
         std::mem::replace(&mut self.node_graph, raf_nodes::NodeGraph::new("Main"))
     }
 
-    pub(crate) fn take_agent_history(&mut self) -> SceneHistory { std::mem::take(&mut self.history) }
-    pub(crate) fn install_agent_history(&mut self, history: SceneHistory) { self.history = history; }
+    pub(crate) fn take_agent_history(&mut self) -> SceneHistory {
+        std::mem::take(&mut self.history)
+    }
+    pub(crate) fn install_agent_history(&mut self, history: SceneHistory) {
+        self.history = history;
+    }
 
     pub fn selected_graph_node(&self) -> Option<raf_nodes::NodeId> {
         self.selected_graph_node
@@ -609,6 +617,44 @@ impl NativeEditorRuntime {
         self.request_document_frame();
     }
 
+    /// Creates a root entity that plays a data-driven particle asset.
+    pub fn create_particle_system(&mut self, scene: &mut SceneGraph, asset: &str) {
+        let before = scene.clone();
+        let name = particle_display_name(asset);
+        let id = scene.add_root(&name);
+        if let Some(node) = scene.get_mut(id) {
+            node.particle_system = Some(raf_core::scene::ParticleSystemComponent::new(asset));
+        }
+        self.history.record_if_changed(before, scene);
+        self.game_viewport.selected = vec![id];
+        self.request_document_frame();
+    }
+
+    /// Creates a particle entity under `parent`.
+    pub fn create_particle_system_under(
+        &mut self,
+        scene: &mut SceneGraph,
+        parent: raf_core::scene::SceneNodeId,
+        asset: &str,
+    ) {
+        if !scene.is_valid_node(parent) {
+            return;
+        }
+        let before = scene.clone();
+        let child_count = scene
+            .get(parent)
+            .map(|node| node.children.len())
+            .unwrap_or_default();
+        let name = particle_display_name(asset);
+        let id = scene.add_child(parent, &format!("{name} {}", child_count + 1));
+        if let Some(node) = scene.get_mut(id) {
+            node.particle_system = Some(raf_core::scene::ParticleSystemComponent::new(asset));
+        }
+        self.history.record_if_changed(before, scene);
+        self.game_viewport.selected = vec![id];
+        self.request_document_frame();
+    }
+
     pub fn create_folder(&mut self, scene: &mut SceneGraph) {
         let before = scene.clone();
         let id = scene.add_root_folder(&format!("Folder {}", scene.len() + 1));
@@ -652,6 +698,40 @@ impl NativeEditorRuntime {
     /// Record an already validated command-kernel mutation as one undo action.
     pub(crate) fn record_scene_change(&mut self, before: SceneGraph, scene: &SceneGraph) {
         if self.history.record_if_changed(before, scene) {
+            self.request_document_frame();
+        }
+    }
+
+    pub(crate) fn set_environment_gesture(&mut self, active: bool) {
+        if !active {
+            self.environment_gesture_active = false;
+            self.environment_gesture_recorded = false;
+        } else {
+            // A new begin always owns a fresh undo baseline. Duplicate begins
+            // on the same pointer gesture are guarded by the workbench.
+            self.environment_gesture_active = true;
+            self.environment_gesture_recorded = false;
+        }
+    }
+
+    pub(crate) fn environment_gesture_active(&self) -> bool {
+        self.environment_gesture_active
+    }
+
+    /// Keep one snapshot for a continuous slider, dial, scrub or typed edit.
+    pub(crate) fn record_environment_scene_change(
+        &mut self,
+        before: SceneGraph,
+        scene: &SceneGraph,
+    ) {
+        let coalesce = self.environment_gesture_active && self.environment_gesture_recorded;
+        if self
+            .history
+            .record_if_changed_grouped(before, scene, coalesce)
+        {
+            if self.environment_gesture_active {
+                self.environment_gesture_recorded = true;
+            }
             self.request_document_frame();
         }
     }
@@ -883,8 +963,20 @@ impl NativeEditorRuntime {
         (&mut self.game_viewport, &mut self.graphics)
     }
 
-    pub(crate) fn agent_document_ports_mut(&mut self) -> (&mut NativeGameViewportController, &mut RenderRuntime, &mut SceneHistory, &raf_nodes::NodeGraph) {
-        (&mut self.game_viewport, &mut self.graphics, &mut self.history, &self.node_graph)
+    pub(crate) fn agent_document_ports_mut(
+        &mut self,
+    ) -> (
+        &mut NativeGameViewportController,
+        &mut RenderRuntime,
+        &mut SceneHistory,
+        &raf_nodes::NodeGraph,
+    ) {
+        (
+            &mut self.game_viewport,
+            &mut self.graphics,
+            &mut self.history,
+            &self.node_graph,
+        )
     }
 
     pub fn capture_last_viewport_rgba(&self) -> Result<SceneFrameCapture, String> {
@@ -923,10 +1015,18 @@ impl NativeEditorRuntime {
         if self.layout_request.kind != crate::editor_layout::EditorWorkbenchKind::Electronics {
             return;
         }
-        let library_open = library_open && (!inspector_open || self.layout_request.logical_size[0] >= 980.0);
+        let library_open =
+            library_open && (!inspector_open || self.layout_request.logical_size[0] >= 980.0);
         let inspector_open = inspector_open && self.layout_request.logical_size[0] >= 720.0;
-        let width = if library_open { self.electronics_library_width } else { crate::editor_layout::ELECTRONICS_RAIL_WIDTH };
-        if self.layout_request.left_width == width && self.layout_request.right_visible == inspector_open && self.layout_request.left_visible {
+        let width = if library_open {
+            self.electronics_library_width
+        } else {
+            crate::editor_layout::ELECTRONICS_RAIL_WIDTH
+        };
+        if self.layout_request.left_width == width
+            && self.layout_request.right_visible == inspector_open
+            && self.layout_request.left_visible
+        {
             return;
         }
         self.layout_request.left_width = width;
@@ -934,7 +1034,8 @@ impl NativeEditorRuntime {
         self.layout_request.right_visible = inspector_open;
         self.layout = EditorFrameLayout::compute(self.layout_request);
         self.cached_game_canvas = None;
-        self.graphics.request_frame(FrameInvalidation::WINDOW | FrameInvalidation::UI);
+        self.graphics
+            .request_frame(FrameInvalidation::WINDOW | FrameInvalidation::UI);
     }
 
     /// Updates the authored width of the left workbench panel while keeping
@@ -1052,15 +1153,17 @@ impl NativeEditorRuntime {
         settings: &EngineSettings,
         advanced_gpu_features_allowed: bool,
     ) {
-        self.ui_language=settings.language;
+        self.ui_language = settings.language;
         self.game_viewport.apply_engine_settings(settings);
+        self.cached_game_canvas = None;
         self.graphics.configure(
             settings.render_execution_policy,
             advanced_gpu_features_allowed,
         );
         self.graphics.set_frame_limit(settings.fps_limit);
-        self.graphics
-            .request_frame(FrameInvalidation::WINDOW | FrameInvalidation::UI);
+        self.graphics.request_frame(
+            FrameInvalidation::WINDOW | FrameInvalidation::DOCUMENT | FrameInvalidation::UI,
+        );
     }
 
     pub fn set_frame_limit(&mut self, fps_limit: u32) {
@@ -1212,6 +1315,15 @@ impl NativeEditorRuntime {
             .set_continuous_frame_reason(FrameInvalidation::ANIMATION, active);
     }
 
+    /// Keeps the editable viewport refreshing while particle previews animate.
+    pub fn set_continuous_particle_preview(&mut self, active: bool) {
+        self.graphics
+            .set_continuous_frame_reason(FrameInvalidation::DOCUMENT, active);
+        if active {
+            self.cached_game_canvas = None;
+        }
+    }
+
     pub fn set_continuous_text_input(&mut self, active: bool) {
         self.graphics
             .set_continuous_frame_reason(FrameInvalidation::UI, active);
@@ -1282,7 +1394,11 @@ impl NativeEditorRuntime {
         self.active_frame.is_some()
     }
 
-    pub fn render_game_canvas(&mut self, scene: &SceneGraph, preview: Option<&SceneGraph>) -> Option<EditorCanvasLayer> {
+    pub fn render_game_canvas(
+        &mut self,
+        scene: &SceneGraph,
+        preview: Option<&SceneGraph>,
+    ) -> Option<EditorCanvasLayer> {
         self.active_frame?;
         self.graphics
             .activate_surface(GraphicsSurfaceKind::SceneViewport);
@@ -1322,9 +1438,9 @@ impl NativeEditorRuntime {
         self.game_viewport.set_camera_helper_pixel_scale(
             source_size[0] as f32 / self.layout.canvas.width.max(1.0),
         );
-        let output = self
-            .game_viewport
-            .render(&mut self.graphics, preview.unwrap_or(scene), source_size);
+        let output =
+            self.game_viewport
+                .render(&mut self.graphics, preview.unwrap_or(scene), source_size);
         let layer = EditorCanvasLayer {
             output: Arc::new(output),
             source_size,
@@ -1418,6 +1534,26 @@ impl NativeEditorRuntime {
     }
 }
 
+/// Human-readable entity name for a `.rafparticle` reference.
+fn particle_display_name(asset: &str) -> String {
+    let normalized = asset.replace('\\', "/");
+    let stem = normalized
+        .rsplit('/')
+        .next()
+        .unwrap_or(asset)
+        .trim_end_matches(".rafparticle");
+    let spaced: String = stem
+        .chars()
+        .map(|character| if character == '_' { ' ' } else { character })
+        .collect();
+    let trimmed = spaced.trim();
+    if trimmed.is_empty() {
+        "Particle System".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1425,10 +1561,14 @@ mod tests {
 
     #[test]
     fn electronics_workspace_preserves_manual_width_across_rail_toggles() {
-        let mut runtime = NativeEditorRuntime::new(EditorLayoutRequest::electronics([1600.0, 900.0]));
+        let mut runtime =
+            NativeEditorRuntime::new(EditorLayoutRequest::electronics([1600.0, 900.0]));
         runtime.resize_left_panel(312.0);
         runtime.configure_electronics_workspace(false, true);
-        assert_eq!(runtime.layout().left_panel.unwrap().width, crate::editor_layout::ELECTRONICS_RAIL_WIDTH);
+        assert_eq!(
+            runtime.layout().left_panel.unwrap().width,
+            crate::editor_layout::ELECTRONICS_RAIL_WIDTH
+        );
         assert!(runtime.layout().right_panel.is_some());
         runtime.configure_electronics_workspace(true, false);
         assert_eq!(runtime.layout().left_panel.unwrap().width, 312.0);
@@ -1443,7 +1583,10 @@ mod tests {
         assert_eq!(runtime.layout().right_panel.unwrap().width, 340.0);
         runtime.resize([900, 600], 1.0);
         runtime.configure_electronics_workspace(true, true);
-        assert_eq!(runtime.layout().left_panel.unwrap().width, crate::editor_layout::ELECTRONICS_RAIL_WIDTH);
+        assert_eq!(
+            runtime.layout().left_panel.unwrap().width,
+            crate::editor_layout::ELECTRONICS_RAIL_WIDTH
+        );
         assert_eq!(runtime.layout().right_panel.unwrap().width, 340.0);
         let mut game = NativeEditorRuntime::new(EditorLayoutRequest::game([1600.0, 900.0]));
         let before = game.layout();
@@ -1494,5 +1637,48 @@ mod tests {
             .scheduler()
             .pending()
             .contains(FrameInvalidation::CAMERA));
+    }
+
+    #[test]
+    fn environment_gesture_coalesces_a_drag_into_one_undo_step() {
+        let mut runtime = NativeEditorRuntime::new(EditorLayoutRequest::game([1280.0, 720.0]));
+        let mut scene = SceneGraph::default();
+        let before = scene.clone();
+        runtime.set_environment_gesture(true);
+        for exposure in [1.1_f32, 1.2, 1.3] {
+            let mut patch = serde_json::Map::new();
+            patch.insert("exposure".to_string(), serde_json::json!(exposure));
+            let next = scene.environment().patched(&patch).unwrap();
+            scene.set_environment(next);
+            runtime.record_environment_scene_change(before.clone(), &scene);
+        }
+        runtime.set_environment_gesture(false);
+
+        assert!((scene.environment().exposure - 1.3).abs() < 1e-5);
+        assert!(runtime.history.can_undo());
+        runtime.undo(&mut scene);
+        assert!((scene.environment().exposure - 1.0).abs() < 1e-5);
+        assert!(!runtime.history.can_undo());
+    }
+
+    #[test]
+    fn consecutive_environment_gestures_keep_separate_undo_steps() {
+        let mut runtime = NativeEditorRuntime::new(EditorLayoutRequest::game([1280.0, 720.0]));
+        let mut scene = SceneGraph::default();
+        for exposure in [1.2_f32, 1.6] {
+            let before = scene.clone();
+            runtime.set_environment_gesture(true);
+            let mut patch = serde_json::Map::new();
+            patch.insert("exposure".to_string(), serde_json::json!(exposure));
+            scene.set_environment(scene.environment().patched(&patch).unwrap());
+            runtime.record_environment_scene_change(before, &scene);
+            runtime.set_environment_gesture(false);
+        }
+        assert!((scene.environment().exposure - 1.6).abs() < 1e-5);
+        runtime.undo(&mut scene);
+        assert!((scene.environment().exposure - 1.2).abs() < 1e-5);
+        runtime.undo(&mut scene);
+        assert!((scene.environment().exposure - 1.0).abs() < 1e-5);
+        assert!(!runtime.history.can_undo());
     }
 }

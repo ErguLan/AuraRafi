@@ -1,7 +1,7 @@
 //! Workspace tokens, chrome primitives, dividers and style sheet.
 
-use crate::agent_workspace_layout::WorkspaceGeometry;
 use super::*;
+use crate::agent_workspace_layout::WorkspaceGeometry;
 
 pub(crate) fn workspace_tokens(palette: StudioUiPalette) -> UiTokens {
     let mut tokens = palette.tokens();
@@ -133,9 +133,16 @@ pub(super) fn apply_style_sheet(
 ) -> UiSurface {
     if is_lab {
         for class in ["lab.signal-target", "lab.nav", "lab.run-primary"] {
-            rules.push(UiStyleRule::new(UiStyleSelector::Class(class.into()), UiStylePatch {
-                fill: Some(tokens.surface_raised), ..Default::default()
-            }).when(UiStyleRuleState::Hovered));
+            rules.push(
+                UiStyleRule::new(
+                    UiStyleSelector::Class(class.into()),
+                    UiStylePatch {
+                        fill: Some(tokens.surface_raised),
+                        ..Default::default()
+                    },
+                )
+                .when(UiStyleRuleState::Hovered),
+            );
         }
     }
     for class in ["agent-workspace-button", "agent-workspace-project"] {

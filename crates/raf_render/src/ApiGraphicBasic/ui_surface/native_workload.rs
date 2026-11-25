@@ -355,7 +355,9 @@ pub fn append_cad(
                 color,
                 ..
             } => mesh(&mut painter, *mesh_id, *transform, *color),
-            GraphicCommand::DrawMeshBatch { mesh_id, instances } => {
+            GraphicCommand::DrawMeshBatch {
+                mesh_id, instances, ..
+            } => {
                 for instance in instances {
                     mesh(&mut painter, *mesh_id, instance.transform, instance.color);
                 }

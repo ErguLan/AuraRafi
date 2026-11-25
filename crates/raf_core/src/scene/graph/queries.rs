@@ -139,6 +139,60 @@ impl SceneGraph {
             } else {
                 mix_render_fingerprint(&mut hash, u64::MAX);
             }
+            match &node.light {
+                Some(light) => {
+                    mix_render_fingerprint(&mut hash, 1);
+                    mix_render_fingerprint(&mut hash, light.kind as u64);
+                    mix_render_fingerprint(&mut hash, light.enabled as u64);
+                    mix_render_fingerprint(&mut hash, light.intensity.to_bits() as u64);
+                    mix_render_fingerprint(&mut hash, light.range.to_bits() as u64);
+                    mix_render_fingerprint(&mut hash, light.inner_cone_degrees.to_bits() as u64);
+                    mix_render_fingerprint(&mut hash, light.outer_cone_degrees.to_bits() as u64);
+                    for channel in light.color {
+                        mix_render_fingerprint(&mut hash, channel as u64);
+                    }
+                }
+                None => mix_render_fingerprint(&mut hash, 0),
+            }
+            if let Some(mesh) = &node.mesh_asset {
+                mix_render_fingerprint(&mut hash, 1);
+                mix_render_fingerprint(&mut hash, mesh.import_scale.to_bits() as u64);
+                mix_render_fingerprint(
+                    &mut hash,
+                    mesh.node.map(|node| node as u64).unwrap_or(u64::MAX),
+                );
+                for byte in mesh.path.as_bytes() {
+                    mix_render_fingerprint(&mut hash, u64::from(*byte));
+                }
+            } else {
+                mix_render_fingerprint(&mut hash, 0);
+            }
+            match &node.editable_mesh {
+                Some(mesh) => {
+                    mix_render_fingerprint(&mut hash, 1);
+                    mix_render_fingerprint(&mut hash, mesh.revision);
+                    mix_render_fingerprint(&mut hash, mesh.vertices.len() as u64);
+                    mix_render_fingerprint(&mut hash, mesh.indices.len() as u64);
+                    if let Some((min, max)) = mesh.bounds() {
+                        for value in [min.x, min.y, min.z, max.x, max.y, max.z] {
+                            mix_render_fingerprint(&mut hash, value.to_bits() as u64);
+                        }
+                    }
+                }
+                None => mix_render_fingerprint(&mut hash, 0),
+            }
+            mix_render_fingerprint(&mut hash, node.surface.texture_tiling[0].to_bits() as u64);
+            mix_render_fingerprint(&mut hash, node.surface.texture_tiling[1].to_bits() as u64);
+            mix_render_fingerprint(&mut hash, node.surface.unlit as u64);
+            mix_render_fingerprint(&mut hash, node.surface.double_sided as u64);
+            mix_render_fingerprint(
+                &mut hash,
+                match node.pivot {
+                    crate::scene::PivotMode::Center => 0,
+                    crate::scene::PivotMode::Base => 1,
+                    crate::scene::PivotMode::Corner => 2,
+                },
+            );
         }
 
         self.render_cache.set(Some(hash));
@@ -192,5 +246,9 @@ fn primitive_fingerprint(primitive: Primitive) -> u64 {
         Primitive::Plane => 3,
         Primitive::Cylinder => 4,
         Primitive::Capsule => 5,
+        Primitive::Wedge => 6,
+        Primitive::Torus => 7,
+        Primitive::Prism => 8,
+        Primitive::Sphere2D => 9,
     }
 }

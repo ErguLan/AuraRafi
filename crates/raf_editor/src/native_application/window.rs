@@ -37,6 +37,7 @@ pub(super) fn native_cursor_icon(cursor: raf_ui::UiCursorIcon) -> winit::window:
         raf_ui::UiCursorIcon::Default => CursorIcon::Default,
         raf_ui::UiCursorIcon::PointingHand => CursorIcon::Pointer,
         raf_ui::UiCursorIcon::Text => CursorIcon::Text,
+        raf_ui::UiCursorIcon::Crosshair => CursorIcon::Crosshair,
         raf_ui::UiCursorIcon::ResizeHorizontal => CursorIcon::EwResize,
         raf_ui::UiCursorIcon::ResizeVertical => CursorIcon::NsResize,
         raf_ui::UiCursorIcon::ResizeNorthEastSouthWest => CursorIcon::NeswResize,
@@ -87,7 +88,10 @@ impl NativeEditorApplication {
     pub(super) fn sync_accessibility_enabled(&mut self) {
         #[cfg(windows)]
         if let Some(accessibility) = &mut self.accessibility {
-            accessibility.set_enabled(self.settings_state.native_accessibility_enabled && self.game_runtime.in_place.is_none());
+            accessibility.set_enabled(
+                self.settings_state.native_accessibility_enabled
+                    && self.game_runtime.in_place.is_none(),
+            );
         }
     }
 
@@ -510,4 +514,3 @@ impl NativeEditorApplication {
                 .is_some_and(|host| host.has_interactive_hover())
     }
 }
-

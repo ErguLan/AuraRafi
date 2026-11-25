@@ -1,9 +1,9 @@
 //! Hub action mapping, context menus and the Get in dropdown.
 
 use raf_render::api_graphic_basic::ui_surface::{
-    StudioUiPalette, UiAction, UiAlign, UiEventBinding, UiEventKind, UiFlow, UiImage,
-    UiImageFit, UiImageSource, UiLayout, UiNode, UiNodeKind, UiSizeMode, UiSpacing,
-    UiSurfaceMaterial, UiTextStyle,
+    StudioUiPalette, UiAction, UiAlign, UiEventBinding, UiEventKind, UiFlow, UiImage, UiImageFit,
+    UiImageSource, UiLayout, UiNode, UiNodeKind, UiSizeMode, UiSpacing, UiSurfaceMaterial,
+    UiTextStyle,
 };
 use serde_json::json;
 
@@ -264,7 +264,10 @@ pub(crate) fn project_menu_action(project: &HubSurfaceProject) -> UiEventBinding
     project_menu_event(project, UiEventKind::Click)
 }
 
-pub(crate) fn project_menu_event(project: &HubSurfaceProject, event: UiEventKind) -> UiEventBinding {
+pub(crate) fn project_menu_event(
+    project: &HubSurfaceProject,
+    event: UiEventKind,
+) -> UiEventBinding {
     UiEventBinding {
         event,
         action: UiAction::Custom {
@@ -277,7 +280,10 @@ pub(crate) fn project_menu_event(project: &HubSurfaceProject, event: UiEventKind
     }
 }
 
-pub(crate) fn project_hover_event(project: &HubSurfaceProject, event: UiEventKind) -> UiEventBinding {
+pub(crate) fn project_hover_event(
+    project: &HubSurfaceProject,
+    event: UiEventKind,
+) -> UiEventBinding {
     let action = match &event {
         UiEventKind::HoverEnter => "hover",
         UiEventKind::HoverLeave => "leave",

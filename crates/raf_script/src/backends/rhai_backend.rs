@@ -193,6 +193,7 @@ pub fn create_engine(max_operations: u64) -> Engine {
     engine.register_fn("atan2", |y: f64, x: f64| y.atan2(x));
     super::rhai_behavior_api::register(&mut engine);
     super::rhai_environment_api::register(&mut engine);
+    super::rhai_quality_api::register(&mut engine);
     engine.register_type_with_name::<ScriptValue>("Value");
     engine.register_fn("vec3", |x: f64, y: f64, z: f64| {
         ScriptValue::vec3(x as f32, y as f32, z as f32)
@@ -425,6 +426,93 @@ pub fn create_engine(max_operations: u64) -> Engine {
             })
         },
     );
+    engine.register_fn("stop_all_audio", || -> RhaiResult<()> {
+        with_ctx(|ctx| {
+            check_audio_queue(ctx)?;
+            ctx.stop_all_audio();
+            Ok(())
+        })
+    });
+    engine.register_fn(
+        "set_audio_bus_volume",
+        |bus: ImmutableString, volume: f64| -> RhaiResult<()> {
+            with_ctx(|ctx| {
+                check_audio_queue(ctx)?;
+                if !volume.is_finite() {
+                    return Err(ScriptError::InvalidArgument("volume must be finite".into()));
+                }
+                let bus = raf_core::scene::AudioBus::from_slug(&bus)
+                    .ok_or_else(|| ScriptError::InvalidArgument("unknown audio bus".into()))?;
+                ctx.set_audio_bus_volume(bus, volume as f32);
+                Ok(())
+            })
+        },
+    );
+    engine.register_fn(
+        "mesh_vertex_count",
+        |handle: NodeHandle| -> RhaiResult<i64> { with_ctx(|ctx| ctx.mesh_vertex_count(handle)) },
+    );
+    engine.register_fn("mesh_face_count", |handle: NodeHandle| -> RhaiResult<i64> {
+        with_ctx(|ctx| ctx.mesh_face_count(handle))
+    });
+    engine.register_fn("mesh_revision", |handle: NodeHandle| -> RhaiResult<i64> {
+        with_ctx(|ctx| ctx.mesh_revision(handle))
+    });
+    engine.register_fn(
+        "mesh_vertex",
+        |handle: NodeHandle, index: INT| -> RhaiResult<Array> {
+            with_ctx(|ctx| {
+                let ScriptValue::Vec3(position) = ctx.mesh_vertex(handle, index)? else {
+                    return Err(ScriptError::InvalidArgument(
+                        "mesh vertex is not a vec3".into(),
+                    ));
+                };
+                Ok(position
+                    .into_iter()
+                    .map(|value| Dynamic::from(value as f64))
+                    .collect())
+            })
+        },
+    );
+    engine.register_fn(
+        "mesh_set_vertex",
+        |handle: &mut NodeHandle, index: INT, x: f64, y: f64, z: f64| -> RhaiResult<()> {
+            with_ctx(|ctx| ctx.mesh_set_vertex(*handle, index, x as f32, y as f32, z as f32))
+        },
+    );
+    engine.register_fn(
+        "mesh_move_vertex",
+        |handle: &mut NodeHandle, index: INT, x: f64, y: f64, z: f64| -> RhaiResult<()> {
+            with_ctx(|ctx| ctx.mesh_move_vertex(*handle, index, x as f32, y as f32, z as f32))
+        },
+    );
+    engine.register_fn(
+        "mesh_extrude",
+        |handle: &mut NodeHandle, face: INT, distance: f64| -> RhaiResult<i64> {
+            with_ctx(|ctx| ctx.mesh_extrude(*handle, face, distance as f32))
+        },
+    );
+    engine.register_fn(
+        "mesh_inset",
+        |handle: &mut NodeHandle, face: INT, amount: f64| -> RhaiResult<i64> {
+            with_ctx(|ctx| ctx.mesh_inset(*handle, face, amount as f32))
+        },
+    );
+    engine.register_fn(
+        "mesh_subdivide",
+        |handle: &mut NodeHandle, face: INT| -> RhaiResult<i64> {
+            with_ctx(|ctx| ctx.mesh_subdivide(*handle, face))
+        },
+    );
+    engine.register_fn(
+        "mesh_delete_face",
+        |handle: &mut NodeHandle, face: INT| -> RhaiResult<()> {
+            with_ctx(|ctx| ctx.mesh_delete_face(*handle, face))
+        },
+    );
+    engine.register_fn("mesh_reset", |handle: &mut NodeHandle| -> RhaiResult<()> {
+        with_ctx(|ctx| ctx.mesh_reset(*handle))
+    });
     engine.register_fn("get_delta_time", || -> RhaiResult<f64> {
         with_ctx(|ctx| Ok(ctx.get_delta_time() as f64))
     });
@@ -432,6 +520,7 @@ pub fn create_engine(max_operations: u64) -> Engine {
         with_ctx(|ctx| Ok(ctx.get_elapsed_time() as f64))
     });
     super::rhai_scene_api::register(&mut engine);
+    super::rhai_particle_api::register(&mut engine);
     super::rhai_physics_api::register(&mut engine);
     super::rhai_services_api::register(&mut engine);
     super::rhai_ui_api::register(&mut engine);
@@ -674,6 +763,7 @@ pub fn call_on_destroy(
 mod tests {
     use super::*;
     #[test]
+    #[test]
     fn hooks_are_validated_from_the_ast() {
         let engine = create_engine(100_000);
         let script = compile_source(
@@ -686,5 +776,16 @@ mod tests {
         assert!(script.has_on_update);
         assert!(compile_source(&engine, "bad.rhai", "fn on_start(dt) {}").is_err());
         assert!(compile_source(&engine, "bad.rhai", "fn on_update(").is_err());
+    }
+
+    #[test]
+    fn particle_module_compiles() {
+        let engine = create_engine(100_000);
+        compile_source(
+            &engine,
+            "particles.rhai",
+            "fn on_update(dt) { let h = entity(\"Effect\"); particles::play(h); particles::emit(h, 8); particle_set_rate(h, 0.5); }",
+        )
+        .unwrap();
     }
 }

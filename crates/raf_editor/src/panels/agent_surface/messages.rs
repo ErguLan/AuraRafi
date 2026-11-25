@@ -288,18 +288,15 @@ pub(super) fn dock_tool_entry(
             .and_then(serde_json::Value::as_str)
         {
             toggle_row = toggle_row.with_child(
-                UiNode::new(
-                    format!("agent.message.{index}.row.plan"),
-                    UiNodeKind::Label,
-                )
-                .with_class("agent-tool-chip")
-                .with_text_value(format!(
-                    "{} · {}",
-                    t("app.agent_tool_plan", Language::English),
-                    plan_id
-                ))
-                .with_text_style(UiTextStyle::button(tokens.accent_hot))
-                .with_layout(UiLayout::fit_content()),
+                UiNode::new(format!("agent.message.{index}.row.plan"), UiNodeKind::Label)
+                    .with_class("agent-tool-chip")
+                    .with_text_value(format!(
+                        "{} · {}",
+                        t("app.agent_tool_plan", Language::English),
+                        plan_id
+                    ))
+                    .with_text_style(UiTextStyle::button(tokens.accent_hot))
+                    .with_layout(UiLayout::fit_content()),
             );
         }
         if !result.artifacts.is_empty() {
@@ -399,7 +396,10 @@ pub(super) fn dock_tool_entry(
         .with_child(card)
 }
 
-pub(super) fn tool_status(palette: StudioUiPalette, message: &ChatMessage) -> ([u8; 4], &'static str) {
+pub(super) fn tool_status(
+    palette: StudioUiPalette,
+    message: &ChatMessage,
+) -> ([u8; 4], &'static str) {
     let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     let Ok(result) = serde_json::from_str::<AgentToolResult>(&message.content) else {
         return (
@@ -601,7 +601,10 @@ pub(super) enum MessageTileKind {
 
 /// A deliberately small, non-HTML Markdown subset. Never opens links, loads
 /// remote images or executes code. Fenced code keeps punctuation and indentation.
-pub(super) fn message_text_tiles(content: &str, role: MessageRole) -> Vec<(String, MessageTileKind)> {
+pub(super) fn message_text_tiles(
+    content: &str,
+    role: MessageRole,
+) -> Vec<(String, MessageTileKind)> {
     if !matches!(role, MessageRole::Assistant | MessageRole::Tool) {
         return message_text_chunks(content)
             .into_iter()

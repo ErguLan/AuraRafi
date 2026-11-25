@@ -15,7 +15,8 @@ pub mod viewport_input;
 pub use editor_camera::{EditorCameraBlock, EditorCameraBookmark, EditorCameraMode};
 pub use gizmo_renderer::GizmoRenderSpec;
 pub use input_handler::{
-    ProjectedEditEdge, ProjectedEditOverlay, ProjectedEditVertex, ViewportEditSession,
+    MeshSelectMode, ProjectedEditEdge, ProjectedEditFace, ProjectedEditOverlay,
+    ProjectedEditVertex, ViewportEditSession,
 };
 pub use picking_policy::{
     IdBufferSpec, PickingLayer, PickingLayerMask, PickingPolicy, PickingPriority, PickingTier,

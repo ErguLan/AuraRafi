@@ -5,8 +5,8 @@
 //! revision responses; document mutation remains in the domain controllers.
 
 use raf_core::agent_context::{self, AgentObservationResult};
-use raf_core::config::EngineSettings;
 use raf_core::capabilities::{CapabilityCatalog, CapabilityDefinition};
+use raf_core::config::EngineSettings;
 use raf_core::i18n::t;
 use raf_core::project::Project;
 use raf_core::project::ProjectType;
@@ -59,7 +59,9 @@ pub(crate) struct AttachedPollResult {
 
 impl ParsedCommandExecutor for NativeElectronicsUiCommandExecutor<'_> {
     fn execute_parsed(&mut self, command: &ParsedCommand) -> CommandOutput {
-        let ui_command = command.structured_arg("ui_command").and_then(Value::as_str)
+        let ui_command = command
+            .structured_arg("ui_command")
+            .and_then(Value::as_str)
             .unwrap_or_else(|| command.raw.trim_start_matches('/'));
         match ui_command {
             "electronics.analysis.drc" => {
@@ -89,28 +91,47 @@ impl ParsedCommandExecutor for NativeElectronicsUiCommandExecutor<'_> {
             _ => {}
         }
         if ui_command == "electronics.fabrication.deliver" {
-            let Some(folder) = crate::folder_picker::pick_output_folder(&t("electronics.fabrication.deliver", self.editor.language())) else {
-                return CommandOutput::info("PCB", Vec::new(), serde_json::json!({"ok":true,"cancelled":true}));
+            let Some(folder) = crate::folder_picker::pick_output_folder(&t(
+                "electronics.fabrication.deliver",
+                self.editor.language(),
+            )) else {
+                return CommandOutput::info(
+                    "PCB",
+                    Vec::new(),
+                    serde_json::json!({"ok":true,"cancelled":true}),
+                );
             };
             return match self.editor.deliver_fabrication_zip(&folder) {
-                Ok(path) => CommandOutput::info("PCB", vec![path.display().to_string()], serde_json::json!({"ok":true,"path":path})),
+                Ok(path) => CommandOutput::info(
+                    "PCB",
+                    vec![path.display().to_string()],
+                    serde_json::json!({"ok":true,"path":path}),
+                ),
                 Err(error) => CommandOutput::error("PCB", error),
             };
         }
-        if ui_command=="electronics.fabrication.export" {
+        if ui_command == "electronics.fabrication.export" {
             return match self.editor.export_physical_pcb() {
-                Ok(path)=>CommandOutput::info("PCB manufacturing files",vec![path.display().to_string()],serde_json::json!({"ok":true,"path":path,"format":"gerber-excellon","assembly_ready":false})),
-                Err(error)=>CommandOutput::error("PCB manufacturing files",error),
+                Ok(path) => CommandOutput::info(
+                    "PCB manufacturing files",
+                    vec![path.display().to_string()],
+                    serde_json::json!({"ok":true,"path":path,"format":"gerber-excellon","assembly_ready":false}),
+                ),
+                Err(error) => CommandOutput::error("PCB manufacturing files", error),
             };
         }
-        if let Some(payload)=ui_command.strip_prefix("electronics.footprint.assign_for:") {
+        if let Some(payload) = ui_command.strip_prefix("electronics.footprint.assign_for:") {
             return match self.editor.execute_footprint_assignment(payload) {
-                Ok(changed)=> {
-                    let mut output=CommandOutput::info("PCB footprint",Vec::new(),serde_json::json!({"ok":true}));
-                    output.changed=changed;
+                Ok(changed) => {
+                    let mut output = CommandOutput::info(
+                        "PCB footprint",
+                        Vec::new(),
+                        serde_json::json!({"ok":true}),
+                    );
+                    output.changed = changed;
                     output
                 }
-                Err(error)=>CommandOutput::error("PCB footprint",error),
+                Err(error) => CommandOutput::error("PCB footprint", error),
             };
         }
         if self.editor.apply_ui_command(ui_command) {
@@ -156,13 +177,40 @@ impl ParsedCommandExecutor for NativeElectronicsCommandExecutor<'_> {
 }
 
 impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
-    fn verify_output(&self, command: &ParsedCommand, output: &CommandOutput) -> Option<raf_core::VerificationSummary> {
-        if !output.changed || !matches!(command.name.as_str(), "game.build" | "game.batch" | "game.reconcile" | "game.repair" | "game.add" | "game.update") { return None; }
+    fn verify_output(
+        &self,
+        command: &ParsedCommand,
+        output: &CommandOutput,
+    ) -> Option<raf_core::VerificationSummary> {
+        if !output.changed
+            || !matches!(
+                command.name.as_str(),
+                "game.build"
+                    | "game.batch"
+                    | "game.reconcile"
+                    | "game.repair"
+                    | "game.add"
+                    | "game.update"
+            )
+        {
+            return None;
+        }
         let params = command.structured_args.as_ref()?;
-        let failures = crate::agent_executor::verify_postconditions(&command.name, params, &output.json, self.scene);
+        let failures = crate::agent_executor::verify_postconditions(
+            &command.name,
+            params,
+            &output.json,
+            self.scene,
+        );
         Some(raf_core::VerificationSummary {
-            status: if failures.is_empty() { "passed" } else { "failed" }.into(),
-            checks: vec!["Effective scene values checked against the requested operation.".into()], failures,
+            status: if failures.is_empty() {
+                "passed"
+            } else {
+                "failed"
+            }
+            .into(),
+            checks: vec!["Effective scene values checked against the requested operation.".into()],
+            failures,
         })
     }
 
@@ -199,7 +247,10 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
             };
             return crate::commands::script::execute(&command.name, command, &mut context);
         }
-        if command.name.starts_with("behavior.") || command.name.starts_with("prefab.") {
+        if command.name.starts_with("behavior.")
+            || command.name.starts_with("prefab.")
+            || command.name.starts_with("assembly.")
+        {
             let mut context = crate::commands::script::ScriptCommandContext {
                 scene: self.scene,
                 assets_root: self.assets_root.as_deref(),
@@ -344,7 +395,10 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
             output.changed = false;
             return output;
         }
-        if command.name.starts_with("behavior.") || command.name.starts_with("prefab.") {
+        if command.name.starts_with("behavior.")
+            || command.name.starts_with("prefab.")
+            || command.name.starts_with("assembly.")
+        {
             let mut context = crate::commands::script::ScriptCommandContext {
                 scene: &mut scene,
                 assets_root: self.assets_root.as_deref(),
@@ -385,7 +439,9 @@ pub(crate) fn poll_attached_commands(
     let mut document_saved = false;
     let mut open_project = None;
     let mut runtime = runtime;
-    let save_queue = workbench.as_deref().map(NativeGameWorkbench::agent_save_queue);
+    let save_queue = workbench
+        .as_deref()
+        .map(NativeGameWorkbench::agent_save_queue);
     for command in pending {
         let request_id = command.request.id;
         if command.request.name.starts_with("runtime.") {
@@ -393,7 +449,12 @@ pub(crate) fn poll_attached_commands(
                 "Use native Play controls or the local console. Agent/CLI/MCP runtime activation is disabled."));
             continue;
         }
-        if command.request.name.trim_start_matches('/').eq_ignore_ascii_case("project.open") {
+        if command
+            .request
+            .name
+            .trim_start_matches('/')
+            .eq_ignore_ascii_case("project.open")
+        {
             let path = command
                 .request
                 .params
@@ -403,11 +464,7 @@ pub(crate) fn poll_attached_commands(
             let Some(path) = path else {
                 attached_host.respond(
                     command,
-                    EngineCommandResponse::error(
-                        request_id,
-                        "Project open",
-                        "path is required.",
-                    ),
+                    EngineCommandResponse::error(request_id, "Project open", "path is required."),
                 );
                 continue;
             };
@@ -592,7 +649,11 @@ pub(crate) fn poll_attached_commands(
         }
 
         if is_editor_history_command(&command.request.name) {
-            let normalized = command.request.name.trim_start_matches('/').to_ascii_lowercase();
+            let normalized = command
+                .request
+                .name
+                .trim_start_matches('/')
+                .to_ascii_lowercase();
             let before = raf_core::agent_context::scene_fingerprint(scene);
             if normalized == "undo" {
                 runtime.undo(scene);
@@ -602,8 +663,7 @@ pub(crate) fn poll_attached_commands(
             let after = raf_core::agent_context::scene_fingerprint(scene);
             let changed = before != after;
             if changed {
-                attached_ledger
-                    .observe_document(crate::scene_history::scene_fingerprint(scene));
+                attached_ledger.observe_document(crate::scene_history::scene_fingerprint(scene));
                 runtime.graphics_mut().request_frame(
                     raf_render::api_graphic_basic::FrameInvalidation::DOCUMENT
                         | raf_render::api_graphic_basic::FrameInvalidation::UI,
@@ -612,11 +672,7 @@ pub(crate) fn poll_attached_commands(
             let revision = attached_ledger.revision();
             let mut response = metadata_response(
                 command.request.id,
-                if normalized == "undo" {
-                    "Undo"
-                } else {
-                    "Redo"
-                },
+                if normalized == "undo" { "Undo" } else { "Redo" },
                 vec![if changed {
                     format!("{normalized} applied to the document history.")
                 } else {
@@ -1031,13 +1087,7 @@ fn execute_attached_visual_review(
         "invalid" => "The visual review request had no readable capture.",
         _ => "The visual review call failed.",
     };
-    let mut response = metadata_response(
-        request.id,
-        summary,
-        warnings.clone(),
-        data,
-        revision,
-    );
+    let mut response = metadata_response(request.id, summary, warnings.clone(), data, revision);
     response.ok = !matches!(status.as_str(), "error" | "invalid");
     response.warnings = warnings;
     if status == "unavailable" {
@@ -1205,9 +1255,7 @@ fn execute_attached_viewport_capture(
         let mut failures = Vec::new();
         for capture_view in ["isometric", "front", "right", "top"] {
             let capture = capture_request(&request.params, capture_view);
-            let graphics = runtime
-                .as_deref_mut()
-                .map(|runtime| runtime.graphics_mut());
+            let graphics = runtime.as_deref_mut().map(|runtime| runtime.graphics_mut());
             let result = capture_scene_angle(
                 graphics,
                 scene,
@@ -1313,13 +1361,7 @@ fn execute_attached_viewport_capture(
         let capture = capture_request(&request.params, &view);
         let graphics = runtime.as_deref_mut().map(|runtime| runtime.graphics_mut());
         capture_scene_angle(
-            graphics,
-            scene,
-            project,
-            selected,
-            &focus,
-            &capture,
-            language,
+            graphics, scene, project, selected, &focus, &capture, language,
         )
     };
     let mut response = metadata_response(
@@ -1462,17 +1504,33 @@ fn execute_attached_project_save(
     }
 
     let save_result = if let Some(save_queue) = save_queue {
-        let registry = raf_core::session::ProjectSessionRegistry::load_or_legacy(&project.path, project.project_type);
-        registry.active().ok_or_else(|| "agent_workspace.document_missing".to_string()).and_then(|session| {
-            let mut queue = save_queue.borrow_mut();
-            queue.wait_for_save()?;
-            queue.submit(crate::agent_project_store::DocumentSave::capture(project, session, scene,
-                runtime.node_graph(), electronics.as_deref(), ledger));
-            queue.wait_for_save()
-        })
+        let registry = raf_core::session::ProjectSessionRegistry::load_or_legacy(
+            &project.path,
+            project.project_type,
+        );
+        registry
+            .active()
+            .ok_or_else(|| "agent_workspace.document_missing".to_string())
+            .and_then(|session| {
+                let mut queue = save_queue.borrow_mut();
+                queue.wait_for_save()?;
+                queue.submit(crate::agent_project_store::DocumentSave::capture(
+                    project,
+                    session,
+                    scene,
+                    runtime.node_graph(),
+                    electronics.as_deref(),
+                    ledger,
+                ));
+                queue.wait_for_save()
+            })
     } else {
         save_project_document(project, scene, runtime.node_graph()).and_then(|_| {
-            if let Some(editor) = electronics.as_deref_mut() { editor.save(project) } else { Ok(()) }
+            if let Some(editor) = electronics.as_deref_mut() {
+                editor.save(project)
+            } else {
+                Ok(())
+            }
         })
     };
     if let Err(error) = save_result {
@@ -1792,7 +1850,11 @@ fn execute_attached_metadata(
             let name = session.name.clone();
             registry.active_session = selected;
             if let Err(error) = registry.save(&project.path) {
-                return Some(EngineCommandResponse::error(request.id, "Session use", error));
+                return Some(EngineCommandResponse::error(
+                    request.id,
+                    "Session use",
+                    error,
+                ));
             }
             metadata_response(
                 request.id,

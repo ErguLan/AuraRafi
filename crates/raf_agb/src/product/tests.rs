@@ -4,7 +4,7 @@ use std::rc::Rc;
 use glam::Mat4;
 
 use crate::{
-    backends::recorder::Recorder, AdapterInfo, Backend, DrawMode, Error as AgbError, Frame,
+    backends::recorder::Recorder, AdapterInfo, Backend, Batch, DrawMode, Error as AgbError, Frame,
     FrameMetrics, FramePlan, Instance, Result as AgbResult, Texture, Vertex, Workload,
 };
 
@@ -256,8 +256,7 @@ impl Backend for FrameProbe {
     }
 
     fn upload(&mut self, workload: &Workload) -> AgbResult<u32> {
-        self.state.borrow_mut().modes =
-            workload.batches.iter().map(|batch| batch.mode).collect();
+        self.state.borrow_mut().modes = workload.batches.iter().map(|batch| batch.mode).collect();
         Ok(workload.batches.len() as u32)
     }
 
@@ -282,8 +281,7 @@ impl Backend for FrameProbe {
 
 fn open_probe(extent: [u32; 2]) -> (ProductDevice<FrameProbe>, FrameProbe) {
     let probe = FrameProbe::new();
-    let mut device =
-        ProductDevice::new(probe.clone(), GraphicsMemoryBudget::potato()).unwrap();
+    let mut device = ProductDevice::new(probe.clone(), GraphicsMemoryBudget::potato()).unwrap();
     device.configure(extent, Output::Capture).unwrap();
     (device, probe)
 }
@@ -346,7 +344,14 @@ impl Backend for LayeredProbe {
     }
 
     fn draw(&mut self, resident: &u32, plan: &FramePlan, frame: &Frame) -> AgbResult<FrameMetrics> {
-        self.draw_layers(&[Layer { resident, scene: true }], plan, frame)
+        self.draw_layers(
+            &[Layer {
+                resident,
+                scene: true,
+            }],
+            plan,
+            frame,
+        )
     }
 
     fn draw_layers(
@@ -376,8 +381,7 @@ impl Backend for LayeredProbe {
 
 fn open_layered(extent: [u32; 2]) -> (ProductDevice<LayeredProbe>, LayeredProbe) {
     let probe = LayeredProbe::new();
-    let mut device =
-        ProductDevice::new(probe.clone(), GraphicsMemoryBudget::potato()).unwrap();
+    let mut device = ProductDevice::new(probe.clone(), GraphicsMemoryBudget::potato()).unwrap();
     device.configure(extent, Output::Capture).unwrap();
     (device, probe)
 }
@@ -402,9 +406,7 @@ fn paint_packet() -> ProductPacket {
 
 fn with_scene_background(color: [f32; 4]) -> ProductPacket {
     let mut input = packet();
-    input
-        .commands
-        .insert(1, Command::SceneBackground(color));
+    input.commands.insert(1, Command::SceneBackground(color));
     input
 }
 
@@ -430,12 +432,14 @@ fn scene_background_precedes_geometry_and_only_runs_in_the_scene_group() {
         .any(|batch| batch.mode == DrawMode::Scene));
 
     let mut after_paint = packet();
-    after_paint.commands.push(Command::Paint(Paint::Solid(PaintQuad {
-        rect: [0., 0., 1., 1.],
-        clip: [0., 0., 1., 1.],
-        uv_rect: [0., 0., 1., 1.],
-        color: [1.; 4],
-    })));
+    after_paint
+        .commands
+        .push(Command::Paint(Paint::Solid(PaintQuad {
+            rect: [0., 0., 1., 1.],
+            clip: [0., 0., 1., 1.],
+            uv_rect: [0., 0., 1., 1.],
+            color: [1.; 4],
+        })));
     after_paint.commands.push(Command::SceneBackground(color));
     assert!(matches!(
         super::encode::encode(after_paint, u64::MAX),
@@ -549,6 +553,154 @@ fn layered_product_draw_uses_the_first_clear_and_validates_every_handle() {
         .unwrap();
     assert!(matches!(
         device.draw_layers(&[foreign], &FrameUniforms::default()),
+        Err(Error::Invalid(_))
+    ));
+}
+
+fn scene_packet(pipeline: Pipeline, tints: &[[f32; 4]]) -> ProductPacket {
+    let mut input = packet();
+    input.commands = vec![
+        Command::Clear([0.; 4]),
+        Command::SetPipeline(pipeline),
+        Command::DrawMeshBatch {
+            mesh: 0,
+            material: 0,
+            instances: tints
+                .iter()
+                .map(|tint| Instance::new(Mat4::IDENTITY, *tint))
+                .collect(),
+        },
+    ];
+    input
+}
+
+#[test]
+fn encode_derives_scene_mode_from_cull_and_final_alpha() {
+    for (pipeline, tint, expected) in [
+        (Pipeline::SCENE, [1.; 4], DrawMode::Scene),
+        (Pipeline::SCENE_TWO_SIDED, [1.; 4], DrawMode::SceneTwoSided),
+        (Pipeline::LIT, [1.; 4], DrawMode::Scene),
+        (Pipeline::LIT_TWO_SIDED, [1.; 4], DrawMode::SceneTwoSided),
+        (
+            Pipeline::SCENE,
+            [1., 1., 1., 0.5],
+            DrawMode::SceneTransparent,
+        ),
+        (
+            Pipeline::SCENE_TWO_SIDED,
+            [1., 1., 1., 0.5],
+            DrawMode::SceneTransparentTwoSided,
+        ),
+        (Pipeline::LIT, [1., 1., 1., 0.5], DrawMode::SceneTransparent),
+        (
+            Pipeline::LIT_TWO_SIDED,
+            [1., 1., 1., 0.5],
+            DrawMode::SceneTransparentTwoSided,
+        ),
+        (
+            Pipeline::PARTICLE,
+            [1.; 4],
+            DrawMode::SceneTransparentTwoSided,
+        ),
+        (
+            Pipeline::PARTICLE,
+            [1., 1., 1., 0.5],
+            DrawMode::SceneTransparentTwoSided,
+        ),
+    ] {
+        let encoded = super::encode::encode(scene_packet(pipeline, &[tint]), u64::MAX).unwrap();
+        assert_eq!(encoded.workload.batches.len(), 1, "{pipeline:?} {tint:?}");
+        assert_eq!(
+            encoded.workload.batches[0].mode, expected,
+            "{pipeline:?} {tint:?}"
+        );
+    }
+
+    let mut material_alpha = packet();
+    material_alpha.materials[0].tint[3] = 0.4;
+    let encoded = super::encode::encode(material_alpha, u64::MAX).unwrap();
+    assert_eq!(encoded.workload.batches[0].mode, DrawMode::SceneTransparent);
+}
+
+#[test]
+fn batch_merge_keeps_distinct_pipeline_states_separate() {
+    let draw = |tint| Command::DrawMesh {
+        mesh: 0,
+        material: 0,
+        instance: Instance::new(Mat4::IDENTITY, tint),
+    };
+
+    let mut same = packet();
+    same.commands = vec![
+        Command::Clear([0.; 4]),
+        Command::SetPipeline(Pipeline::SCENE),
+        draw([1.; 4]),
+        draw([1.; 4]),
+    ];
+    let encoded = super::encode::encode(same, u64::MAX).unwrap();
+    assert_eq!(encoded.workload.batches.len(), 1);
+
+    let mut transparent = packet();
+    transparent.commands = vec![
+        Command::Clear([0.; 4]),
+        Command::SetPipeline(Pipeline::SCENE),
+        draw([1.; 4]),
+        draw([0.5, 0.5, 0.5, 0.5]),
+    ];
+    let encoded = super::encode::encode(transparent, u64::MAX).unwrap();
+    assert_eq!(encoded.workload.batches.len(), 2);
+    assert_eq!(
+        encoded
+            .workload
+            .batches
+            .iter()
+            .map(|batch| batch.mode)
+            .collect::<Vec<_>>(),
+        [DrawMode::Scene, DrawMode::SceneTransparent]
+    );
+
+    let mut two_sided = packet();
+    two_sided.commands = vec![
+        Command::Clear([0.; 4]),
+        Command::SetPipeline(Pipeline::SCENE),
+        draw([1.; 4]),
+        Command::SetPipeline(Pipeline::SCENE_TWO_SIDED),
+        draw([1.; 4]),
+    ];
+    let encoded = super::encode::encode(two_sided, u64::MAX).unwrap();
+    assert_eq!(encoded.workload.batches.len(), 2);
+    assert_eq!(
+        encoded
+            .workload
+            .batches
+            .iter()
+            .map(|batch| batch.mode)
+            .collect::<Vec<_>>(),
+        [DrawMode::Scene, DrawMode::SceneTwoSided]
+    );
+}
+
+#[test]
+fn new_scene_modes_validate_and_shadow_batches_stay_one_sided_opaque() {
+    let encoded = super::encode::encode(
+        scene_packet(Pipeline::LIT_TWO_SIDED, &[[1.; 4], [1., 0.5, 0.5, 0.25]]),
+        u64::MAX,
+    )
+    .unwrap();
+    assert_eq!(
+        encoded.workload.batches[0].mode,
+        DrawMode::SceneTransparentTwoSided
+    );
+    let batch = encoded.workload.batches[0].clone();
+    let mut workload = encoded.workload;
+    workload.validate(16384, u64::MAX).unwrap();
+
+    workload.shadow_batches.push(Batch {
+        mode: DrawMode::SceneTwoSided,
+        ..batch
+    });
+    assert!(matches!(
+        workload.validate(16384, u64::MAX),
         Err(Error::Invalid(_))
     ));
 }

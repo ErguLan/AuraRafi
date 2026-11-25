@@ -11,9 +11,8 @@ use super::{
 /// Keeps the persisted sanitized catalog bounded and free of control
 /// characters so a corrupted provider list can never bloat settings files.
 fn catalog_sanitize(models: &mut Vec<String>) {
-    models.retain(|id| {
-        !id.trim().is_empty() && id.len() <= 160 && !id.chars().any(char::is_control)
-    });
+    models
+        .retain(|id| !id.trim().is_empty() && id.len() <= 160 && !id.chars().any(char::is_control));
     models.sort();
     models.dedup();
 }
@@ -52,7 +51,10 @@ impl EngineSettings {
     }
 
     pub(super) fn normalize_agent_response_settings(&mut self) {
-        if !matches!(self.agent_reasoning_effort.as_str(), "" | "none" | "low" | "medium" | "high" | "max") {
+        if !matches!(
+            self.agent_reasoning_effort.as_str(),
+            "" | "none" | "low" | "medium" | "high" | "max"
+        ) {
             self.agent_reasoning_effort.clear();
         }
         self.agent_max_response_tokens = self

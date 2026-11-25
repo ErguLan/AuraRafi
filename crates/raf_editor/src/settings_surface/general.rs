@@ -290,6 +290,13 @@ pub(super) fn editor(palette: StudioUiPalette, settings: &EngineSettings) -> UiN
         ))
         .with_child(toggle_row_with_key(
             palette,
+            "settings.hierarchy-script-indicator",
+            "settings.hierarchy_script_indicator",
+            "settings.hierarchy_show_script_indicators",
+            settings.hierarchy_show_script_indicators,
+        ))
+        .with_child(toggle_row_with_key(
+            palette,
             "settings.hierarchy-visibility",
             "settings.hierarchy_visibility",
             "settings.hierarchy_show_visibility",

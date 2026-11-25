@@ -3,7 +3,10 @@
 use super::query::{node_detail_lines, parse_json_argument, resolve_target, select_ids};
 use super::*;
 
-pub(super) fn validate_component_texture(value: &str, label: &str) -> Result<Option<String>, String> {
+pub(super) fn validate_component_texture(
+    value: &str,
+    label: &str,
+) -> Result<Option<String>, String> {
     let normalized = value.trim().replace('\\', "/");
     if normalized.is_empty() {
         return Ok(None);
@@ -46,7 +49,10 @@ pub(super) fn validate_component_asset_path(
     Ok(normalized)
 }
 
-pub(super) fn color_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+pub(super) fn color_entity(
+    command: &ParsedCommand,
+    ctx: &mut GameCommandContext<'_>,
+) -> CommandOutput {
     let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Color entity", "Target not found.");
     };

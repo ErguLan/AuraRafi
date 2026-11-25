@@ -29,6 +29,9 @@ pub(super) struct ShadowPass {
     pub layout: vk::PipelineLayout,
     caster: vk::Pipeline,
     pub scene: vk::Pipeline,
+    scene_two_sided: vk::Pipeline,
+    scene_transparent: vk::Pipeline,
+    scene_transparent_two_sided: vk::Pipeline,
 }
 
 impl ShadowPass {
@@ -58,6 +61,9 @@ impl ShadowPass {
             layout: vk::PipelineLayout::null(),
             caster: vk::Pipeline::null(),
             scene: vk::Pipeline::null(),
+            scene_two_sided: vk::Pipeline::null(),
+            scene_transparent: vk::Pipeline::null(),
+            scene_transparent_two_sided: vk::Pipeline::null(),
         };
         let device = &gpu.device;
         shadow.pass = render_pass(device)?;
@@ -91,26 +97,68 @@ impl ShadowPass {
                 depth_write: true,
                 vertex_stream: true,
                 blend: false,
+                cull: vk::CullModeFlags::NONE,
             },
         )?;
-        shadow.scene = pipelines.create_for(
-            &shader("shadow_scene", naga::ShaderStage::Vertex)?,
-            c"shadow_scene",
-            Some((
-                &shader("shadow_paint", naga::ShaderStage::Fragment)?,
-                c"shadow_paint",
-            )),
-            RasterTarget {
-                pass: pipelines.render_pass,
-                layout: shadow.layout,
-                color: true,
-                depth_test: true,
-                depth_write: true,
-                vertex_stream: true,
-                blend: true,
-            },
+        let scene_vertex = shader("shadow_scene", naga::ShaderStage::Vertex)?;
+        let scene_pixel = shader("shadow_paint", naga::ShaderStage::Fragment)?;
+        shadow.scene = shadow.create_scene(
+            pipelines,
+            &scene_vertex,
+            &scene_pixel,
+            vk::CullModeFlags::BACK,
+            true,
+        )?;
+        shadow.scene_two_sided = shadow.create_scene(
+            pipelines,
+            &scene_vertex,
+            &scene_pixel,
+            vk::CullModeFlags::NONE,
+            true,
+        )?;
+        shadow.scene_transparent = shadow.create_scene(
+            pipelines,
+            &scene_vertex,
+            &scene_pixel,
+            vk::CullModeFlags::BACK,
+            false,
+        )?;
+        shadow.scene_transparent_two_sided = shadow.create_scene(
+            pipelines,
+            &scene_vertex,
+            &scene_pixel,
+            vk::CullModeFlags::NONE,
+            false,
         )?;
         Ok(shadow)
+    }
+
+    /// Shadow-receiving variant for one visible scene mode. The cull and depth
+    /// write state matches the corresponding main-pass pipeline, while the
+    /// fragment shader samples the directional shadow map.
+    fn create_scene(
+        &self,
+        pipelines: &Pipelines,
+        vertex: &Shader,
+        pixel: &Shader,
+        cull: vk::CullModeFlags,
+        depth_write: bool,
+    ) -> Result<vk::Pipeline> {
+        pipelines.create_for(
+            vertex,
+            c"shadow_scene",
+            Some((pixel, c"shadow_paint")),
+            RasterTarget {
+                pass: pipelines.render_pass,
+                layout: self.layout,
+                color: true,
+                depth_test: true,
+                depth_write,
+                vertex_stream: true,
+                blend: true,
+                cull,
+            },
+        )
     }
 
     fn create_bindings(&mut self, pipelines: &Pipelines) -> Result<()> {
@@ -190,6 +238,18 @@ impl ShadowPass {
             );
         }
         Ok(())
+    }
+
+    /// Main-pass shadow receiver for a visible scene mode. Overlay and line
+    /// modes never sample the shadow map.
+    pub(super) fn scene_for(&self, mode: DrawMode) -> Option<vk::Pipeline> {
+        match mode {
+            DrawMode::Scene => Some(self.scene),
+            DrawMode::SceneTwoSided => Some(self.scene_two_sided),
+            DrawMode::SceneTransparent => Some(self.scene_transparent),
+            DrawMode::SceneTransparentTwoSided => Some(self.scene_transparent_two_sided),
+            DrawMode::Overlay | DrawMode::DepthReadOnly | DrawMode::SceneNoDepth => None,
+        }
     }
 
     pub fn prepare(&mut self, parameters: ShadowFrame) -> u64 {
@@ -319,6 +379,9 @@ impl Drop for ShadowPass {
         unsafe {
             device.destroy_pipeline(self.caster, None);
             device.destroy_pipeline(self.scene, None);
+            device.destroy_pipeline(self.scene_two_sided, None);
+            device.destroy_pipeline(self.scene_transparent, None);
+            device.destroy_pipeline(self.scene_transparent_two_sided, None);
             device.destroy_framebuffer(self.framebuffer, None);
             device.destroy_render_pass(self.pass, None);
             device.destroy_descriptor_pool(self.pool, None);

@@ -9,6 +9,74 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::{Component, Path};
 
+mod bake;
+mod retarget;
+pub(crate) use bake::bake_rig;
+
+pub(super) fn retarget(command: &ParsedCommand, ctx: &GameCommandContext<'_>) -> CommandOutput {
+    let result = (|| -> Result<_, String> {
+        let destination =
+            resolve_target(command, ctx.scene, ctx.selection).ok_or("Destination rig not found")?;
+        let source_name = command.arg("source").ok_or("Source rig is required")?;
+        let source = super::query::resolve_text_target(source_name, ctx.scene)
+            .ok_or("Source rig not found")?;
+        let mappings =
+            structured_or_json_value(command, "bindings", "animation retarget bindings")?
+                .ok_or("Retarget bindings are required")?;
+        let mappings: Vec<retarget::Binding> =
+            serde_json::from_value(mappings).map_err(|error| error.to_string())?;
+        let mut scene = ctx.scene.clone();
+        if scene
+            .get(source)
+            .is_some_and(|node| node.animation_asset.is_some())
+        {
+            let root = super::world::active_project_root()
+                .ok_or("Animation asset lookup requires an open project")?;
+            animation_asset::resolve_scene(&root, &mut scene)?;
+        }
+        let rig = scene
+            .get(source)
+            .and_then(|node| node.animation.as_ref())
+            .ok_or("Source rig has no animation")?;
+        Ok(json!({"animation": retarget::retarget(&scene, source, destination, rig, &mappings)?}))
+    })();
+    match result {
+        Ok(data) => CommandOutput::info("Retargeted transform clip", Vec::new(), data),
+        Err(error) => CommandOutput::error("Retarget animation", error),
+    }
+}
+
+pub(super) fn bake(command: &ParsedCommand, ctx: &GameCommandContext<'_>) -> CommandOutput {
+    let result = (|| -> Result<_, String> {
+        let owner = resolve_target(command, ctx.scene, ctx.selection)
+            .ok_or("Animation target not found")?;
+        let mut scene = ctx.scene.clone();
+        if scene
+            .get(owner)
+            .is_some_and(|node| node.animation_asset.is_some())
+        {
+            let root = super::world::active_project_root()
+                .ok_or("Animation asset lookup requires an open project")?;
+            animation_asset::resolve_scene(&root, &mut scene)?;
+        }
+        let rig = scene
+            .get(owner)
+            .and_then(|node| node.animation.as_ref())
+            .ok_or("The target has no animation rig")?;
+        let fps = command
+            .arg("fps")
+            .unwrap_or("30")
+            .parse::<u32>()
+            .map_err(|error| error.to_string())?;
+        let baked = bake_rig(&scene, owner, rig, fps)?;
+        Ok(json!({"animation": baked, "fps": fps}))
+    })();
+    match result {
+        Ok(data) => CommandOutput::info("Baked pose take", Vec::new(), data),
+        Err(error) => CommandOutput::error("Bake pose take", error),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImportClip {
@@ -85,6 +153,9 @@ pub(super) fn update(
         rig.get_or_insert_with(|| AnimationRig {
             layers: Vec::new(),
             impact: None,
+            contacts: Vec::new(),
+            motion_match: None,
+            physics_follow: Vec::new(),
         })
         .layers
         .push(layer);
@@ -141,10 +212,29 @@ pub(crate) fn preview(
     rig: &AnimationRig,
     seconds: f64,
 ) -> Result<SceneGraph, String> {
+    let (mut snapshot, mut playback) = prepare_preview(scene, id, rig)?;
+    sample_preview(&mut snapshot, &mut playback, id, seconds)?;
+    Ok(snapshot)
+}
+
+pub(crate) fn prepare_preview(
+    scene: &SceneGraph,
+    id: SceneNodeId,
+    rig: &AnimationRig,
+) -> Result<(SceneGraph, AnimationPlayback), String> {
     let mut snapshot = scene.clone();
     let target = snapshot.get_mut(id).ok_or("Animation target was removed")?;
     target.animation = Some(rig.clone());
-    let mut playback = AnimationPlayback::prepare(&snapshot)?;
+    let playback = AnimationPlayback::prepare(&snapshot)?;
+    Ok((snapshot, playback))
+}
+
+pub(crate) fn sample_preview(
+    snapshot: &mut SceneGraph,
+    playback: &mut AnimationPlayback,
+    id: SceneNodeId,
+    seconds: f64,
+) -> Result<(), String> {
     for pose in playback.sample(seconds, 0.0)?.filter(|pose| pose.rig == id) {
         if let Some(node) = snapshot.get_mut(pose.node) {
             node.position = pose.transform.position;
@@ -152,7 +242,7 @@ pub(crate) fn preview(
             node.scale = pose.transform.scale;
         }
     }
-    Ok(snapshot)
+    Ok(())
 }
 
 fn asset_path(file: &Path) -> Result<std::path::PathBuf, String> {

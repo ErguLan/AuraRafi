@@ -167,7 +167,8 @@ impl NativeElectronicsEditor {
         }
         if self.route_physical_click(world) {
             router.release_pointer(PointerButton::Primary, owner);
-            result.changed=true;result.request_redraw=true;
+            result.changed = true;
+            result.request_redraw = true;
             return;
         }
         let tolerance = PICK_TOLERANCE_SCREEN / self.camera.zoom.max(MIN_ZOOM);
@@ -175,8 +176,16 @@ impl NativeElectronicsEditor {
         // explicit context command; a missed pad must never author a whole trace.
         if let Some(hit) = pick(&self.scene, world, tolerance) {
             if hit.selection.kind == CadObjectKind::Airwire {
-                if let Some(object) = self.scene.objects.iter().find(|o| o.id == hit.selection.object_id) {
-                    if let Some(endpoint) = object.points.iter().copied().min_by(|a,b| a.distance_squared(world).total_cmp(&b.distance_squared(world))) {
+                if let Some(object) = self
+                    .scene
+                    .objects
+                    .iter()
+                    .find(|o| o.id == hit.selection.object_id)
+                {
+                    if let Some(endpoint) = object.points.iter().copied().min_by(|a, b| {
+                        a.distance_squared(world)
+                            .total_cmp(&b.distance_squared(world))
+                    }) {
                         self.route_physical_click(endpoint);
                         result.request_redraw = true;
                         result.changed = true;
@@ -214,12 +223,19 @@ impl NativeElectronicsEditor {
                 let before = self.snapshot();
                 self.pcb.board_outline.points = points;
                 self.pcb.rebuild_airwires();
-                if self.history.record(before, &self.snapshot()) { self.dirty = true; }
+                if self.history.record(before, &self.snapshot()) {
+                    self.dirty = true;
+                }
                 self.set_tool(ElectronicsTool::Select);
             } else {
                 self.push_surface_error_key("electronics.error.outline_invalid");
             }
-        } else if self.board_outline_vertices.len() < 512 && self.board_outline_vertices.last().map_or(true, |last| last.distance(point) > 0.0001) {
+        } else if self.board_outline_vertices.len() < 512
+            && self
+                .board_outline_vertices
+                .last()
+                .map_or(true, |last| last.distance(point) > 0.0001)
+        {
             self.board_outline_vertices.push(point);
             self.board_outline_start = self.board_outline_vertices.first().copied();
         }
@@ -237,7 +253,11 @@ impl NativeElectronicsEditor {
         let before = self.snapshot();
         let mut changed = false;
         if self.active_surface == CadSurfaceKind::Pcb
-            && self.pcb.vias.iter().any(|via| via.id == selection.source_id)
+            && self
+                .pcb
+                .vias
+                .iter()
+                .any(|via| via.id == selection.source_id)
         {
             self.pcb.vias.retain(|via| via.id != selection.source_id);
             self.pcb.rebuild_airwires();
@@ -324,7 +344,11 @@ impl NativeElectronicsEditor {
             return false;
         };
         let before = self.snapshot();
-        if let Err(error) = self.pcb.try_route_airwire_with_options(index,self.pcb_route_layer,self.pcb_route_width) {
+        if let Err(error) = self.pcb.try_route_airwire_with_options(
+            index,
+            self.pcb_route_layer,
+            self.pcb_route_width,
+        ) {
             self.push_surface_error(error);
             self.touch_ui();
             return false;
@@ -462,8 +486,10 @@ impl NativeElectronicsEditor {
     /// the movement already reached the document and has to be committed.
     pub(super) fn cancel_gesture(&mut self, router: &mut InputRouter, owner: InputOwner) {
         self.clear_route_error();
-        if self.pcb_route_draft.is_some(){self.highlight_net=None;}
-        self.pcb_route_draft=None;
+        if self.pcb_route_draft.is_some() {
+            self.highlight_net = None;
+        }
+        self.pcb_route_draft = None;
         if let Some(drag) = self.component_drag.take() {
             self.schematic = drag.before.schematic;
             self.pcb = drag.before.pcb;

@@ -3,8 +3,8 @@
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiAlign, UiCompactMode, UiEventBinding, UiEventKind, UiFlow, UiImage,
     UiImageFit, UiImageSource, UiJustify, UiLayout, UiNode, UiNodeKind, UiOverflow,
-    UiResponsiveRule, UiScrollAxis, UiSizeMode, UiSpacing, UiStyle, UiSurfaceMaterial,
-    UiTextInput, UiTextRole, UiTextStyle,
+    UiResponsiveRule, UiScrollAxis, UiSizeMode, UiSpacing, UiStyle, UiSurfaceMaterial, UiTextInput,
+    UiTextRole, UiTextStyle,
 };
 use raf_ui::{UiFontWeight, UiIcon, UiIconId, UiIconSize};
 
@@ -246,7 +246,10 @@ pub(crate) fn hub_header_surface(palette: StudioUiPalette) -> UiNode {
         )
 }
 
-pub(crate) fn hub_content_columns_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNode {
+pub(crate) fn hub_content_columns_surface(
+    palette: StudioUiPalette,
+    model: &HubSurfaceModel,
+) -> UiNode {
     UiNode::new("hub.content-columns", UiNodeKind::Panel)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
@@ -355,7 +358,11 @@ pub(crate) fn hub_create_surface(palette: StudioUiPalette, model: &HubSurfaceMod
     panel
 }
 
-pub(crate) fn hub_create_name_input(_palette: StudioUiPalette, focused: bool, hovered: bool) -> UiNode {
+pub(crate) fn hub_create_name_input(
+    _palette: StudioUiPalette,
+    focused: bool,
+    hovered: bool,
+) -> UiNode {
     let mut field = UiNode::new("hub.create.name-field", UiNodeKind::Panel)
         .with_class("hub-create-name-field")
         .with_layout(UiLayout {

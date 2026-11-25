@@ -46,7 +46,6 @@ pub(super) fn runtime_preferences(
         ("max_instances", runtime.max_instances as f32, 1.0, 4.0, 1.0),
         ("width", runtime.window_size[0] as f32, 640.0, 1920.0, 16.0),
         ("height", runtime.window_size[1] as f32, 360.0, 1080.0, 9.0),
-        ("fps_limit", runtime.fps_limit as f32, 15.0, 120.0, 1.0),
         (
             "script_budget_ms",
             runtime.script_budget_ms as f32,

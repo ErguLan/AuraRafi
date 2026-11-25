@@ -16,8 +16,8 @@ use super::evidence::{plan_review_card, plan_review_from_message};
 use super::layout::{
     bounded_text, copy_message_button, icon_button, message_chrome_height, short_text, spacer,
     AgentSurfaceVariant, MessageViewport, DOCK_TOOL_ROW_GAP, DOCK_TOOL_ROW_HEIGHT,
-    HISTORY_OVERSCAN, HISTORY_VIEWPORT_ESTIMATE, MAX_VISIBLE_MESSAGE_CHARS,
-    MESSAGE_TEXT_TILE_GAP, MESSAGE_WIDTH_RATIO, PLAN_REVIEW_HEIGHT, SESSION_DOT_SIZE,
+    HISTORY_OVERSCAN, HISTORY_VIEWPORT_ESTIMATE, MAX_VISIBLE_MESSAGE_CHARS, MESSAGE_TEXT_TILE_GAP,
+    MESSAGE_WIDTH_RATIO, PLAN_REVIEW_HEIGHT, SESSION_DOT_SIZE,
 };
 use super::messages::{
     display_message_content, estimated_text_tile_height, message_card_with_variant,
@@ -328,11 +328,20 @@ pub(super) fn build_history(
         }
         if let HistoryEntry::Message(index) = entry {
             let message = messages[index];
-            if panel.show_reasoning && message.reasoning.as_ref().is_some_and(|r| !r.text.is_empty()) {
+            if panel.show_reasoning
+                && message
+                    .reasoning
+                    .as_ref()
+                    .is_some_and(|r| !r.text.is_empty())
+            {
                 entries.push(HistoryEntry::Reasoning(index));
             }
-            if message.role == MessageRole::Assistant && message.content.trim().is_empty()
-                && (message.tool_calls.is_some() || message.reasoning.is_some()) { continue; }
+            if message.role == MessageRole::Assistant
+                && message.content.trim().is_empty()
+                && (message.tool_calls.is_some() || message.reasoning.is_some())
+            {
+                continue;
+            }
             entries.push(HistoryEntry::Message(index));
         } else {
             entries.push(entry);
@@ -344,9 +353,14 @@ pub(super) fn build_history(
             HistoryEntry::Activity { .. } => DOCK_TOOL_ROW_HEIGHT,
             HistoryEntry::Plan(_) => PLAN_REVIEW_HEIGHT,
             HistoryEntry::Reasoning(index) => {
-                if panel.expanded_tools.contains(&format!("reasoning:{}", messages[*index].id)) {
+                if panel
+                    .expanded_tools
+                    .contains(&format!("reasoning:{}", messages[*index].id))
+                {
                     DOCK_TOOL_ROW_HEIGHT + 126.0
-                } else { DOCK_TOOL_ROW_HEIGHT }
+                } else {
+                    DOCK_TOOL_ROW_HEIGHT
+                }
             }
             HistoryEntry::Message(index) => estimated_message_height_with_variant(
                 messages[*index],
@@ -450,36 +464,79 @@ pub(super) fn build_history(
     scroll
 }
 
-pub(super) fn reasoning_entry(palette: StudioUiPalette, panel: &AgentPanel, message: &ChatMessage) -> UiNode {
+pub(super) fn reasoning_entry(
+    palette: StudioUiPalette,
+    panel: &AgentPanel,
+    message: &ChatMessage,
+) -> UiNode {
     let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
-    let trace = message.reasoning.as_ref().map(|r| r.text.as_str()).unwrap_or("");
+    let trace = message
+        .reasoning
+        .as_ref()
+        .map(|r| r.text.as_str())
+        .unwrap_or("");
     let key = format!("reasoning:{}", message.id);
     let expanded = panel.expanded_tools.contains(&key);
-    let title = format!("{} · {}", t("agent.reasoning.trace", panel.language), short_text(trace, 120));
-    let button = UiNode::new(format!("agent.reasoning.{}.toggle", message.id), UiNodeKind::Button)
-        .with_class("agent-tool-row")
-        .with_icon(UiIcon::new(if expanded { UiIconId::ChevronDown } else { UiIconId::ChevronRight }).with_size(UiIconSize::Small))
-        .with_text_value(title)
-        .with_text_overflow(UiTextOverflow::Ellipsis)
-        .with_text_style(UiTextStyle::button(tokens.text_muted))
-        .with_accessibility_role(UiAccessibilityRole::Button)
-        .with_accessibility_label_key("agent.reasoning.trace")
-        .with_accessibility_expanded(expanded)
-        .with_tooltip_key("agent.reasoning.trace_hint")
-        .focusable()
-        .with_layout(UiLayout::fixed(0.0, DOCK_TOOL_ROW_HEIGHT).with_width_mode(UiSizeMode::Fill))
-        .with_event(UiEventBinding::command(UiEventKind::Click, format!("agent.tool.toggle:{key}")));
-    if !expanded { return button; }
+    let title = format!(
+        "{} · {}",
+        t("agent.reasoning.trace", panel.language),
+        short_text(trace, 120)
+    );
+    let button = UiNode::new(
+        format!("agent.reasoning.{}.toggle", message.id),
+        UiNodeKind::Button,
+    )
+    .with_class("agent-tool-row")
+    .with_icon(
+        UiIcon::new(if expanded {
+            UiIconId::ChevronDown
+        } else {
+            UiIconId::ChevronRight
+        })
+        .with_size(UiIconSize::Small),
+    )
+    .with_text_value(title)
+    .with_text_overflow(UiTextOverflow::Ellipsis)
+    .with_text_style(UiTextStyle::button(tokens.text_muted))
+    .with_accessibility_role(UiAccessibilityRole::Button)
+    .with_accessibility_label_key("agent.reasoning.trace")
+    .with_accessibility_expanded(expanded)
+    .with_tooltip_key("agent.reasoning.trace_hint")
+    .focusable()
+    .with_layout(UiLayout::fixed(0.0, DOCK_TOOL_ROW_HEIGHT).with_width_mode(UiSizeMode::Fill))
+    .with_event(UiEventBinding::command(
+        UiEventKind::Click,
+        format!("agent.tool.toggle:{key}"),
+    ));
+    if !expanded {
+        return button;
+    }
     UiNode::new(format!("agent.reasoning.{}", message.id), UiNodeKind::Panel)
-        .with_layout(UiLayout { flow: UiFlow::Column, gap: 4.0, overflow: UiOverflow::Clip, ..UiLayout::fixed(0.0, DOCK_TOOL_ROW_HEIGHT + 126.0).with_width_mode(UiSizeMode::Fill) })
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 4.0,
+            overflow: UiOverflow::Clip,
+            ..UiLayout::fixed(0.0, DOCK_TOOL_ROW_HEIGHT + 126.0).with_width_mode(UiSizeMode::Fill)
+        })
         .with_child(button)
-        .with_child(UiNode::new(format!("agent.reasoning.{}.text", message.id), UiNodeKind::Label)
+        .with_child(
+            UiNode::new(
+                format!("agent.reasoning.{}.text", message.id),
+                UiNodeKind::Label,
+            )
             .with_text_value(bounded_text(trace, 2048))
             .with_text_style(UiTextStyle::body(tokens.text_muted))
             .with_text_overflow(UiTextOverflow::Wrap)
             .selectable_text()
-            .with_layout(UiLayout { overflow: UiOverflow::Clip, ..UiLayout::fixed(0.0, 88.0).with_width_mode(UiSizeMode::Fill) }))
-        .with_child(copy_message_button(format!("agent.reasoning.{}.copy", message.id), trace))
+            .with_layout(UiLayout {
+                overflow: UiOverflow::Clip,
+                ..UiLayout::fixed(0.0, 88.0).with_width_mode(UiSizeMode::Fill)
+            }),
+        )
+        .with_child(copy_message_button(
+            format!("agent.reasoning.{}.copy", message.id),
+            trace,
+        ))
 }
 
 pub(super) fn build_suggestions(palette: StudioUiPalette, project_type: ProjectType) -> UiNode {

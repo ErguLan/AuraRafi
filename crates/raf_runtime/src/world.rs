@@ -8,8 +8,8 @@ use raf_core::{
     SceneGraph,
 };
 use raf_script::{
-    AudioCommand, InputSnapshot, RhaiScriptRuntime, ScriptLoadProgress, ScriptRuntimeOptions,
-    ScriptRuntimeReport,
+    view::RuntimeQuality, AudioCommand, InputSnapshot, RhaiScriptRuntime, ScriptLoadProgress,
+    ScriptRuntimeOptions, ScriptRuntimeReport,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -181,6 +181,7 @@ impl RuntimeWorld {
                 world.settings.runtime.character_speed,
                 world.settings.runtime.character_max_slope_degrees,
             ]);
+            scripts.view.quality_base = RuntimeQuality::from_settings(&world.settings);
         }
         world.status.camera_ready = world.camera_pose().is_some();
         Ok(world)
@@ -376,6 +377,9 @@ impl RuntimeWorld {
         self.status.camera_ready = self.camera_pose().is_some();
         let animation_gravity = self.settings.enable_physics.then(|| self.physics_gravity());
         self.animation.tick(&mut self.scene, 0.0, 0.0, &[], animation_gravity);
+        if animation_gravity.is_some() && self.settings.runtime.advanced_physics {
+            self.animation.blend_physics(&mut self.scene);
+        }
         if self.settings.enable_audio {
             let names: Vec<String> = self
                 .scene
@@ -528,6 +532,10 @@ impl RuntimeWorld {
     pub fn drain_audio(&mut self) -> Vec<AudioCommand> {
         std::mem::take(&mut self.audio)
     }
+
+    pub fn audio_settings(&self) -> &raf_core::runtime_config::AudioSettings {
+        &self.settings.runtime.audio
+    }
     pub fn emit_ui_event(
         &mut self,
         name: &str,
@@ -554,12 +562,24 @@ impl RuntimeWorld {
             .map(|scripts| scripts.view.environment(*self.scene.environment()))
             .unwrap_or(*self.scene.environment())
     }
+    /// Effective graphics quality for this instance, including local script overrides.
+    pub fn presentation_quality(&self) -> RuntimeQuality {
+        self.scripts
+            .as_ref()
+            .map(|scripts| scripts.view.quality())
+            .unwrap_or_else(|| RuntimeQuality::from_settings(&self.settings))
+    }
     pub fn presentation_revision(&self) -> u64 {
         self.scene.document_revision()
             ^ self
                 .scripts
                 .as_ref()
                 .map(|scripts| scripts.view.environment_revision().rotate_left(17))
+                .unwrap_or(0)
+            ^ self
+                .scripts
+                .as_ref()
+                .map(|scripts| scripts.view.quality_revision().rotate_left(47))
                 .unwrap_or(0)
             ^ if self.settings.enable_physics && self.settings.runtime.physics_debug_draw {
                 self.status.fixed_ticks.rotate_left(33)
@@ -671,6 +691,9 @@ impl RuntimeWorld {
         }
         if self.settings.enable_physics {
             let gravity = self.physics_gravity();
+            if self.settings.runtime.advanced_physics {
+                self.animation.drive_bodies(&mut self.scene);
+            }
             self.sample_physics_debug_loads();
             let result = self.physics.step_with_settings(
                 &mut self.scene,
@@ -691,6 +714,12 @@ impl RuntimeWorld {
         let animation_time = (self.status.fixed_ticks.saturating_add(1)) as f64 * self.fixed_step();
         let animation_gravity = self.settings.enable_physics.then(|| self.physics_gravity());
         self.animation.tick(&mut self.scene, animation_time, dt, impacts, animation_gravity);
+        if let Some(gravity) = animation_gravity {
+            self.animation.solve_contacts(&mut self.scene, &mut self.physics, gravity);
+            if self.settings.runtime.advanced_physics {
+                self.animation.blend_physics(&mut self.scene);
+            }
+        }
         if self.settings.enable_physics {
             if let Some(scripts) = &mut self.scripts {
                 let report = scripts.dispatch_physics_events(
@@ -1082,6 +1111,54 @@ fn on_update(dt) {
         assert_ne!(*world.scene.environment(), env);
         assert_eq!(*source.environment(), env);
         assert_eq!(world.scene.geometry_revision(), source.geometry_revision());
+    }
+    #[test]
+    fn presentation_quality_applies_local_script_overrides_and_changes_revision() {
+        let fixture = Fixture::new(
+            r#"
+            fn on_start() {
+                set_quality("viewport_resolution", "efficient");
+                set_quality("texture_quality", "efficient");
+            }
+            "#,
+        );
+        let mut scene = SceneGraph::new();
+        let controller = scene.add_root("Controller");
+        scene
+            .get_mut(controller)
+            .unwrap()
+            .scripts
+            .push("scripts/main.rhai".into());
+        let mut world = fixture.world(scene);
+        let base_quality = RuntimeQuality::from_settings(world.project_settings());
+        assert_eq!(world.presentation_quality(), base_quality);
+        let base_revision = world.presentation_revision();
+        world.start();
+        assert_eq!(
+            world.status().phase,
+            RuntimePhase::Running,
+            "{:?}",
+            world.status().last_error
+        );
+        let quality = world.presentation_quality();
+        assert_eq!(
+            quality.viewport_resolution,
+            raf_core::project::ViewportResolutionMode::Efficient
+        );
+        assert_eq!(
+            quality.texture_quality,
+            raf_core::project::TextureQualityMode::Efficient
+        );
+        assert_eq!(
+            quality.geometry_detail,
+            raf_core::project::GeometryDetailMode::Adaptive
+        );
+        assert_ne!(world.presentation_revision(), base_revision);
+        assert_eq!(
+            base_quality.viewport_resolution,
+            raf_core::project::ViewportResolutionMode::Adaptive
+        );
+        world.stop();
     }
     use raf_core::scene::{Primitive, VariableValue};
     struct Fixture(std::path::PathBuf);

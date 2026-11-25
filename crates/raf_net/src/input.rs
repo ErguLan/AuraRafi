@@ -377,13 +377,15 @@ impl InputFrame {
     /// it is exposed as both movement and relative device motion so
     /// first-person camera scripts receive input under a captured cursor.
     pub fn to_snapshot(&self, previous: &InputSnapshot) -> InputSnapshot {
-        let mut snapshot = InputSnapshot::default();
-        snapshot.window_focused = true;
-        snapshot.pointer_position = Some(self.pointer);
-        snapshot.pointer_delta = self.pointer_delta;
-        snapshot.relative_pointer_delta = self.pointer_delta;
-        snapshot.scroll_delta = self.wheel;
-        snapshot.modifiers = modifiers_from_bits(self.modifiers);
+        let mut snapshot = InputSnapshot {
+            window_focused: true,
+            pointer_position: Some(self.pointer),
+            pointer_delta: self.pointer_delta,
+            relative_pointer_delta: self.pointer_delta,
+            scroll_delta: self.wheel,
+            modifiers: modifiers_from_bits(self.modifiers),
+            ..InputSnapshot::default()
+        };
 
         let before = previous.modifiers;
         snapshot.modifiers_pressed = InputModifiers {
@@ -401,7 +403,7 @@ impl InputFrame {
 
         for &key in &INPUT_KEYS {
             let code = input_key_code(key);
-            let down = self.held_keys.iter().any(|held| *held == code);
+            let down = self.held_keys.contains(&code);
             let was_down = previous.keys_down.contains(key);
             if down {
                 snapshot.keys_down.insert(key);

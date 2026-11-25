@@ -122,6 +122,7 @@ impl FilterPass {
                 depth_write: false,
                 vertex_stream: false,
                 blend: false,
+                cull: vk::CullModeFlags::NONE,
             },
         )?;
         Ok(filter)

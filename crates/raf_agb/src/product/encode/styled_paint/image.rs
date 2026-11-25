@@ -94,7 +94,10 @@ pub(super) fn emit(
                         vs[row + 1] - vs[row],
                     ],
                 };
-                if patch.rect[2] <= 0. || patch.rect[3] <= 0. || patch.uv[2] <= 0. || patch.uv[3] <= 0.
+                if patch.rect[2] <= 0.
+                    || patch.rect[3] <= 0.
+                    || patch.uv[2] <= 0.
+                    || patch.uv[3] <= 0.
                 {
                     continue;
                 }

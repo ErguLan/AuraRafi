@@ -47,9 +47,9 @@ pub(super) fn plan_review_from_message(message: &ChatMessage) -> Option<PlanRevi
             .and_then(|pipeline| pipeline.get("gates"))
             .and_then(serde_json::Value::as_array)
             .and_then(|gates| {
-                gates
-                    .iter()
-                    .find(|candidate| candidate.get("gate").and_then(serde_json::Value::as_str) == Some(gate))
+                gates.iter().find(|candidate| {
+                    candidate.get("gate").and_then(serde_json::Value::as_str) == Some(gate)
+                })
             })
             .and_then(|candidate| candidate.get("status"))
             .and_then(serde_json::Value::as_str)
@@ -194,29 +194,26 @@ pub(super) fn plan_review_card(
 ) -> UiNode {
     let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     let card_width = (width * 0.94).clamp(320.0, 900.0);
-    let mut card = UiNode::new(
-        format!("agent.plan.review.{index}"),
-        UiNodeKind::Panel,
-    )
-    .with_class("agent-plan-review")
-    .with_layout(UiLayout {
-        flow: UiFlow::Column,
-        gap: 7.0,
-        padding: UiSpacing::same(13.0),
-        width_mode: UiSizeMode::Fixed,
-        height_mode: UiSizeMode::Fixed,
-        basis: [card_width, PLAN_REVIEW_HEIGHT],
-        overflow: UiOverflow::Clip,
-        ..UiLayout::default()
-    })
-    .with_style(UiStyle {
-        fill: tokens.surface_raised,
-        border: tokens.accent_hot,
-        border_width: 1.0,
-        radius: 10.0,
-        ..UiStyle::transparent()
-    })
-    .with_accessibility_label_key("app.agent_plan_title");
+    let mut card = UiNode::new(format!("agent.plan.review.{index}"), UiNodeKind::Panel)
+        .with_class("agent-plan-review")
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 7.0,
+            padding: UiSpacing::same(13.0),
+            width_mode: UiSizeMode::Fixed,
+            height_mode: UiSizeMode::Fixed,
+            basis: [card_width, PLAN_REVIEW_HEIGHT],
+            overflow: UiOverflow::Clip,
+            ..UiLayout::default()
+        })
+        .with_style(UiStyle {
+            fill: tokens.surface_raised,
+            border: tokens.accent_hot,
+            border_width: 1.0,
+            radius: 10.0,
+            ..UiStyle::transparent()
+        })
+        .with_accessibility_label_key("app.agent_plan_title");
     let mut header = UiNode::new(
         format!("agent.plan.review.{index}.header"),
         UiNodeKind::Toolbar,
@@ -230,12 +227,9 @@ pub(super) fn plan_review_card(
         ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
     })
     .with_child(
-        UiNode::new(
-            format!("agent.plan.review.{index}.icon"),
-            UiNodeKind::Image,
-        )
-        .with_icon(UiIcon::new(UiIconId::Grid).with_tint(tokens.accent_hot))
-        .with_layout(UiLayout::fixed(20.0, 20.0)),
+        UiNode::new(format!("agent.plan.review.{index}.icon"), UiNodeKind::Image)
+            .with_icon(UiIcon::new(UiIconId::Grid).with_tint(tokens.accent_hot))
+            .with_layout(UiLayout::fixed(20.0, 20.0)),
     )
     .with_child(
         UiNode::new(
@@ -251,18 +245,15 @@ pub(super) fn plan_review_card(
         }),
     )
     .with_child({
-        let mut id_chip = UiNode::new(
-            format!("agent.plan.review.{index}.id"),
-            UiNodeKind::Label,
-        )
-        .with_class("agent-tool-chip")
-        .with_text_value(format!(
-            "{} · {}",
-            t("app.agent_plan_plan", panel.language),
-            short_plan_id(&review.plan_id)
-        ))
-        .with_text_style(UiTextStyle::button(tokens.text_muted))
-        .with_layout(UiLayout::fit_content());
+        let mut id_chip = UiNode::new(format!("agent.plan.review.{index}.id"), UiNodeKind::Label)
+            .with_class("agent-tool-chip")
+            .with_text_value(format!(
+                "{} · {}",
+                t("app.agent_plan_plan", panel.language),
+                short_plan_id(&review.plan_id)
+            ))
+            .with_text_style(UiTextStyle::button(tokens.text_muted))
+            .with_layout(UiLayout::fit_content());
         let tooltip = [
             review.hash.as_ref().map(|hash| format!("Hash: {hash}")),
             review
@@ -280,14 +271,11 @@ pub(super) fn plan_review_card(
         id_chip
     })
     .with_child(
-        UiNode::new(
-            format!("agent.plan.review.{index}.mode"),
-            UiNodeKind::Label,
-        )
-        .with_class("agent-tool-chip")
-        .with_text_value(review.mode.clone())
-        .with_text_style(UiTextStyle::button(tokens.accent_hot))
-        .with_layout(UiLayout::fit_content()),
+        UiNode::new(format!("agent.plan.review.{index}.mode"), UiNodeKind::Label)
+            .with_class("agent-tool-chip")
+            .with_text_value(review.mode.clone())
+            .with_text_style(UiTextStyle::button(tokens.accent_hot))
+            .with_layout(UiLayout::fit_content()),
     );
     if let Some(revision) = review.revision {
         header = header.with_child(
@@ -401,25 +389,22 @@ pub(super) fn plan_review_card(
         ));
     }
     card = card.with_child(validations);
-    let mut tree = UiNode::new(
-        format!("agent.plan.review.{index}.tree"),
-        UiNodeKind::Panel,
-    )
-    .with_layout(UiLayout {
-        flow: UiFlow::Column,
-        gap: 1.0,
-        height_mode: UiSizeMode::FitContent,
-        ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
-    })
-    .with_child(
-        UiNode::new(
-            format!("agent.plan.review.{index}.tree.title"),
-            UiNodeKind::Label,
-        )
-        .with_text_key("app.agent_plan_tree")
-        .with_text_style(UiTextStyle::button(tokens.text_muted))
-        .with_layout(UiLayout::fit_content()),
-    );
+    let mut tree = UiNode::new(format!("agent.plan.review.{index}.tree"), UiNodeKind::Panel)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 1.0,
+            height_mode: UiSizeMode::FitContent,
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(
+            UiNode::new(
+                format!("agent.plan.review.{index}.tree.title"),
+                UiNodeKind::Label,
+            )
+            .with_text_key("app.agent_plan_tree")
+            .with_text_style(UiTextStyle::button(tokens.text_muted))
+            .with_layout(UiLayout::fit_content()),
+        );
     let mut rows = 0usize;
     for (row, name) in review.group_sample.iter().take(3).enumerate() {
         tree = tree.with_child(
@@ -482,11 +467,10 @@ pub(super) fn plan_review_card(
         ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
     })
     .with_child(
-        UiNode::new("agent.plan.review.spacer", UiNodeKind::Panel)
-            .with_layout(UiLayout {
-                grow: 1.0,
-                ..UiLayout::fit_content()
-            }),
+        UiNode::new("agent.plan.review.spacer", UiNodeKind::Panel).with_layout(UiLayout {
+            grow: 1.0,
+            ..UiLayout::fit_content()
+        }),
     )
     .with_child(
         UiNode::new("agent.plan.cancel", UiNodeKind::Button)

@@ -9,9 +9,7 @@ use raf_core::{
 use raf_player::{PlayerLaunch, PlayerSession, PlayerSource};
 use raf_render::api_graphic_basic::ui_surface::NativeUiWindowHost;
 use raf_runtime::manifest::{RuntimeHostSettings, RuntimeManifest};
-use raf_runtime::wire::{
-    RuntimeDiagnostic, RuntimeDiagnosticSeverity, RuntimePacket, RuntimePeer,
-};
+use raf_runtime::wire::{RuntimeDiagnostic, RuntimeDiagnosticSeverity, RuntimePacket, RuntimePeer};
 use raf_runtime::{RuntimeControl, RuntimePhase, RuntimeStatus};
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
@@ -136,7 +134,11 @@ impl RuntimeConsoleEntry {
     }
 
     pub fn legacy(message: impl Into<String>) -> Self {
-        Self::from_diagnostic(&RuntimeDiagnostic::info("console.runtime", "runtime", message))
+        Self::from_diagnostic(&RuntimeDiagnostic::info(
+            "console.runtime",
+            "runtime",
+            message,
+        ))
     }
 
     pub fn with_lines(mut self, lines: Vec<String>) -> Self {
@@ -301,10 +303,7 @@ impl NativeRuntimeController {
                 RuntimeLaunchFailure::from(format!("resolve editor executable: {error}"))
             })?;
             let player = resolve_player_executable(&executable);
-            Some(PlayerPreflight::probe(
-                &player,
-                env!("CARGO_PKG_VERSION"),
-            )?)
+            Some(PlayerPreflight::probe(&player, env!("CARGO_PKG_VERSION"))?)
         };
         let registry = ProjectSessionRegistry::load_or_legacy(&project.path, project.project_type);
         let session = if let Some(id) = project.settings.runtime.startup_session {
@@ -370,7 +369,10 @@ impl NativeRuntimeController {
                 None
             }
         };
-        let safe_settings = RuntimeHostSettings::from_engine(settings);
+        let mut safe_settings = RuntimeHostSettings::from_engine(settings);
+        // Play presentation pacing belongs to the game. Window size, instances,
+        // VSync and launch mode remain host preferences in the editor.
+        safe_settings.runtime.fps_limit = project.settings.runtime.fps_limit.clamp(15, 120);
         let manifest = RuntimeManifest {
             project_id: project.id,
             session_id: Some(session.id.0),
@@ -395,9 +397,8 @@ impl NativeRuntimeController {
             ));
             env!("CARGO_PKG_VERSION").to_string()
         } else {
-            let preflight = player_preflight.ok_or_else(|| {
-                RuntimeLaunchFailure::from("runtime preflight did not run")
-            })?;
+            let preflight = player_preflight
+                .ok_or_else(|| RuntimeLaunchFailure::from("runtime preflight did not run"))?;
             let player_path = preflight.executable.path.clone();
             let directory = std::env::temp_dir().join(format!("raf-runtime-{instance}"));
             std::fs::create_dir(&directory)
@@ -871,16 +872,13 @@ mod tests {
         );
 
         assert!(entries.len() <= MAX_POLL_DIAGNOSTICS * 2);
-        assert!(entries
-            .iter()
-            .any(|entry| entry.level == LogLevel::Error));
+        assert!(entries.iter().any(|entry| entry.level == LogLevel::Error));
     }
 
     #[test]
     fn launch_failure_carries_the_same_diagnostic_to_console_and_banner() {
-        let failure = RuntimeLaunchFailure::from(
-            "player executable not found: C:/build/aurarafi-player.exe",
-        );
+        let failure =
+            RuntimeLaunchFailure::from("player executable not found: C:/build/aurarafi-player.exe");
         let entry = failure.console_entry();
         let notice = failure.notice();
 

@@ -342,6 +342,12 @@ fn editor_is_live(path: &Path) -> bool {
 }
 
 pub(super) fn launch_editor_if_needed(path: &Path) -> CliResult<()> {
+    if !path.is_dir() {
+        return Err(format!(
+            "Project path does not exist or is not a directory: {}. Run `raf editors` to list known projects.",
+            path.display()
+        ));
+    }
     if editor_is_live(path) {
         return Ok(());
     }
@@ -349,8 +355,10 @@ pub(super) fn launch_editor_if_needed(path: &Path) -> CliResult<()> {
     // MCP owns stdin/stdout for JSON-RPC. A launched editor must never inherit
     // those handles: its tracing output uses ANSI colors and corrupts the
     // protocol stream for the whole session.
+    // The editor resolves its startup project from the first positional
+    // argument. A `--project` flag is ignored and the editor would open the
+    // Hub instead, so it must be passed positionally.
     std::process::Command::new(&editor)
-        .arg("--project")
         .arg(path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

@@ -9,6 +9,7 @@ description = "Visual editor UI for AuraRafi engine"
 raf_core = { workspace = true }
 raf_render = { workspace = true }
 raf_assets = { workspace = true }
+raf_particles = { workspace = true }
 raf_electronics = { workspace = true }
 raf_hardware = { workspace = true }
 raf_nodes = { workspace = true }
@@ -27,6 +28,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+arboard = { workspace = true }
 notify = { workspace = true }
 dirs-next = "2"
 ron = { workspace = true }

@@ -14,7 +14,13 @@ use super::parser::ParsedCommand;
 
 pub trait ParsedCommandExecutor {
     fn execute_parsed(&mut self, command: &ParsedCommand) -> CommandOutput;
-    fn verify_output(&self, _command: &ParsedCommand, _output: &CommandOutput) -> Option<raf_core::VerificationSummary> { None }
+    fn verify_output(
+        &self,
+        _command: &ParsedCommand,
+        _output: &CommandOutput,
+    ) -> Option<raf_core::VerificationSummary> {
+        None
+    }
 
     /// Current live scene count for hosts that can preflight a construction
     /// budget. Non-scene domains keep the default and are not constrained by
@@ -65,8 +71,12 @@ impl<E: ParsedCommandExecutor> CommandEndpoint for CommandGateway<E> {
         }
         let name = request.name.trim_start_matches('/').to_ascii_lowercase();
         if (name.starts_with("behavior.")
-            || matches!(name.as_str(),"ui.document.create"|"ui.document.apply"|"ui.document.undo")
+            || matches!(
+                name.as_str(),
+                "ui.document.create" | "ui.document.apply" | "ui.document.undo"
+            )
             || name.starts_with("prefab.")
+            || name.starts_with("assembly.")
             || matches!(name.as_str(), "lighting.set" | "lighting.reset"))
             && !request.dry_run
             && !request.confirm
@@ -210,8 +220,14 @@ fn validate_execution_budget(
             // The file is resolved by the domain executor. Reserve its hard cap
             // rather than under-reporting an unknown subtree as one entity.
             "prefab.instantiate" => raf_core::scene::prefab::MAX_PREFAB_NODES,
-            "behavior.parameter" | "behavior.attach" | "behavior.detach" | "prefab.capture"
-            | "lighting.set" | "lighting.reset" => 1,
+            "assembly.revert" | "assembly.update" => raf_core::scene::prefab::MAX_PREFAB_NODES,
+            "behavior.parameter"
+            | "behavior.attach"
+            | "behavior.detach"
+            | "prefab.capture"
+            | "assembly.make_unique"
+            | "lighting.set"
+            | "lighting.reset" => 1,
             "game.batch" | "scene.batch" | "game.repair" | "scene.repair" => request
                 .params
                 .get("operations")
@@ -266,6 +282,7 @@ fn validate_execution_budget(
 fn requested_scene_entities(name: &str, params: &Value) -> usize {
     match name {
         "prefab.instantiate" => raf_core::scene::prefab::MAX_PREFAB_NODES,
+        "assembly.revert" | "assembly.update" => raf_core::scene::prefab::MAX_PREFAB_NODES,
         "game.camera" => {
             usize::from(params.get("action").and_then(Value::as_str) == Some("create"))
         }

@@ -1,4 +1,11 @@
 //! Session-local tree state and contextual navigation.
+//!
+//! Retained hierarchy rows only publish `tooltip_key`/`tooltip_value`; the
+//! Game workbench host decides whether tooltips are painted. If tooltips are
+//! disabled there, restore them in the host pipeline instead of changing the
+//! keys emitted by `hierarchy_surface`. Rectangular selection likewise only
+//! mutates transient model state and emits regular `hierarchy.select:*`
+//! commands, so scene mutations remain outside this module.
 use super::*;
 use crate::panels::hierarchy_model::details::HierarchyViewState;
 #[path = "hierarchy_state_store.rs"]

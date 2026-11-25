@@ -615,15 +615,39 @@ impl NativeGameWorkbench {
             256,
         );
         self.host.session_mut().interaction.controls.set_text(
+            "assets.particle-name",
+            &self.assets_surface.particle_name,
+            64,
+        );
+        self.host.session_mut().interaction.controls.set_text(
             "assets.rename-value",
             &self.assets_surface.rename_value,
             128,
         );
+        if let Some(import) = self.assets_import.as_ref() {
+            self.host.session_mut().interaction.controls.set_text(
+                crate::panels::assets_surface::ASSETS_IMPORT_NAME_ID,
+                &import.options.name,
+                128,
+            );
+        }
         self.host.session_mut().interaction.controls.set_text(
             "console.input",
             self.console.input(),
             4096,
         );
+        self.host.session_mut().interaction.controls.set_text(
+            "console.search",
+            &self.console.search_query,
+            256,
+        );
+        if self.console.auto_scroll {
+            let controls = &mut self.host.session_mut().interaction.controls;
+            let max = controls.scroll_max_offset("console.log-scroll");
+            if max[1] > 0.0 {
+                controls.set_scroll_offset("console.log-scroll", [0.0, max[1]]);
+            }
+        }
         self.host.session_mut().interaction.controls.set_text(
             "agent.input",
             &self.agent_panel.borrow_mut().input_text,
@@ -959,6 +983,41 @@ impl NativeGameWorkbench {
                 let key = format!("inspector.camera.{field}.text");
                 if focused.as_deref() != Some(key.as_str()) || !controls.has_text(&key) {
                     controls.set_text(key, value.to_string(), 24);
+                }
+            }
+        }
+        for (field, value) in [
+            ("clip", node.audio_source.clip.clone()),
+            ("bus", node.audio_source.bus.slug().to_string()),
+            (
+                "min_distance",
+                format!("{:.2}", node.audio_source.min_distance),
+            ),
+            (
+                "max_distance",
+                format!("{:.2}", node.audio_source.max_distance),
+            ),
+        ] {
+            let key = format!("inspector.audio.{field}.text");
+            if focused.as_deref() != Some(key.as_str()) || !controls.has_text(&key) {
+                controls.set_text(key, value, 256);
+            }
+        }
+        if let Some(light) = &node.light {
+            for (field, value) in [
+                ("intensity", format!("{:.2}", light.intensity)),
+                ("range", format!("{:.2}", light.range)),
+                (
+                    "color",
+                    format!(
+                        "#{:02X}{:02X}{:02X}",
+                        light.color[0], light.color[1], light.color[2]
+                    ),
+                ),
+            ] {
+                let key = format!("inspector.light.{field}.text");
+                if focused.as_deref() != Some(key.as_str()) || !controls.has_text(&key) {
+                    controls.set_text(key, value, 24);
                 }
             }
         }

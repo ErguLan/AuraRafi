@@ -429,9 +429,13 @@ fn import_files(
         );
     }
 
+    const MAX_IMPORT_FILES: usize = 256;
+    const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+    const MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
     let mut imported = 0;
     let mut skipped = 0;
-    for source in files {
+    let mut total_bytes = 0u64;
+    for source in files.iter().take(MAX_IMPORT_FILES) {
         if worker_generation.load(Ordering::Acquire) != generation {
             return (imported, skipped, true, None);
         }
@@ -439,9 +443,14 @@ fn import_files(
             skipped += 1;
             continue;
         };
-        if !metadata.is_file() {
+        if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
             skipped += 1;
             continue;
+        }
+        total_bytes = total_bytes.saturating_add(metadata.len());
+        if total_bytes > MAX_TOTAL_BYTES {
+            skipped += files.len().saturating_sub(imported + skipped);
+            break;
         }
         let Some(file_name) = source.file_name().and_then(|name| name.to_str()) else {
             skipped += 1;
@@ -461,7 +470,14 @@ fn import_files(
             skipped += 1;
         }
     }
-    (imported, skipped, false, None)
+    let truncated = files.len() > MAX_IMPORT_FILES;
+    let message = truncated.then(|| {
+        format!(
+            "Import limited to {MAX_IMPORT_FILES} files; {} were not copied.",
+            files.len() - MAX_IMPORT_FILES
+        )
+    });
+    (imported, skipped, false, message)
 }
 
 fn unique_asset_destination(root: &Path, file_name: &str) -> PathBuf {
@@ -503,6 +519,7 @@ fn project_file_icon(name: &str) -> UiIconId {
         .as_deref()
     {
         Some("ron") | Some("scene") => UiIconId::Scene,
+        Some("rafparticle") => UiIconId::Sun,
         Some("rhai") | Some("rs") | Some("lua") | Some("cpp") => UiIconId::Node,
         // The current semantic icon registry does not yet expose dedicated
         // image/audio IDs. Keep the classification truthful without inventing

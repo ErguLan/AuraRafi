@@ -143,7 +143,9 @@ UI, narrow-layout/DPI and GPU/CPU visual parity still require manual checking.
 World lighting lives in `raf_core::environment::EnvironmentSettings`, persisted
 inside `SceneGraph` / `scene.ron`. Existing scenes without the field deserialize
 to **Neutral**: the previous background and Lambert lighting are preserved.
-Lighting is not an entity or asset, and never requires a character or selection.
+World lighting is not an entity or asset, and never requires a character or
+selection. Local point/spot lights are separate entity components; see
+[Entity lights](#entity-lights-point-and-spot) below.
 
 Open **Hierarchy > Lighting**. The left dock navigates Overview, Sun, Sky,
 Shadows, Time and Performance; properties use the existing right Inspector.
@@ -169,7 +171,53 @@ contract below. Imported skyboxes, contact shadows, cascades, GI, volumetrics an
 physically calibrated photometry remain **not implemented**. Advanced graphics
 presets do not activate these missing capabilities or implicitly enable shadows.
 
-## Units and ownership
+## Entity lights (point and spot)
+
+Local lights are authored on ordinary scene nodes through the shared
+`SceneLight` component (`crates/raf_core/src/scene/light.rs`). They are not a
+second world-lighting system: Sun, sky and ambient remain in
+`EnvironmentSettings`, while entity lights illuminate nearby geometry.
+
+- **Point**: emits in every direction from the entity origin.
+- **Spot**: emits along the entity's local -Z axis and uses an outer cone. The
+  current frame encoder derives a fixed 0.7 inner-to-outer falloff ratio;
+  `inner_cone_degrees` is authored and validated, but the exact inner angle is
+  not used by the shader yet.
+- **Color**: three sRGB bytes. Shading converts them to linear RGB; intensity is
+  a multiplier, not lux.
+- **Range**: reach in metres. Intensity reaches zero at that distance.
+- **Enabled**: a disabled light keeps its authored values but contributes
+  nothing.
+- Defaults: color `[255, 226, 170]`, intensity `1.0`, range `8.0`, inner cone
+  `28°`, outer cone `52°`, enabled.
+
+Validation is authoritative in `SceneLight::validate`: intensity must be finite
+and within `0..64`, range within `0.05..10000` metres, and spot cones require
+`0 <= inner < outer <= 179` degrees. Invalid values reject the command without
+editing the scene.
+
+Authoring:
+
+```text
+/game.add primitive=empty name=Lamp light={"kind":"point","intensity":2,"range":6}
+/game.light action=create name=Spot kind=spot intensity=3 range=8 outer_cone_degrees=48
+/game.light action=update target=Spot intensity=1.5
+/game.light action=update target=Lamp enabled=false
+```
+
+The Agent tools `light_create` and `light_update` route through `game.add` and
+`game.update`; `scene_component` also accepts `light` for Inspector-style edits.
+
+Entity lights do **not** cast shadows. There is one directional Sun shadow map
+for world lighting, not one shadow map per local light. Per-light shadows,
+cascades, contact shadows, GI and volumetrics are not implemented.
+
+The scene pipeline collects at most **8 enabled local lights per frame** and
+chooses them by influence around the camera focus. This is a per-profile budget:
+higher render profiles do not raise it yet, and a scene with more lights keeps
+the remaining components authored but unlit for that frame. The same bounded
+contract is shared by the GPU path and the CPU recovery path.
+
 
 The Inspector displays degrees and hours. The Host API and command protocol use
 **radians and seconds**. Colors are three sRGB bytes (0..255); shading uses linear

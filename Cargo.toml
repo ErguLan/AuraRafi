@@ -9,6 +9,7 @@ members = [
     "crates/raf_assets",
     "crates/raf_electronics",
     "crates/raf_nodes",
+    "crates/raf_particles",
     "crates/raf_ai",
     "crates/raf_net",
     "crates/raf_hardware",
@@ -29,7 +30,7 @@ default-members = ["editor"]
 version = "0.12.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/AuraRafi/AuraRafi"
+repository = "https://github.com/ErguLan/AuraRafi"
 
 [workspace.dependencies]
 raf_agb = { path = "crates/raf_agb" }
@@ -122,6 +123,7 @@ raf_editor = { path = "crates/raf_editor" }
 raf_assets = { path = "crates/raf_assets" }
 raf_electronics = { path = "crates/raf_electronics" }
 raf_nodes = { path = "crates/raf_nodes" }
+raf_particles = { path = "crates/raf_particles" }
 raf_ai = { path = "crates/raf_ai" }
 raf_net = { path = "crates/raf_net" }
 raf_hardware = { path = "crates/raf_hardware" }

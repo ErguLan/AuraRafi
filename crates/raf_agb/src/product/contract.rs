@@ -2,6 +2,8 @@ use glam::{Mat4, Vec3};
 
 use crate::{Error, Frame, Instance, Result, Texture, Vertex};
 
+pub use crate::device::{LOCAL_LIGHT_STRIDE, LOCAL_LIGHT_VECS, MAX_LOCAL_LIGHTS};
+
 /// Mesh positions and normals are in object space. Texture UVs start at top left.
 /// Vertex colors are linear. Material and texture indices belong to the packet.
 #[derive(Default)]
@@ -62,19 +64,39 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
+    /// Opaque, depth-tested, one-sided scene geometry.
     pub const SCENE: Self = Self {
         topology: Topology::TriangleList,
         blend: Blend::StraightAlpha,
         depth: Depth::ReadWrite,
-        cull: Cull::None,
+        cull: Cull::Back,
         lit: false,
+    };
+    /// Opaque, depth-tested scene geometry accepted for both windings.
+    pub const SCENE_TWO_SIDED: Self = Self {
+        cull: Cull::None,
+        ..Self::SCENE
     };
     pub const LIT: Self = Self {
         lit: true,
         ..Self::SCENE
     };
+    pub const LIT_TWO_SIDED: Self = Self {
+        lit: true,
+        ..Self::SCENE_TWO_SIDED
+    };
+    /// Clip-space or depth-disabled paint, always visible from both windings.
     pub const OVERLAY: Self = Self {
         depth: Depth::Disabled,
+        cull: Cull::None,
+        ..Self::SCENE
+    };
+    /// Camera-facing particle billboards: alpha, depth-tested against the
+    /// scene but never writing depth, and never culled.
+    pub const PARTICLE: Self = Self {
+        blend: Blend::StraightAlpha,
+        depth: Depth::ReadOnly,
+        cull: Cull::None,
         ..Self::SCENE
     };
 }
@@ -288,6 +310,16 @@ pub struct FrameUniforms {
     pub camera: Camera,
     pub light: DirectionalLight,
     pub environment: Environment,
+    /// Local point/spot lights, four `vec4`s per light:
+    /// `[position.xyz, range]`, `[color.rgb, intensity]`,
+    /// `[direction.xyz, kind]` and `[inner_cos, outer_cos, falloff, 0]`.
+    /// `kind` is 0 for point and 1 for spot. Up to [`MAX_LOCAL_LIGHTS`] are
+    /// active; the rest stay zero. Spot directions must be non-zero and are
+    /// normalized by the shader. Spot cosines must be in `0..=1`, with
+    /// `inner_cos >= outer_cos`.
+    pub entity_lights: [[f32; 4]; LOCAL_LIGHT_VECS],
+    /// `x` is the number of active entries in `entity_lights`; `yzw` stay zero.
+    pub entity_light_counts: [f32; 4],
     pub shadows: Option<ShadowUniforms>,
     pub scene_filter: bool,
     /// Monotonic playback time for passes that consume time.
@@ -319,6 +351,8 @@ impl Default for FrameUniforms {
                 toon_softness: 0.,
                 radiance_map: None,
             },
+            entity_lights: [[0.; 4]; LOCAL_LIGHT_VECS],
+            entity_light_counts: [0.; 4],
             shadows: None,
             scene_filter: false,
             time_seconds: 0.,
@@ -361,6 +395,7 @@ impl FrameUniforms {
         let [r, g, b] = self.light.color;
         let [ar, ag, ab] = self.environment.ambient_tint;
         let viewport = crate::device::validate_viewport(self.viewport)?;
+        validate_local_lights(&self.entity_lights, self.entity_light_counts)?;
         let shadow = self
             .shadows
             .map(|shadow| {
@@ -401,6 +436,8 @@ impl FrameUniforms {
                 self.environment.toon_steps,
                 self.environment.toon_softness,
             ],
+            lights: self.entity_lights,
+            light_counts: self.entity_light_counts,
             viewport,
             shadow,
             shadow_map: self
@@ -408,5 +445,169 @@ impl FrameUniforms {
                 .map(|shadow| (shadow.resolution, shadow.depth_key)),
             scene_filter: self.scene_filter,
         })
+    }
+}
+
+/// Accepts active lights only. Inactive slots may hold any finite or zero data
+/// because the shader stops at `count` and never reads them.
+fn validate_local_lights(lights: &[[f32; 4]; LOCAL_LIGHT_VECS], counts: [f32; 4]) -> Result<()> {
+    let count = counts[0];
+    if counts.iter().any(|value| !value.is_finite())
+        || !(0. ..=MAX_LOCAL_LIGHTS as f32).contains(&count)
+        || count.fract() != 0.
+    {
+        return Err(Error::Invalid("invalid local light count"));
+    }
+    for light in lights.chunks_exact(LOCAL_LIGHT_STRIDE).take(count as usize) {
+        let [position, color, direction, cone] = [light[0], light[1], light[2], light[3]];
+        if [position, color, direction, cone]
+            .into_iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+        {
+            return Err(Error::Invalid("non-finite local light"));
+        }
+        if position[3] <= 0. {
+            return Err(Error::Invalid("invalid local light range"));
+        }
+        if color[..3].iter().any(|value| *value < 0.) || color[3] < 0. {
+            return Err(Error::Invalid("invalid local light color or intensity"));
+        }
+        let kind = direction[3];
+        if kind != 0. && kind != 1. {
+            return Err(Error::Invalid("invalid local light kind"));
+        }
+        if !(0. ..=1.).contains(&cone[0]) || !(0. ..=1.).contains(&cone[1]) {
+            return Err(Error::Invalid("invalid local light cone"));
+        }
+        if cone[0] < cone[1] {
+            return Err(Error::Invalid(
+                "local light inner cosine is outside its outer cone",
+            ));
+        }
+        if cone[2] < 0. {
+            return Err(Error::Invalid("invalid local light falloff"));
+        }
+        if kind == 1.
+            && Vec3::new(direction[0], direction[1], direction[2]).length_squared() <= 1e-12
+        {
+            return Err(Error::Invalid("spot light direction is zero"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const POINT: [[f32; 4]; LOCAL_LIGHT_STRIDE] = [
+        [1., 2., 3., 12.],
+        [0.9, 0.7, 0.4, 2.5],
+        [0., 0., 0., 0.],
+        [0., 0., 0., 0.],
+    ];
+    const SPOT: [[f32; 4]; LOCAL_LIGHT_STRIDE] = [
+        [-1., 3., 2., 8.],
+        [0.3, 0.6, 1., 1.5],
+        [0., -1., 0., 1.],
+        [0.94, 0.82, 2., 0.],
+    ];
+
+    fn with_lights(lights: &[[[f32; 4]; LOCAL_LIGHT_STRIDE]], count: f32) -> FrameUniforms {
+        let mut uniforms = FrameUniforms::default();
+        for (index, light) in lights.iter().enumerate() {
+            let start = index * LOCAL_LIGHT_STRIDE;
+            uniforms.entity_lights[start..start + LOCAL_LIGHT_STRIDE].copy_from_slice(light);
+        }
+        uniforms.entity_light_counts = [count, 0., 0., 0.];
+        uniforms
+    }
+
+    #[test]
+    fn default_frame_has_no_local_lights() {
+        let frame = FrameUniforms::default().raster([0.; 4]).unwrap();
+        assert_eq!(frame.lights, [[0.; 4]; LOCAL_LIGHT_VECS]);
+        assert_eq!(frame.light_counts, [0.; 4]);
+
+        let uniforms = frame.uniforms([320, 180]);
+        assert_eq!(uniforms.lights, [[0.; 4]; LOCAL_LIGHT_VECS]);
+        assert_eq!(uniforms.light_counts, [0.; 4]);
+    }
+
+    #[test]
+    fn local_lights_round_trip_verbatim() {
+        let uniforms = with_lights(&[POINT, SPOT], 2.);
+        let frame = uniforms.raster([0.; 4]).unwrap();
+        assert_eq!(frame.lights[..4], POINT);
+        assert_eq!(frame.lights[4..8], SPOT);
+        assert_eq!(frame.light_counts, [2., 0., 0., 0.]);
+
+        let raster = frame.uniforms([640, 360]);
+        assert_eq!(raster.lights, uniforms.entity_lights);
+        assert_eq!(raster.light_counts, uniforms.entity_light_counts);
+    }
+
+    #[test]
+    fn accepts_eight_local_lights() {
+        let lights = [POINT; MAX_LOCAL_LIGHTS];
+        let uniforms = with_lights(&lights, MAX_LOCAL_LIGHTS as f32);
+        let frame = uniforms.raster([0.; 4]).unwrap();
+        assert_eq!(frame.light_counts[0], 8.);
+        assert_eq!(frame.lights.len(), 32);
+    }
+
+    #[test]
+    fn rejects_invalid_local_light_counts() {
+        for count in [-1., 0.5, 9., f32::NAN, f32::INFINITY] {
+            let uniforms = with_lights(&[POINT], count);
+            assert!(
+                matches!(uniforms.raster([0.; 4]), Err(Error::Invalid(_))),
+                "count {count} must be rejected"
+            );
+        }
+        let mut uniforms = with_lights(&[POINT], 1.);
+        uniforms.entity_light_counts[2] = f32::NAN;
+        assert!(matches!(
+            uniforms.raster([0.; 4]),
+            Err(Error::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_local_light_payloads() {
+        let mut zero_range = POINT;
+        zero_range[0][3] = 0.;
+        let mut negative_color = POINT;
+        negative_color[1][0] = -0.1;
+        let mut negative_intensity = POINT;
+        negative_intensity[1][3] = -1.;
+        let mut bad_kind = POINT;
+        bad_kind[2][3] = 2.;
+        let mut narrow_outer = SPOT;
+        narrow_outer[3][1] = 0.95;
+        let mut bad_cosine = SPOT;
+        bad_cosine[3][1] = 1.5;
+        let mut zero_direction = SPOT;
+        zero_direction[2] = [0., 0., 0., 1.];
+        let mut non_finite = POINT;
+        non_finite[0][0] = f32::NAN;
+
+        for light in [
+            zero_range,
+            negative_color,
+            negative_intensity,
+            bad_kind,
+            narrow_outer,
+            bad_cosine,
+            zero_direction,
+            non_finite,
+        ] {
+            let uniforms = with_lights(&[light], 1.);
+            assert!(
+                matches!(uniforms.raster([0.; 4]), Err(Error::Invalid(_))),
+                "{light:?} must be rejected"
+            );
+        }
     }
 }

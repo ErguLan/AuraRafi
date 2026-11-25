@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 //! # raf_editor
 //!
 //! AuraRafi editor boundary.
@@ -63,6 +65,7 @@ pub mod native_surface;
 pub mod native_workbench;
 pub(crate) mod nodes_history;
 pub mod panels;
+pub mod particle_assets;
 pub mod pcb_document;
 pub(crate) mod performance_pressure;
 pub mod project_catalog;

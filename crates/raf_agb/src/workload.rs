@@ -44,13 +44,25 @@ pub struct Texture {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DrawMode {
+    /// Opaque, one-sided scene geometry. It writes depth and culls backfaces.
     Scene,
     Overlay,
     DepthReadOnly,
     SceneNoDepth,
+    /// Opaque scene geometry accepted for both windings.
+    ///
+    /// Appended after the original variants so serde formats that encode the
+    /// variant index keep reading legacy captures.
+    SceneTwoSided,
+    /// Alpha-blended scene geometry. It tests depth but never writes it.
+    SceneTransparent,
+    /// Alpha-blended geometry accepted for both windings.
+    SceneTransparentTwoSided,
 }
 
 impl DrawMode {
+    /// Every mode except `Overlay` is clipped to the scene viewport. Only
+    /// `Overlay` reaches the full target for editor chrome and RafUI paint.
     pub fn is_scene(self) -> bool {
         self != Self::Overlay
     }

@@ -11,3 +11,5 @@
 
 pub mod mesh_data;
 pub mod primitives;
+
+pub use mesh_data::MeshData;

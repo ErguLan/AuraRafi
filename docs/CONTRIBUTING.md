@@ -15,7 +15,7 @@ provides guidelines and instructions for contributing.
 
 ```bash
 # Clone the repository
-git clone https://github.com/AuraRafi/AuraRafi.git
+git clone https://github.com/ErguLan/AuraRafi.git
 cd AuraRafi
 
 # Validate the editor path first

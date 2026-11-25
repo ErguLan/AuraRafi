@@ -23,8 +23,8 @@ pub(super) fn build_model_menu(
         .effective_provider(settings)
         .map(|config| config.provider)
         .unwrap_or(settings.default_ai_provider);
-    let plan_owned = settings.agent_openai_use_plan
-        && provider == raf_ai::provider::AiProvider::OpenAI;
+    let plan_owned =
+        settings.agent_openai_use_plan && provider == raf_ai::provider::AiProvider::OpenAI;
     let has_catalog = plan_owned
         || matches!(
             provider,
@@ -52,7 +52,10 @@ pub(super) fn build_model_menu(
         .iter()
         .filter(|item| item.value.starts_with("account:"))
         .count();
-    let catalog_count = items.iter().filter(|item| !item.pinned && !item.custom && !item.value.starts_with("account:")).count();
+    let catalog_count = items
+        .iter()
+        .filter(|item| !item.pinned && !item.custom && !item.value.starts_with("account:"))
+        .count();
     let custom_rows = if plan_owned { 0 } else { 3 };
     let row_total = usize::from(has_catalog)
         + usize::from(!status.is_empty())
@@ -84,26 +87,35 @@ pub(super) fn build_model_menu(
         .with_accessibility_role(UiAccessibilityRole::Menu);
 
     if has_catalog {
-        menu = menu.with_child(UiNode::new("agent.model.catalog.refresh", UiNodeKind::Button)
-            .with_class("agent-menu-item-accent")
-            .with_layout(UiLayout { padding: UiSpacing::xy(10.0, 8.0), ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill) })
-            .with_text_key("agent.account.refresh_models").with_text_style(UiTextStyle::button(tokens.accent_hot))
-            .with_accessibility_role(UiAccessibilityRole::MenuItem).focusable()
-            .with_event(UiEventBinding::command(UiEventKind::Click, "agent.catalog.refresh")));
+        menu = menu.with_child(
+            UiNode::new("agent.model.catalog.refresh", UiNodeKind::Button)
+                .with_class("agent-menu-item-accent")
+                .with_layout(UiLayout {
+                    padding: UiSpacing::xy(10.0, 8.0),
+                    ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill)
+                })
+                .with_text_key("agent.account.refresh_models")
+                .with_text_style(UiTextStyle::button(tokens.accent_hot))
+                .with_accessibility_role(UiAccessibilityRole::MenuItem)
+                .focusable()
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    "agent.catalog.refresh",
+                )),
+        );
     }
     if !status.is_empty() {
-        menu = menu.with_child(UiNode::new(
-            "agent.model.catalog.status",
-            UiNodeKind::Label,
-        )
-        .with_layout(
-            UiLayout::fixed(0.0, 30.0)
-                .with_width_mode(UiSizeMode::Fill)
-                .padding_xy(10.0, 4.0),
-        )
-        .with_text_value(status)
-        .with_text_overflow(UiTextOverflow::Ellipsis)
-        .with_text_style(UiTextStyle::button(tokens.text_muted)));
+        menu = menu.with_child(
+            UiNode::new("agent.model.catalog.status", UiNodeKind::Label)
+                .with_layout(
+                    UiLayout::fixed(0.0, 30.0)
+                        .with_width_mode(UiSizeMode::Fill)
+                        .padding_xy(10.0, 4.0),
+                )
+                .with_text_value(status)
+                .with_text_overflow(UiTextOverflow::Ellipsis)
+                .with_text_style(UiTextStyle::button(tokens.text_muted)),
+        );
     }
 
     // Custom id escape hatch first: one field, one confirmation, pins the
@@ -112,27 +124,43 @@ pub(super) fn build_model_menu(
     // Plan requests may only use the selected account's live catalog.
     if !plan_owned {
         menu = menu
-            .with_child(UiNode::new("agent.model.custom.divider", UiNodeKind::Separator)
-                .with_layout(UiLayout::fixed(0.0, 8.0).with_width_mode(UiSizeMode::Fill)))
+            .with_child(
+                UiNode::new("agent.model.custom.divider", UiNodeKind::Separator)
+                    .with_layout(UiLayout::fixed(0.0, 8.0).with_width_mode(UiSizeMode::Fill)),
+            )
             .with_child(model_text_input(
                 "agent.new-model.id",
                 "app.agent_model_id",
                 panel.new_model_id.clone(),
             ))
-            .with_child(UiNode::new("agent.model.confirm", UiNodeKind::Button)
-                .with_class("agent-menu-item-accent")
-                .with_layout(UiLayout { padding: UiSpacing::xy(10.0, 8.0), ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill) })
-                .with_text_key("app.agent_add_model_confirm")
-                .with_text_style(UiTextStyle::button(tokens.accent_hot))
-                .with_accessibility_role(UiAccessibilityRole::MenuItem)
-                .focusable()
-                .with_event(UiEventBinding::command(UiEventKind::Click, "agent.model.confirm")));
+            .with_child(
+                UiNode::new("agent.model.confirm", UiNodeKind::Button)
+                    .with_class("agent-menu-item-accent")
+                    .with_layout(UiLayout {
+                        padding: UiSpacing::xy(10.0, 8.0),
+                        ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill)
+                    })
+                    .with_text_key("app.agent_add_model_confirm")
+                    .with_text_style(UiTextStyle::button(tokens.accent_hot))
+                    .with_accessibility_role(UiAccessibilityRole::MenuItem)
+                    .focusable()
+                    .with_event(UiEventBinding::command(
+                        UiEventKind::Click,
+                        "agent.model.confirm",
+                    )),
+            );
     }
     if let Some(error) = panel.new_model_error.as_deref() {
-        menu = menu.with_child(UiNode::new("agent.model.error", UiNodeKind::Label)
-            .with_layout(UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill).padding_xy(10.0, 4.0))
-            .with_text_value(error.to_string())
-            .with_text_style(UiTextStyle::button(tokens.danger)));
+        menu = menu.with_child(
+            UiNode::new("agent.model.error", UiNodeKind::Label)
+                .with_layout(
+                    UiLayout::fixed(0.0, 30.0)
+                        .with_width_mode(UiSizeMode::Fill)
+                        .padding_xy(10.0, 4.0),
+                )
+                .with_text_value(error.to_string())
+                .with_text_style(UiTextStyle::button(tokens.danger)),
+        );
     }
 
     let mut last_lane = 0u8;
@@ -153,22 +181,19 @@ pub(super) fn build_model_menu(
                 3 => "ai_models.plan",
                 _ => "ai_models.custom",
             };
-            menu = menu
-                .with_child(crate::panels::ai_model_options::model_header_row(
-                    &paint,
-                    header_key,
-                    settings.language,
-                ));
+            menu = menu.with_child(crate::panels::ai_model_options::model_header_row(
+                &paint,
+                header_key,
+                settings.language,
+            ));
             last_lane = lane;
         }
-        menu = menu.with_child(
-            crate::panels::ai_model_options::model_option_row(
-                item,
-                &paint,
-                &actions,
-                "agent-menu-item",
-            ),
-        );
+        menu = menu.with_child(crate::panels::ai_model_options::model_option_row(
+            item,
+            &paint,
+            &actions,
+            "agent-menu-item",
+        ));
     }
 
     // Custom id escape hatch: one field, one confirmation, pins the model.

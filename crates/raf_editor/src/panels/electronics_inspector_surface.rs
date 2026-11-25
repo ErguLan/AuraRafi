@@ -534,13 +534,25 @@ fn trace_panel(palette: StudioUiPalette, model: &ElectronicsInspectorModel) -> U
         padding: UiSpacing::same(8.0),
         ..UiLayout::fill(UiFlow::Column)
     })
-    .with_child(section_title(palette, "trace", if model.kind == "PCB via" { "electronics.pcb.via_label" } else { "electronics.desktop.trace" }))
+    .with_child(section_title(
+        palette,
+        "trace",
+        if model.kind == "PCB via" {
+            "electronics.pcb.via_label"
+        } else {
+            "electronics.desktop.trace"
+        },
+    ))
     .with_child(
         UiNode::new("electronics.inspector.trace.name", UiNodeKind::Label)
             .with_icon(
-                UiIcon::new(if model.kind == "PCB via" { UiIconId::CadVia } else { UiIconId::CadRoute })
-                    .with_size(UiIconSize::Custom(28))
-                    .with_tint(t.accent),
+                UiIcon::new(if model.kind == "PCB via" {
+                    UiIconId::CadVia
+                } else {
+                    UiIconId::CadRoute
+                })
+                .with_size(UiIconSize::Custom(28))
+                .with_tint(t.accent),
             )
             .with_text_value(&model.title)
             .with_text_style(UiTextStyle {

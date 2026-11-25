@@ -1,0 +1,216 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            os: windows-2022
+            target: x86_64-pc-windows-gnu
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    env:
+      CARGO_TARGET_DIR: target_gnu
+      CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: "1"
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libudev-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libfontconfig1-dev \
+            libvulkan1 \
+            mesa-vulkan-drivers \
+            cmake \
+            clang \
+            lld
+
+      - name: Install MinGW
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc
+
+      - name: Add MinGW to PATH
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Select Windows GNU target
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "CARGO_BUILD_TARGET=${{ matrix.target }}" >> "$GITHUB_ENV"
+
+      - name: Build editor
+        run: cargo build -p aura_rafi_editor --release
+
+      - name: Build player
+        run: cargo build -p raf_player --bin aurarafi-player --release
+
+      - name: Package Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          name="aura-rafi-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          strip "target_gnu/${TARGET}/release/aura_rafi_editor" "target_gnu/${TARGET}/release/aurarafi-player"
+          tar -czf "dist/${name}.tar.gz" \
+            -C "target_gnu/${TARGET}/release" aura_rafi_editor aurarafi-player \
+            -C "$GITHUB_WORKSPACE" README.md LICENSE LICENSE-APACHE LICENSE-MIT NOTICE
+
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $name = "aura-rafi-$env:GITHUB_REF_NAME-${{ matrix.name }}"
+          Compress-Archive -Path @(
+            "target_gnu/${{ matrix.target }}/release/aura_rafi_editor.exe",
+            "target_gnu/${{ matrix.target }}/release/aurarafi-player.exe",
+            "README.md",
+            "LICENSE",
+            "LICENSE-APACHE",
+            "LICENSE-MIT",
+            "NOTICE"
+          ) -DestinationPath "dist/$name.zip"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  build-macos:
+    name: Build macOS arm64 (optional)
+    runs-on: macos-14
+    timeout-minutes: 120
+    continue-on-error: true
+    env:
+      CARGO_TARGET_DIR: target_gnu
+      CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: "1"
+      TARGET: aarch64-apple-darwin
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Build editor
+        run: cargo build -p aura_rafi_editor --release
+
+      - name: Build player
+        run: cargo build -p raf_player --bin aurarafi-player --release
+
+      - name: Package macOS
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          name="aura-rafi-${GITHUB_REF_NAME}-macos-arm64"
+          strip "target_gnu/${TARGET}/release/aura_rafi_editor" "target_gnu/${TARGET}/release/aurarafi-player"
+          tar -czf "dist/${name}.tar.gz" \
+            -C "target_gnu/${TARGET}/release" aura_rafi_editor aurarafi-player \
+            -C "$GITHUB_WORKSPACE" README.md LICENSE LICENSE-APACHE LICENSE-MIT NOTICE
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-arm64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-windows-x86_64
+          path: dist
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-linux-x86_64
+          path: dist
+
+      - name: List artifacts
+        run: ls -lah dist
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+  publish-macos:
+    name: Attach macOS artifact (optional)
+    needs: [publish, build-macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-macos-arm64
+          path: dist
+
+      - name: Attach macOS asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: false

@@ -280,8 +280,11 @@ fn hub_keeps_recent_project_menu_available_in_each_row() {
         ..HubSurfaceModel::default()
     };
 
-    let frame = build_hub_surface_with_model(StudioUiPalette::IndustrialDark, &model)
-        .build_frame(1_300, 900, [8, 11, 15, 255]);
+    let frame = build_hub_surface_with_model(StudioUiPalette::IndustrialDark, &model).build_frame(
+        1_300,
+        900,
+        [8, 11, 15, 255],
+    );
 
     assert!(frame
         .layout_boxes
@@ -317,8 +320,11 @@ fn hub_create_type_menu_has_no_dead_space() {
         create_type_menu_open: true,
         ..HubSurfaceModel::default()
     };
-    let frame = build_hub_surface_with_model(StudioUiPalette::IndustrialDark, &model)
-        .build_frame(1_300, 900, [8, 11, 15, 255]);
+    let frame = build_hub_surface_with_model(StudioUiPalette::IndustrialDark, &model).build_frame(
+        1_300,
+        900,
+        [8, 11, 15, 255],
+    );
 
     let menu = frame
         .layout_boxes

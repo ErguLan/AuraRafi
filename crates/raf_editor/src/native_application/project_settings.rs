@@ -1,10 +1,10 @@
 //! Project setting mutations applied from the Settings surface and commands.
 
-use raf_core::config::{RenderPreset, ScriptExecutionMode, ScriptLanguage};
+use raf_core::config::{ScriptExecutionMode, ScriptLanguage};
 use raf_core::project::{
-    BuildingStyle, GeometryDetailMode, ProjectSettings, TextureQualityMode,
-    ViewportResolutionMode,
+    BuildingStyle, GeometryDetailMode, ProjectSettings, TextureQualityMode, ViewportResolutionMode,
 };
+use raf_core::scene::ParticleQuality;
 
 use super::layout::project_layout_request;
 use super::NativeEditorApplication;
@@ -51,6 +51,11 @@ pub(super) fn apply_project_setting_toggle(
         "project-settings.animation-debug-draw" => {
             let changed = settings.runtime.animation_debug_draw != value;
             settings.runtime.animation_debug_draw = value;
+            changed
+        }
+        "project-settings.spatial-audio" => {
+            let changed = settings.runtime.audio.spatial_audio != value;
+            settings.runtime.audio.spatial_audio = value;
             changed
         }
         "project-settings.progress-enabled" => {
@@ -116,6 +121,11 @@ pub(super) fn apply_project_setting_toggle(
         "project-settings.world-streaming" => {
             let changed = settings.world_streaming_enabled != value;
             settings.world_streaming_enabled = value;
+            changed
+        }
+        "project-settings.particles-enabled" => {
+            let changed = settings.particle_runtime.enabled != value;
+            settings.particle_runtime.enabled = value;
             changed
         }
         "project-settings.electronics-snap-to-grid" => {
@@ -194,16 +204,82 @@ pub(super) fn apply_project_setting_range(
             settings.runtime.progress.autosave_seconds = next;
             changed
         }
+        "project-settings.audio-master" => {
+            let next = snap(value, 0.0, 1.0, 0.01);
+            let changed = settings.runtime.audio.master_volume != next;
+            settings.runtime.audio.master_volume = next;
+            changed
+        }
+        "project-settings.audio-music" => {
+            let next = snap(value, 0.0, 1.0, 0.01);
+            let changed = settings.runtime.audio.music_volume != next;
+            settings.runtime.audio.music_volume = next;
+            changed
+        }
+        "project-settings.audio-sfx" => {
+            let next = snap(value, 0.0, 1.0, 0.01);
+            let changed = settings.runtime.audio.sfx_volume != next;
+            settings.runtime.audio.sfx_volume = next;
+            changed
+        }
+        "project-settings.audio-voice" => {
+            let next = snap(value, 0.0, 1.0, 0.01);
+            let changed = settings.runtime.audio.voice_volume != next;
+            settings.runtime.audio.voice_volume = next;
+            changed
+        }
+        "project-settings.audio-ambient" => {
+            let next = snap(value, 0.0, 1.0, 0.01);
+            let changed = settings.runtime.audio.ambient_volume != next;
+            settings.runtime.audio.ambient_volume = next;
+            changed
+        }
         "project-settings.runtime-fixed-hz" => {
             let next = value.round().clamp(15.0, 120.0) as u32;
             let changed = next != settings.runtime.fixed_hz;
             settings.runtime.fixed_hz = next;
             changed
         }
+        "project-settings.runtime-fps-limit" => {
+            let next = value.round().clamp(15.0, 120.0) as u32;
+            let changed = next != settings.runtime.fps_limit;
+            settings.runtime.fps_limit = next;
+            changed
+        }
         "project-settings.runtime-max-entities" => {
             let next = value.round().clamp(100.0, 100_000.0) as usize;
             let changed = next != settings.runtime.max_entities;
             settings.runtime.max_entities = next;
+            changed
+        }
+        "project-settings.particle-max" => {
+            let next = value.round().clamp(0.0, 250_000.0) as u32;
+            let changed = next != settings.particle_runtime.max_particles;
+            settings.particle_runtime.max_particles = next;
+            changed
+        }
+        "project-settings.particle-time-scale" => {
+            let next = value.clamp(0.0, 4.0);
+            let changed = (next - settings.particle_runtime.time_scale).abs() > f32::EPSILON;
+            settings.particle_runtime.time_scale = next;
+            changed
+        }
+        "project-settings.particle-wind-x" => {
+            let next = value.clamp(-20.0, 20.0);
+            let changed = (next - settings.particle_runtime.wind[0]).abs() > f32::EPSILON;
+            settings.particle_runtime.wind[0] = next;
+            changed
+        }
+        "project-settings.particle-wind-y" => {
+            let next = value.clamp(-20.0, 20.0);
+            let changed = (next - settings.particle_runtime.wind[1]).abs() > f32::EPSILON;
+            settings.particle_runtime.wind[1] = next;
+            changed
+        }
+        "project-settings.particle-wind-z" => {
+            let next = value.clamp(-20.0, 20.0);
+            let changed = (next - settings.particle_runtime.wind[2]).abs() > f32::EPSILON;
+            settings.particle_runtime.wind[2] = next;
             changed
         }
         "project-settings.building-snap-step" => {
@@ -349,26 +425,6 @@ pub(super) fn apply_project_setting_command(
             settings.script_execution_mode = ScriptExecutionMode::Runtime;
             ProjectSettingsMutation::without_layout(changed)
         }
-        "project-settings.preset.potato" => {
-            let changed = settings.runtime_render_preset != RenderPreset::Potato;
-            settings.runtime_render_preset = RenderPreset::Potato;
-            ProjectSettingsMutation::without_layout(changed)
-        }
-        "project-settings.preset.low" => {
-            let changed = settings.runtime_render_preset != RenderPreset::Low;
-            settings.runtime_render_preset = RenderPreset::Low;
-            ProjectSettingsMutation::without_layout(changed)
-        }
-        "project-settings.preset.medium" if settings.allow_gpu_features => {
-            let changed = settings.runtime_render_preset != RenderPreset::Medium;
-            settings.runtime_render_preset = RenderPreset::Medium;
-            ProjectSettingsMutation::without_layout(changed)
-        }
-        "project-settings.preset.high" if settings.allow_gpu_features => {
-            let changed = settings.runtime_render_preset != RenderPreset::High;
-            settings.runtime_render_preset = RenderPreset::High;
-            ProjectSettingsMutation::without_layout(changed)
-        }
         "project-settings.viewport-resolution.efficient" => {
             let changed = settings.viewport_resolution != ViewportResolutionMode::Efficient;
             settings.viewport_resolution = ViewportResolutionMode::Efficient;
@@ -412,6 +468,22 @@ pub(super) fn apply_project_setting_command(
         "project-settings.texture-quality.detailed" => {
             let changed = settings.texture_quality != TextureQualityMode::Detailed;
             settings.texture_quality = TextureQualityMode::Detailed;
+            ProjectSettingsMutation::without_layout(changed)
+        }
+        "project-settings.particle-quality.potato"
+        | "project-settings.particle-quality.low"
+        | "project-settings.particle-quality.medium"
+        | "project-settings.particle-quality.high"
+        | "project-settings.particle-quality.epic" => {
+            let quality = match command {
+                "project-settings.particle-quality.potato" => ParticleQuality::Potato,
+                "project-settings.particle-quality.low" => ParticleQuality::Low,
+                "project-settings.particle-quality.medium" => ParticleQuality::Medium,
+                "project-settings.particle-quality.high" => ParticleQuality::High,
+                _ => ParticleQuality::Epic,
+            };
+            let changed = settings.particle_runtime.quality != quality;
+            settings.particle_runtime.quality = quality;
             ProjectSettingsMutation::without_layout(changed)
         }
         _ => ProjectSettingsMutation::default(),
@@ -482,7 +554,8 @@ impl NativeEditorApplication {
         if let Some(field) = key.strip_prefix("project-settings.runtime.") {
             let result = self.project.as_mut().map(|project| -> Result<(), String> {
                 if field == "gravity"
-                    && (!project.settings.enable_physics || !project.settings.runtime.advanced_physics)
+                    && (!project.settings.enable_physics
+                        || !project.settings.runtime.advanced_physics)
                 {
                     return Err("runtime.invalid_setting".into());
                 }
@@ -632,4 +705,3 @@ impl NativeEditorApplication {
         }
     }
 }
-

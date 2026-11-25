@@ -376,14 +376,19 @@ impl ProductFrameBuilder {
                         instance,
                     });
                 }
-                GraphicCommand::DrawMeshBatch { mesh_id, instances } => {
+                GraphicCommand::DrawMeshBatch {
+                    mesh_id,
+                    texture_id,
+                    instances,
+                } => {
                     if instances.is_empty() {
                         return Err(format!(
                             "scene frame command {index}: mesh batch {mesh_id} is empty"
                         ));
                     }
                     let mesh = self.mesh_index(frame, *mesh_id)?;
-                    let material = self.material_index(None)?;
+                    let texture = self.texture_index(frame, *texture_id, *mesh_id)?;
+                    let material = self.material_index(texture)?;
                     let instances = instances
                         .iter()
                         .map(|instance| {
@@ -902,6 +907,8 @@ pub fn scene_frame_uniforms(frame: &SceneRenderFrame) -> FrameUniforms {
             },
         });
     }
+    uniforms.entity_lights = frame.commands.entity_lights.words;
+    uniforms.entity_light_counts[0] = frame.commands.entity_lights.count as f32;
     // `scene_filter` has no authored environment toggle; the composing host
     // owns it and the device gate owns capability removal.
     uniforms.scene_filter = false;
@@ -969,8 +976,10 @@ pub(crate) fn linear_rgba(color: [u8; 4]) -> [f32; 4] {
 
 fn product_pipeline(kind: BasicPipelineKind) -> Result<Pipeline, String> {
     Ok(match kind {
-        BasicPipelineKind::FlatColor | BasicPipelineKind::FlatColorTwoSided => Pipeline::SCENE,
-        BasicPipelineKind::PbrLit | BasicPipelineKind::PbrLitTwoSided => Pipeline::LIT,
+        BasicPipelineKind::FlatColor => Pipeline::SCENE,
+        BasicPipelineKind::FlatColorTwoSided => Pipeline::SCENE_TWO_SIDED,
+        BasicPipelineKind::PbrLit => Pipeline::LIT,
+        BasicPipelineKind::PbrLitTwoSided => Pipeline::LIT_TWO_SIDED,
         BasicPipelineKind::XRay => Pipeline::OVERLAY,
         BasicPipelineKind::UnlitWireframe => {
             return Err(
@@ -982,6 +991,7 @@ fn product_pipeline(kind: BasicPipelineKind) -> Result<Pipeline, String> {
         // World-space retained UI is a textured quad. It keeps straight alpha
         // and disables depth, which is exactly the product overlay pipeline.
         BasicPipelineKind::UiSurface | BasicPipelineKind::UiSurfaceOverlay => Pipeline::OVERLAY,
+        BasicPipelineKind::Particle => Pipeline::PARTICLE,
     })
 }
 

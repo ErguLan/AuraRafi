@@ -18,8 +18,10 @@ const MAX_HISTORY_LINES: usize = 40;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
     Info,
+    Success,
     Warning,
     Error,
+    Verbose,
 }
 
 impl LogLevel {
@@ -29,6 +31,16 @@ impl LogLevel {
             RuntimeDiagnosticSeverity::Info => Self::Info,
             RuntimeDiagnosticSeverity::Warning => Self::Warning,
             RuntimeDiagnosticSeverity::Error => Self::Error,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Success => "success",
+            Self::Warning => "warning",
+            Self::Error => "error",
+            Self::Verbose => "verbose",
         }
     }
 }
@@ -63,6 +75,12 @@ pub struct ConsolePanel {
     pub auto_scroll: bool,
     pub filters_open: bool,
     pub filter_level: Option<LogLevel>,
+    pub wrap_messages: bool,
+    pub show_timestamps: bool,
+    pub terminal_palette: bool,
+    pub search_query: String,
+    pub source_filter: Option<String>,
+    pub column_widths: [f32; 2],
     input: String,
     pub command_history: Vec<String>,
     history_cursor: Option<usize>,
@@ -86,6 +104,12 @@ impl Default for ConsolePanel {
             auto_scroll: true,
             filters_open: false,
             filter_level: None,
+            wrap_messages: false,
+            show_timestamps: true,
+            terminal_palette: false,
+            search_query: String::new(),
+            source_filter: None,
+            column_widths: [76.0, 84.0],
             input: String::new(),
             command_history: Vec::new(),
             history_cursor: None,
@@ -150,6 +174,7 @@ impl ConsolePanel {
 
     pub fn log_command_output_with_id(&mut self, output: CommandOutput) -> ConsoleEntryId {
         let level = match output.level {
+            CommandLevel::Info if output.changed => LogLevel::Success,
             CommandLevel::Info => LogLevel::Info,
             CommandLevel::Warning => LogLevel::Warning,
             CommandLevel::Error => LogLevel::Error,
@@ -210,23 +235,72 @@ impl ConsolePanel {
     }
 
     pub fn filtered_entries(&self) -> impl Iterator<Item = (usize, &LogEntry)> {
-        self.entries.iter().enumerate().filter(|(_, entry)| {
-            self.filter_level
-                .map(|filter| entry.level == filter)
-                .unwrap_or(true)
-        })
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| self.entry_matches(entry))
     }
 
     /// Provides filtered entries keyed by their stable model IDs.
     pub fn filtered_entries_with_ids(&self) -> impl Iterator<Item = (ConsoleEntryId, &LogEntry)> {
         self.entries
             .iter()
-            .filter(|entry| {
-                self.filter_level
-                    .map(|filter| entry.level == filter)
-                    .unwrap_or(true)
-            })
+            .filter(|entry| self.entry_matches(entry))
             .map(|entry| (entry.id, entry))
+    }
+
+    fn entry_matches(&self, entry: &LogEntry) -> bool {
+        if let Some(filter) = self.filter_level {
+            if entry.level != filter {
+                return false;
+            }
+        }
+        if let Some(source) = &self.source_filter {
+            if entry.sender.as_deref() != Some(source.as_str()) {
+                return false;
+            }
+        }
+        let query = self.search_query.trim().to_ascii_lowercase();
+        if !query.is_empty() {
+            let message_matches = entry.message.to_ascii_lowercase().contains(&query);
+            let source_matches = entry
+                .sender
+                .as_deref()
+                .is_some_and(|sender| sender.to_ascii_lowercase().contains(&query));
+            let code_matches = entry
+                .code
+                .as_deref()
+                .is_some_and(|code| code.to_ascii_lowercase().contains(&query));
+            if !message_matches && !source_matches && !code_matches {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Visible rows after all filters, collapsing consecutive plain duplicates
+    /// into one line with a repeat count. Console spam becomes one `xN` row
+    /// instead of dozens of identical entries.
+    pub fn visible_groups(&self) -> Vec<(ConsoleEntryId, &LogEntry, usize)> {
+        let mut groups: Vec<(ConsoleEntryId, &LogEntry, usize)> = Vec::new();
+        for (id, entry) in self.filtered_entries_with_ids() {
+            let repeats_previous = groups.last().is_some_and(|(_, last, _)| {
+                last.block.is_none()
+                    && entry.block.is_none()
+                    && last.level == entry.level
+                    && last.message == entry.message
+                    && last.sender == entry.sender
+                    && last.code == entry.code
+            });
+            if repeats_previous {
+                if let Some((_, _, count)) = groups.last_mut() {
+                    *count += 1;
+                }
+                continue;
+            }
+            groups.push((id, entry, 1));
+        }
+        groups
     }
 
     /// Looks up an entry without depending on its current position in the log.
@@ -293,6 +367,155 @@ impl ConsolePanel {
         self.filter_level = level;
         self.touch_content();
         true
+    }
+
+    pub fn set_wrap_messages(&mut self, enabled: bool) -> bool {
+        if self.wrap_messages == enabled {
+            return false;
+        }
+        self.wrap_messages = enabled;
+        self.touch_content();
+        true
+    }
+
+    pub fn set_show_timestamps(&mut self, enabled: bool) -> bool {
+        if self.show_timestamps == enabled {
+            return false;
+        }
+        self.show_timestamps = enabled;
+        self.touch_content();
+        true
+    }
+
+    pub fn set_search_query(&mut self, query: impl Into<String>) -> bool {
+        let query = query.into();
+        if self.search_query == query {
+            return false;
+        }
+        self.search_query = query;
+        self.touch_content();
+        true
+    }
+
+    pub fn set_source_filter(&mut self, source: Option<String>) -> bool {
+        if self.source_filter == source {
+            return false;
+        }
+        self.source_filter = source;
+        self.touch_content();
+        true
+    }
+
+    pub fn toggle_source_filter(&mut self, source: &str) -> bool {
+        if self.source_filter.as_deref() == Some(source) {
+            self.set_source_filter(None)
+        } else {
+            self.set_source_filter(Some(source.to_string()))
+        }
+    }
+
+    pub fn set_terminal_palette(&mut self, enabled: bool) -> bool {
+        if self.terminal_palette == enabled {
+            return false;
+        }
+        self.terminal_palette = enabled;
+        self.touch_content();
+        true
+    }
+
+    pub fn column_width(&self, index: usize) -> f32 {
+        self.column_widths.get(index).copied().unwrap_or(76.0)
+    }
+
+    pub fn resize_column(&mut self, index: usize, delta: f32) -> bool {
+        let Some(width) = self.column_widths.get_mut(index) else {
+            return false;
+        };
+        let next = (*width + delta).clamp(44.0, 240.0);
+        if (next - *width).abs() < f32::EPSILON {
+            return false;
+        }
+        *width = next;
+        true
+    }
+
+    pub fn reset_column_widths(&mut self) -> bool {
+        if self.column_widths == [76.0, 84.0] {
+            return false;
+        }
+        self.column_widths = [76.0, 84.0];
+        true
+    }
+
+    pub fn error_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.level == LogLevel::Error)
+            .count()
+    }
+
+    /// Whether the active search matches this entry. Used by the surface to
+    /// mark matched rows and tint the matched portion of the message.
+    pub fn entry_has_search_match(&self, entry: &LogEntry) -> bool {
+        let query = self.search_query.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            return false;
+        }
+        entry.message.to_ascii_lowercase().contains(&query)
+            || entry
+                .sender
+                .as_deref()
+                .is_some_and(|sender| sender.to_ascii_lowercase().contains(&query))
+            || entry
+                .code
+                .as_deref()
+                .is_some_and(|code| code.to_ascii_lowercase().contains(&query))
+    }
+
+    /// Plain-text mirror of the visible log, suitable for files and clipboards.
+    pub fn export_text(&self) -> String {
+        let mut out = String::new();
+        out.push_str("AuraRafi console log\n");
+        for entry in self
+            .entries
+            .iter()
+            .filter(|entry| self.entry_matches(entry))
+        {
+            out.push_str(&format!(
+                "{} [{}]{} {}",
+                entry.timestamp,
+                entry.level.as_str().to_ascii_uppercase(),
+                entry
+                    .sender
+                    .as_deref()
+                    .map(|sender| format!(" {sender}:"))
+                    .unwrap_or_default(),
+                entry.message
+            ));
+            out.push('\n');
+            if let Some(block) = &entry.block {
+                for line in &block.lines {
+                    out.push_str("  ");
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                out.push_str(&block.json);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    pub fn recent_command(&self, index: usize) -> Option<&String> {
+        self.command_history.iter().rev().nth(index)
+    }
+
+    pub fn log_success(&mut self, message: impl Into<String>) -> ConsoleEntryId {
+        self.log_with_id(LogLevel::Success, message)
+    }
+
+    pub fn log_verbose(&mut self, message: impl Into<String>) -> ConsoleEntryId {
+        self.log_with_id(LogLevel::Verbose, message)
     }
 
     pub fn submit_input(&mut self) -> Option<ConsoleSubmission> {
@@ -382,7 +605,7 @@ impl ConsolePanel {
 }
 
 fn now_timestamp() -> String {
-    chrono::Local::now().format("%H:%M:%S").to_string()
+    chrono::Local::now().format("%H:%M:%S%.3f").to_string()
 }
 
 #[cfg(test)]
@@ -451,7 +674,74 @@ mod tests {
         let entry = console.entry(id).expect("structured entry");
         assert_eq!(entry.sender.as_deref(), Some("runtime"));
         assert_eq!(entry.code.as_deref(), Some("console.runtime_timeout"));
-        assert_eq!(entry.timestamp.len(), 8);
+        assert_eq!(entry.timestamp.len(), 12);
+    }
+
+    #[test]
+    fn consecutive_duplicates_collapse_into_one_visible_group() {
+        let mut console = ConsolePanel::default();
+        console.log(LogLevel::Info, "Lighting unchanged.");
+        console.log(LogLevel::Info, "Lighting unchanged.");
+        console.log(LogLevel::Info, "Lighting unchanged.");
+        console.log(LogLevel::Warning, "Lighting unchanged.");
+
+        let groups = console.visible_groups();
+        let repeated = groups
+            .iter()
+            .find(|(_, entry, _)| entry.message == "Lighting unchanged.");
+        assert!(groups.iter().any(|(_, _, repeat)| *repeat == 3));
+        assert!(groups
+            .iter()
+            .any(|(_, entry, repeat)| entry.level == LogLevel::Warning && *repeat == 1));
+        assert!(repeated.is_some());
+    }
+
+    #[test]
+    fn search_matches_message_source_and_code() {
+        let mut console = ConsolePanel::default();
+        console.log_structured(
+            LogLevel::Info,
+            "runtime",
+            "Texture compiled",
+            Some("asset.texture".to_string()),
+            None,
+        );
+        assert!(console.set_search_query("texture"));
+        assert_eq!(console.filtered_entries().count(), 1);
+        assert!(console.set_search_query("runtime"));
+        assert_eq!(console.filtered_entries().count(), 1);
+        assert!(console.set_search_query("does-not-exist"));
+        assert_eq!(console.filtered_entries().count(), 0);
+        let entry = console
+            .entries
+            .iter()
+            .find(|entry| entry.sender.as_deref() == Some("runtime"))
+            .unwrap();
+        assert!(!console.entry_has_search_match(entry));
+        let entry_id = entry.id;
+        console.set_search_query("texture");
+        let entry = console.entry(entry_id).unwrap();
+        assert!(console.entry_has_search_match(entry));
+    }
+
+    #[test]
+    fn column_resize_is_bounded_and_resettable() {
+        let mut console = ConsolePanel::default();
+        assert!(console.resize_column(0, 40.0));
+        assert_eq!(console.column_width(0), 116.0);
+        assert!(console.resize_column(1, -500.0));
+        assert_eq!(console.column_width(1), 44.0);
+        assert!(console.reset_column_widths());
+        assert_eq!(console.column_widths, [76.0, 84.0]);
+    }
+
+    #[test]
+    fn export_text_keeps_timestamps_levels_sources_and_blocks() {
+        let mut console = ConsolePanel::default();
+        console.log_user("User", "/help");
+        let text = console.export_text();
+        assert!(text.contains("AuraRafi console log"));
+        assert!(text.contains("[INFO] User: /help"));
     }
 
     #[test]

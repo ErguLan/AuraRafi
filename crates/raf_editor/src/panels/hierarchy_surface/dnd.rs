@@ -1,4 +1,8 @@
 //! Drag ghost and box-selection overlays of the retained Hierarchy.
+//!
+//! The box selection is armed from the empty tree background; row drags keep
+//! their reorder gesture. The rect is received in retained-surface coordinates
+//! from the pointer press/drag events and never mutates the scene.
 
 use raf_render::api_graphic_basic::ui_surface::StudioUiPalette;
 use raf_ui::{UiLayout, UiNode, UiNodeKind, UiStyle, UiTextStyle};
@@ -26,11 +30,11 @@ pub(super) fn box_selection_node(palette: StudioUiPalette, selection: raf_ui::Ui
         .with_class("hierarchy-box-selection")
         .with_layout(UiLayout::absolute(selection).with_z_index(240))
         .with_style(UiStyle {
-            fill: [232, 133, 28, 24],
+            fill: tokens.selection,
             border: tokens.accent,
             text: tokens.accent,
             border_width: 1.0,
-            radius: 2.0,
-            opacity: 0.72,
+            radius: raf_ui::UiTheme::raf_ui().metrics.corner_radius,
+            opacity: 0.9,
         })
 }

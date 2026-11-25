@@ -1,7 +1,6 @@
 //! Workbench status line, console projection and assets operation receipts.
 
 use super::*;
-use crate::console::LogLevel;
 
 impl NativeGameWorkbench {
     pub(crate) fn authoring_status(&mut self, key: &str) {
@@ -69,11 +68,7 @@ impl NativeGameWorkbench {
         }
         let json = serde_json::json!({
             "code": code.as_str(),
-            "severity": match level {
-                LogLevel::Info => "info",
-                LogLevel::Warning => "warning",
-                LogLevel::Error => "error",
-            },
+            "severity": level.as_str(),
             "source": source.as_str(),
             "at_ms": at_ms,
         })

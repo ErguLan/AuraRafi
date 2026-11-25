@@ -91,7 +91,7 @@ impl LatencyWindow {
         let values = &mut sorted[..self.len];
         values.sort_unstable();
 
-        let percent = (percent.min(100) as usize * self.len + 99) / 100;
+        let percent = (percent.min(100) as usize * self.len).div_ceil(100);
         let index = percent.saturating_sub(1).min(self.len - 1);
         values[index]
     }

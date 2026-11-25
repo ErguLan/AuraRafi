@@ -178,6 +178,12 @@ impl ViewportBridge {
         self.camera.view_projection(width, height)
     }
 
+    /// Projection for a temporary look-through camera while editor navigation
+    /// keeps its own saved state.
+    pub fn view_projection_for(&self, camera: &Camera, width: f32, height: f32) -> Mat4 {
+        camera.view_projection(width, height)
+    }
+
     pub fn stats(&self) -> &FrameStats {
         &self.renderer.stats
     }
@@ -376,6 +382,18 @@ impl ViewportBridge {
         )
     }
 
+    pub fn pick_edit_face_point(
+        &self,
+        scene: &SceneGraph,
+        view_proj: &Mat4,
+        vp_w: f32,
+        vp_h: f32,
+        pointer: [f32; 2],
+    ) -> Option<(u32, [f32; 3])> {
+        self.edit_session
+            .pick_face_point(scene, view_proj, vp_w, vp_h, pointer)
+    }
+
     pub fn begin_edit_drag(
         &mut self,
         scene: &SceneGraph,
@@ -391,18 +409,18 @@ impl ViewportBridge {
 
     pub fn drag_selected_vertices(
         &mut self,
-        scene: &SceneGraph,
-        selected: Option<SceneNodeId>,
+        scene: &mut SceneGraph,
         move_sensitivity: f32,
         current_pointer: [f32; 2],
+        axis: Option<usize>,
     ) -> bool {
         self.edit_session.drag_selected_vertices(
             scene,
-            selected,
             &self.camera,
             self.orbit_distance,
             move_sensitivity,
             current_pointer,
+            axis,
         )
     }
 
@@ -844,6 +862,33 @@ impl ViewportBridge {
         options: RenderOptions,
         vertex_edit_enabled: bool,
     ) -> SceneRenderFrame {
+        self.build_scene_frame_with_camera(
+            scene,
+            vp_w,
+            vp_h,
+            selected,
+            bg_color,
+            light_dir,
+            options,
+            vertex_edit_enabled,
+            None,
+        )
+    }
+
+    /// Build a frame through an optional entity camera. `None` keeps the
+    /// editor navigation camera used by the standard viewport path.
+    pub fn build_scene_frame_with_camera(
+        &mut self,
+        scene: &SceneGraph,
+        vp_w: f32,
+        vp_h: f32,
+        selected: &[SceneNodeId],
+        bg_color: [u8; 4],
+        light_dir: Vec3,
+        options: RenderOptions,
+        vertex_edit_enabled: bool,
+        camera_override: Option<&Camera>,
+    ) -> SceneRenderFrame {
         let mesh_override = if vertex_edit_enabled {
             self.edit_session
                 .mesh_override(scene, selected.first().copied())
@@ -853,7 +898,7 @@ impl ViewportBridge {
 
         self.renderer.build_frame(
             scene,
-            &self.camera,
+            camera_override.unwrap_or(&self.camera),
             vp_w,
             vp_h,
             selected,

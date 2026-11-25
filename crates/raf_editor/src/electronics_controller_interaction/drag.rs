@@ -28,7 +28,11 @@ pub(super) enum DragOutcome {
 /// press, instead of against the live pointer, is what keeps the choice frozen:
 /// a drag that travels past a neighbouring vertex would otherwise silently hand
 /// the gesture over to it and start moving the wrong point.
-pub(super) fn grabbed_vertex_index(points: &[Vec2], offset: Vec2, press_world: Vec2) -> Option<usize> {
+pub(super) fn grabbed_vertex_index(
+    points: &[Vec2],
+    offset: Vec2,
+    press_world: Vec2,
+) -> Option<usize> {
     points
         .iter()
         .enumerate()
@@ -132,7 +136,13 @@ impl NativeElectronicsEditor {
                         .iter()
                         .find(|component| component.component_id == source_id)
                         .map(|component| (component.position, component.locked))
-                        .or_else(|| self.pcb.vias.iter().find(|via| via.id == source_id).map(|via| (via.position, false)))
+                        .or_else(|| {
+                            self.pcb
+                                .vias
+                                .iter()
+                                .find(|via| via.id == source_id)
+                                .map(|via| (via.position, false))
+                        })
                 };
                 match position_and_locked {
                     Some((position, false)) => {
@@ -235,11 +245,20 @@ impl NativeElectronicsEditor {
         } else {
             if let Some(via) = self.pcb.vias.iter_mut().find(|via| via.id == component_id) {
                 let previous = via.position;
-                if previous.distance(target) <= f32::EPSILON { return DragOutcome::Unchanged; }
+                if previous.distance(target) <= f32::EPSILON {
+                    return DragOutcome::Unchanged;
+                }
                 via.position = target;
-                for trace in self.pcb.traces.iter_mut().filter(|trace| trace.net == via.net) {
+                for trace in self
+                    .pcb
+                    .traces
+                    .iter_mut()
+                    .filter(|trace| trace.net == via.net)
+                {
                     for point in &mut trace.points {
-                        if point.distance(previous) <= 0.0001 { *point = target; }
+                        if point.distance(previous) <= 0.0001 {
+                            *point = target;
+                        }
                     }
                 }
                 self.pcb.rebuild_airwires();
@@ -272,7 +291,12 @@ impl NativeElectronicsEditor {
     /// Clearing the anchor is the same gesture every CAD tool performs when a wire
     /// end is pulled off a pin, and the netlist and DRC report the lost
     /// connection instead of this layer inventing a validation of its own.
-    pub(super) fn move_wire_vertex(&mut self, wire_id: Uuid, index: usize, target: Vec2) -> DragOutcome {
+    pub(super) fn move_wire_vertex(
+        &mut self,
+        wire_id: Uuid,
+        index: usize,
+        target: Vec2,
+    ) -> DragOutcome {
         let Some((start, end)) = self
             .schematic
             .wires
@@ -306,7 +330,12 @@ impl NativeElectronicsEditor {
     }
 
     /// Moves one vertex of a PCB trace.
-    pub(super) fn move_trace_vertex(&mut self, trace_id: Uuid, index: usize, target: Vec2) -> DragOutcome {
+    pub(super) fn move_trace_vertex(
+        &mut self,
+        trace_id: Uuid,
+        index: usize,
+        target: Vec2,
+    ) -> DragOutcome {
         let Some(before) = self
             .pcb
             .traces

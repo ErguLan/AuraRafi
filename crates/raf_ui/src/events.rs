@@ -14,6 +14,7 @@ pub enum UiCursorIcon {
     Default,
     PointingHand,
     Text,
+    Crosshair,
     ResizeHorizontal,
     ResizeVertical,
     ResizeNorthEastSouthWest,

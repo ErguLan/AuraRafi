@@ -70,9 +70,7 @@ impl<'a> IconButton<'a> {
     pub fn build(self) -> UiNode {
         let mut node = UiNode::new(self.id, UiNodeKind::Button)
             .with_icon(UiIcon::new(self.icon).with_size(UiIconSize::Small))
-            .with_layout(
-                UiLayout::fixed(self.size, self.size).padding(UiSpacing::xy(3.0, 3.0)),
-            )
+            .with_layout(UiLayout::fixed(self.size, self.size).padding(UiSpacing::xy(3.0, 3.0)))
             .with_event(UiEventBinding::command(UiEventKind::Click, self.command));
 
         if let Some(class) = self.class {

@@ -26,6 +26,14 @@ pub enum Primitive {
     Cylinder,
     /// Rounded Y-axis solid, diameter 1 m and total height 2 m.
     Capsule,
+    /// Inclined wedge/ramp, 1x1x1 bounds.
+    Wedge,
+    /// Torus on the XZ plane with unit outer diameter.
+    Torus,
+    /// Regular prism along Y with a configurable side count.
+    Prism,
+    /// Camera-facing shaded disk that reads as a sphere while remaining flat.
+    Sphere2D,
 }
 
 impl Default for Primitive {
@@ -44,6 +52,10 @@ impl Primitive {
             Self::Plane => "Plane",
             Self::Cylinder => "Cylinder",
             Self::Capsule => "Capsule",
+            Self::Wedge => "Wedge",
+            Self::Torus => "Torus",
+            Self::Prism => "Prism",
+            Self::Sphere2D => "Sphere 2D",
         }
     }
 
@@ -56,6 +68,10 @@ impl Primitive {
             Self::Plane => "Plano",
             Self::Cylinder => "Cilindro",
             Self::Capsule => "Cápsula",
+            Self::Wedge => "Cuña",
+            Self::Torus => "Toro",
+            Self::Prism => "Prisma",
+            Self::Sphere2D => "Esfera 2D",
         }
     }
 }
@@ -85,8 +101,12 @@ impl NodeColor {
             Primitive::Cube => Self::rgb(224, 116, 24),
             Primitive::Sphere => Self::rgb(236, 236, 236),
             Primitive::Plane => Self::rgb(150, 150, 150),
-            Primitive::Cylinder => Self::rgb(58, 58, 58),
+            Primitive::Cylinder => Self::rgb(142, 148, 156),
             Primitive::Capsule => Self::rgb(170, 180, 192),
+            Primitive::Wedge => Self::rgb(198, 160, 112),
+            Primitive::Torus => Self::rgb(150, 166, 182),
+            Primitive::Prism => Self::rgb(176, 186, 198),
+            Primitive::Sphere2D => Self::rgb(236, 236, 236),
         }
     }
 }
@@ -159,9 +179,31 @@ pub struct SceneNode {
     /// Project-relative file under assets, resolved when preparing playback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation_asset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skin: Option<crate::scene::mesh_asset::SkinBinding>,
     /// Explicit game camera component. Ordinary objects never become cameras implicitly.
     #[serde(default)]
     pub game_camera: Option<crate::runtime_config::GameCamera>,
+    /// Optional local point/spot light authored on this entity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<crate::scene::SceneLight>,
+    /// Optional data-driven particle system instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub particle_system: Option<crate::scene::ParticleSystemComponent>,
+    /// Optional static imported mesh geometry source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_asset: Option<crate::scene::MeshAssetRef>,
+    /// Optional persistent editable topology authored through Tab Mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editable_mesh: Option<crate::scene::EditableMeshData>,
+    #[serde(default)]
+    pub surface: crate::scene::SurfaceStyle,
+    #[serde(default)]
+    pub pivot: crate::scene::PivotMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_marker: Option<crate::scene::SpawnMarker>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_assembly: Option<crate::scene::LinkedAssembly>,
     /// Organizational folder/group node inside the hierarchy.
     #[serde(default)]
     pub is_folder: bool,
@@ -215,7 +257,16 @@ impl SceneNode {
             physics_joints: Vec::new(),
             animation: None,
             animation_asset: None,
+            skin: None,
             game_camera: None,
+            light: None,
+            particle_system: None,
+            mesh_asset: None,
+            editable_mesh: None,
+            surface: Default::default(),
+            pivot: Default::default(),
+            spawn_marker: None,
+            linked_assembly: None,
             is_folder: false,
             source_asset: None,
             source_schema_version: None,
@@ -228,7 +279,7 @@ impl SceneNode {
 
     /// Create a node with a specific primitive.
     pub fn with_primitive(name: &str, primitive: Primitive) -> Self {
-        Self {
+        let mut node = Self {
             uuid: Uuid::new_v4(),
             name: name.to_string(),
             position: Vec3::ZERO,
@@ -242,7 +293,7 @@ impl SceneNode {
             visible: true,
             casts_shadows: true,
             receives_shadows: true,
-            locked: primitive != Primitive::Empty,
+            locked: false,
             entity_index: None,
             scripts: Vec::new(),
             variables: Vec::new(),
@@ -254,7 +305,16 @@ impl SceneNode {
             physics_joints: Vec::new(),
             animation: None,
             animation_asset: None,
+            skin: None,
             game_camera: None,
+            light: None,
+            particle_system: None,
+            mesh_asset: None,
+            editable_mesh: None,
+            surface: Default::default(),
+            pivot: Default::default(),
+            spawn_marker: None,
+            linked_assembly: None,
             is_folder: false,
             source_asset: None,
             source_schema_version: None,
@@ -262,7 +322,14 @@ impl SceneNode {
             stable_key: None,
             tags: Vec::new(),
             agent_origin: None,
+        };
+        if primitive == Primitive::Sphere2D {
+            // The billboard disk uses spherical normals on flat depth. It must
+            // not sample the directional shadow map against itself.
+            node.casts_shadows = false;
+            node.receives_shadows = false;
         }
+        node
     }
 
     /// Create a folder/group node. Uses Empty primitive but is semantically distinct.

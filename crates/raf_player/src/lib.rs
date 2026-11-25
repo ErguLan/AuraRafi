@@ -1,6 +1,6 @@
 //! Native player host. It does not depend on the editor, Hub or Agent.
 pub mod application;
-mod audio;
+pub mod audio;
 mod game_ui;
 mod graphics;
 pub mod headless;

@@ -125,9 +125,7 @@ impl Encoder<'_> {
                 if style.softness != [0.; 2]
                     && (layout.nine_slice.is_some() || layout.fit != ImageFit::Stretch)
                 {
-                    return Err(Error::Unsupported(
-                        "feather on a fitted or sliced image",
-                    ));
+                    return Err(Error::Unsupported("feather on a fitted or sliced image"));
                 }
                 let size = self.workload.textures[texture as usize].size;
                 let Some(layers) = Layers::new(quad.rect, style)? else {

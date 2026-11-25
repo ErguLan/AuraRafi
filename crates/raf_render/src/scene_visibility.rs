@@ -86,18 +86,29 @@ impl SceneVisibilityPolicy {
         bounds: SceneObjectBounds,
         previously_in_stream: bool,
     ) -> SceneVisibility {
-        let in_stream = if previously_in_stream {
-            self.intersects_loaded_regions_with_hysteresis(camera_position, bounds, true)
-        } else {
-            self.intersects_loaded_regions(camera_position, bounds)
-        };
-        if !in_stream {
+        if !self.stream_allows(camera_position, bounds, previously_in_stream) {
             return SceneVisibility::OutsideStream;
         }
         if !frustum.intersects_aabb(bounds.min, bounds.max) {
             return SceneVisibility::OutsideFrustum;
         }
         SceneVisibility::Visible
+    }
+
+    /// Stream admission without the camera frustum. Retained scene packets use
+    /// this to stay stable while the camera moves without rendering regions
+    /// that the stream has intentionally unloaded.
+    pub fn stream_allows(
+        self,
+        camera_position: Vec3,
+        bounds: SceneObjectBounds,
+        previously_in_stream: bool,
+    ) -> bool {
+        if previously_in_stream {
+            self.intersects_loaded_regions_with_hysteresis(camera_position, bounds, true)
+        } else {
+            self.intersects_loaded_regions(camera_position, bounds)
+        }
     }
 
     fn intersects_loaded_regions(self, camera_position: Vec3, bounds: SceneObjectBounds) -> bool {

@@ -10,6 +10,10 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+mod actions;
+mod contacts;
+mod motion_matching;
+mod physics_follow;
 #[cfg(test)]
 mod tests;
 
@@ -62,6 +66,8 @@ struct Reaction {
 struct Rig {
     owner: SceneNodeId,
     motion_layers: usize,
+    motion_match: Option<motion_matching::MotionSearch>,
+    action: actions::ActionPlayback,
     authored: AnimationRig,
     bindings: Vec<Vec<usize>>,
     reaction: Option<Reaction>,
@@ -72,6 +78,8 @@ pub struct AnimationPlayback {
     rigs: Vec<Rig>,
     targets: Vec<Target>,
     bones: Vec<(SceneNodeId, Uuid)>,
+    contacts: Vec<contacts::BoundContact>,
+    followers: Vec<physics_follow::BoundFollower>,
 }
 
 impl AnimationPlayback {
@@ -80,6 +88,7 @@ impl AnimationPlayback {
         let mut owned = HashSet::new();
         let mut protected = HashSet::new();
         let mut track_count = 0;
+        let mut followed_bodies = HashSet::new();
         let mut rigs = scene
             .iter()
             .filter(|(_, node)| !node.name.is_empty())
@@ -169,13 +178,40 @@ impl AnimationPlayback {
                     })
                 })
                 .transpose()?;
+            for contact in &rig.contacts {
+                let bound = contacts::BoundContact::bind(scene, owner, contact, &protected)?;
+                for path in &contact.chain[..2] {
+                    bind(path, AnimationChannel::Rotation)?;
+                }
+                playback.contacts.push(bound);
+            }
+            for follower in &rig.physics_follow {
+                if !followed_bodies.insert(follower.body) {
+                    return Err("Multiple animation rigs try to drive one physics body".into());
+                }
+                bind(&follower.path, AnimationChannel::Position)?;
+                bind(&follower.path, AnimationChannel::Rotation)?;
+                playback
+                    .followers
+                    .push(physics_follow::BoundFollower::bind(scene, owner, follower)?);
+            }
+            let motion_layers = rig
+                .layers
+                .iter()
+                .take_while(|layer| layer.motion_speed.is_some())
+                .count();
+            let motion_match = rig
+                .motion_match
+                .as_ref()
+                .map(|profile| {
+                    motion_matching::MotionSearch::prepare(&rig.layers[..motion_layers], profile)
+                })
+                .transpose()?;
             playback.rigs.push(Rig {
                 owner,
-                motion_layers: rig
-                    .layers
-                    .iter()
-                    .take_while(|layer| layer.motion_speed.is_some())
-                    .count(),
+                motion_layers,
+                motion_match,
+                action: Default::default(),
                 authored: rig.clone(),
                 bindings,
                 reaction,
@@ -200,6 +236,36 @@ impl AnimationPlayback {
         &self.bones
     }
 
+    pub(crate) fn solve_contacts(
+        &mut self,
+        scene: &mut SceneGraph,
+        physics: &mut crate::physics::PhysicsWorld,
+        gravity: Vec3,
+    ) {
+        if self.contacts.is_empty() {
+            return;
+        }
+        let up = (-gravity).try_normalize().unwrap_or(Vec3::Y);
+        for contact in &mut self.contacts {
+            contact.solve(scene, physics, up);
+        }
+    }
+
+    pub(crate) fn drive_bodies(&self, scene: &mut SceneGraph) {
+        for follower in &self.followers {
+            follower.drive(scene);
+        }
+    }
+
+    pub(crate) fn blend_physics(&mut self, scene: &mut SceneGraph) {
+        for follower in &mut self.followers {
+            follower.sample_goal(scene);
+        }
+        for follower in &self.followers {
+            follower.apply(scene);
+        }
+    }
+
     pub fn sample(
         &mut self,
         seconds: f64,
@@ -208,7 +274,7 @@ impl AnimationPlayback {
         if !seconds.is_finite() || seconds < 0.0 || !speed.is_finite() || speed < 0.0 {
             return Err("Animation sample time and speed must be finite and nonnegative".into());
         }
-        self.evaluate(seconds, |_| speed);
+        self.evaluate(seconds, |_| speed, true);
         Ok(self.targets.iter().map(|target| AnimationPose {
             node: target.node,
             rig: target.owner,
@@ -216,22 +282,30 @@ impl AnimationPlayback {
         }))
     }
 
-    fn evaluate(&mut self, seconds: f64, speed: impl Fn(SceneNodeId) -> f32) {
+    fn evaluate(&mut self, seconds: f64, speed: impl Fn(SceneNodeId) -> f32, preview: bool) {
         for target in &mut self.targets {
             target.pose = target.rest;
         }
         for rig in &self.rigs {
-            if rig.motion_layers != 0 {
+            if let Some(search) = &rig.motion_match {
+                motion_matching::apply(rig, search, seconds, speed(rig.owner), &mut self.targets);
+            } else if rig.motion_layers != 0 {
                 sample_motion(rig, seconds, speed(rig.owner), &mut self.targets);
             }
-            for (layer, bindings) in rig
+            for (index, (layer, bindings)) in rig
                 .authored
                 .layers
                 .iter()
                 .zip(&rig.bindings)
+                .enumerate()
                 .skip(rig.motion_layers)
             {
-                let Some((time, weight)) = layer.sample_at(seconds) else {
+                let layer_sample = if !preview && layer.action.is_some() {
+                    rig.action.sample(index, layer)
+                } else {
+                    layer.sample_at(seconds)
+                };
+                let Some((time, weight)) = layer_sample else {
                     continue;
                 };
                 for (track, &idx) in layer.tracks.iter().zip(bindings) {
@@ -278,19 +352,45 @@ impl AnimationPlayback {
         let up = gravity
             .and_then(|g| (-g).try_normalize())
             .unwrap_or(Vec3::Y);
-        self.evaluate(time, |id| {
-            let velocity = scene
-                .get(id)
-                .filter(|_| gravity.is_some())
-                .filter(|node| {
-                    node.rigid_body.enabled
-                        && node.rigid_body.body_type != raf_core::scene::RigidBodyType::Static
-                })
+        for rig in &mut self.rigs {
+            rig.action
+                .step(scene.get(rig.owner), &rig.authored.layers, dt);
+            let Some(search) = &mut rig.motion_match else {
+                continue;
+            };
+            let desired = scene
+                .get(rig.owner)
+                .filter(|node| node.rigid_body.enabled && gravity.is_some())
                 .map(|node| node.rigid_body.velocity)
-                .filter(|v| v.is_finite())
+                .filter(|value| value.is_finite())
                 .unwrap_or(Vec3::ZERO);
-            (velocity - up * velocity.dot(up)).length()
-        });
+            let (_, orientation, _) = scene
+                .world_matrix(rig.owner)
+                .to_scale_rotation_translation();
+            let local = orientation.inverse() * (desired - up * desired.dot(up));
+            search.step(
+                &rig.authored.layers,
+                if local.is_finite() { local } else { Vec3::ZERO },
+                dt,
+            );
+        }
+        self.evaluate(
+            time,
+            |id| {
+                let velocity = scene
+                    .get(id)
+                    .filter(|_| gravity.is_some())
+                    .filter(|node| {
+                        node.rigid_body.enabled
+                            && node.rigid_body.body_type != raf_core::scene::RigidBodyType::Static
+                    })
+                    .map(|node| node.rigid_body.velocity)
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(Vec3::ZERO);
+                (velocity - up * velocity.dot(up)).length()
+            },
+            false,
+        );
         let mut world_transforms = None;
         for rig in &mut self.rigs {
             let Some(reaction) = &mut rig.reaction else {

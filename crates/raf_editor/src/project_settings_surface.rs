@@ -51,10 +51,11 @@ pub fn build_project_settings_surface(
         settings_scroll = settings_scroll.with_child(electronics(palette, project));
     } else {
         settings_scroll = settings_scroll
+            .with_child(graphics(palette, project))
             .with_child(runtime(palette, project, global_console_commands_enabled))
+            .with_child(lighting(palette))
             .with_child(progress(palette, project))
-            .with_child(scripting(palette, project))
-            .with_child(graphics(palette, project));
+            .with_child(scripting(palette, project));
     }
 
     let root = UiNode::new("project-settings.root", UiNodeKind::Root)
@@ -222,12 +223,91 @@ fn runtime(
     global_console_commands_enabled: bool,
 ) -> UiNode {
     section(palette, "project-settings.runtime", "app.project_runtime")
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.runtime-fps-limit",
+            "runtime.fps_limit",
+            "project-settings.runtime-fps-limit",
+            project.settings.runtime.fps_limit as f32,
+            15.0,
+            120.0,
+            1.0,
+            format!("{} fps", project.settings.runtime.fps_limit),
+            false,
+        ))
         .with_child(toggle_row(
             palette,
             "project-settings.enable-audio",
             "app.enable_audio",
             "project-settings.enable-audio",
             project.settings.enable_audio,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "project-settings.spatial-audio",
+            "app.audio_spatial_enabled",
+            "project-settings.spatial-audio",
+            project.settings.runtime.audio.spatial_audio,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.audio-master",
+            "app.audio_master_volume",
+            "project-settings.audio-master",
+            project.settings.runtime.audio.master_volume,
+            0.0,
+            1.0,
+            0.01,
+            format!("{:.2}", project.settings.runtime.audio.master_volume),
+            !project.settings.enable_audio,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.audio-music",
+            "app.audio_music_volume",
+            "project-settings.audio-music",
+            project.settings.runtime.audio.music_volume,
+            0.0,
+            1.0,
+            0.01,
+            format!("{:.2}", project.settings.runtime.audio.music_volume),
+            !project.settings.enable_audio,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.audio-sfx",
+            "app.audio_sfx_volume",
+            "project-settings.audio-sfx",
+            project.settings.runtime.audio.sfx_volume,
+            0.0,
+            1.0,
+            0.01,
+            format!("{:.2}", project.settings.runtime.audio.sfx_volume),
+            !project.settings.enable_audio,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.audio-voice",
+            "app.audio_voice_volume",
+            "project-settings.audio-voice",
+            project.settings.runtime.audio.voice_volume,
+            0.0,
+            1.0,
+            0.01,
+            format!("{:.2}", project.settings.runtime.audio.voice_volume),
+            !project.settings.enable_audio,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.audio-ambient",
+            "app.audio_ambient_volume",
+            "project-settings.audio-ambient",
+            project.settings.runtime.audio.ambient_volume,
+            0.0,
+            1.0,
+            0.01,
+            format!("{:.2}", project.settings.runtime.audio.ambient_volume),
+            !project.settings.enable_audio,
         ))
         .with_child(toggle_row(
             palette,
@@ -304,7 +384,9 @@ fn runtime(
             "runtime.character_jump_height",
             "project-settings.character-jump-height",
             project.settings.runtime.character_jump_height,
-            0.0, 20.0, 0.05,
+            0.0,
+            20.0,
+            0.05,
             format!("{:.2}", project.settings.runtime.character_jump_height),
             !project.settings.enable_physics,
         ))
@@ -314,7 +396,9 @@ fn runtime(
             "runtime.character_speed",
             "project-settings.character-speed",
             project.settings.runtime.character_speed,
-            0.0, 100.0, 0.1,
+            0.0,
+            100.0,
+            0.1,
             format!("{:.2}", project.settings.runtime.character_speed),
             !project.settings.enable_physics,
         ))
@@ -324,8 +408,13 @@ fn runtime(
             "runtime.character_max_slope",
             "project-settings.character-max-slope",
             project.settings.runtime.character_max_slope_degrees,
-            0.0, 89.0, 1.0,
-            format!("{:.0}", project.settings.runtime.character_max_slope_degrees),
+            0.0,
+            89.0,
+            1.0,
+            format!(
+                "{:.0}",
+                project.settings.runtime.character_max_slope_degrees
+            ),
             !project.settings.enable_physics,
         ))
         .with_child(toggle_row(
@@ -422,7 +511,13 @@ fn runtime_text_row(
     label: &str,
     max_length: usize,
 ) -> UiNode {
-    runtime_text_row_disabled(palette, field, label, max_length, field == "progress_folder")
+    runtime_text_row_disabled(
+        palette,
+        field,
+        label,
+        max_length,
+        field == "progress_folder",
+    )
 }
 
 fn runtime_text_row_disabled(
@@ -450,6 +545,26 @@ fn runtime_text_row_disabled(
         .disabled(disabled)
         .with_layout(UiLayout::fixed(CONTROL_WIDTH, 30.0)),
     )
+}
+
+fn lighting(palette: StudioUiPalette) -> UiNode {
+    section(palette, "project-settings.lighting", "app.project_lighting")
+        .with_child(graphics_help_text(
+            palette,
+            "project-settings.lighting-description",
+            "app.project_lighting_desc",
+        ))
+        .with_child(
+            UiNode::new("project-settings.open-lighting", UiNodeKind::Button)
+                .with_class("project-settings-reset-panels")
+                .with_layout(UiLayout::fit_content())
+                .with_text_key("app.open_lighting")
+                .focusable()
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    "hierarchy.tab:lighting",
+                )),
+        )
 }
 
 fn progress(palette: StudioUiPalette, project: &Project) -> UiNode {
@@ -748,6 +863,114 @@ fn graphics(palette: StudioUiPalette, project: &Project) -> UiNode {
             palette,
             "project-settings.large-scene-culling-description",
             "app.large_scene_culling_desc",
+        ))
+        .with_child(toggle_row(
+            palette,
+            "project-settings.particles-enabled",
+            "app.particle_runtime_enabled",
+            "project-settings.particles-enabled",
+            project.settings.particle_runtime.enabled,
+        ))
+        .with_child(segment_row(
+            palette,
+            "project-settings.particle-quality",
+            "app.particle_quality",
+            &[
+                (
+                    "app.particle_quality.potato",
+                    "project-settings.particle-quality.potato",
+                    project.settings.particle_runtime.quality
+                        == raf_core::scene::ParticleQuality::Potato,
+                ),
+                (
+                    "app.particle_quality.low",
+                    "project-settings.particle-quality.low",
+                    project.settings.particle_runtime.quality
+                        == raf_core::scene::ParticleQuality::Low,
+                ),
+                (
+                    "app.particle_quality.medium",
+                    "project-settings.particle-quality.medium",
+                    project.settings.particle_runtime.quality
+                        == raf_core::scene::ParticleQuality::Medium,
+                ),
+                (
+                    "app.particle_quality.high",
+                    "project-settings.particle-quality.high",
+                    project.settings.particle_runtime.quality
+                        == raf_core::scene::ParticleQuality::High,
+                ),
+                (
+                    "app.particle_quality.epic",
+                    "project-settings.particle-quality.epic",
+                    project.settings.particle_runtime.quality
+                        == raf_core::scene::ParticleQuality::Epic,
+                ),
+            ],
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.particle-max",
+            "app.particle_runtime_max",
+            "project-settings.particle-max",
+            project.settings.particle_runtime.max_particles as f32,
+            0.0,
+            250_000.0,
+            1_000.0,
+            if project.settings.particle_runtime.max_particles == 0 {
+                "asset budget".to_string()
+            } else {
+                project.settings.particle_runtime.max_particles.to_string()
+            },
+            false,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.particle-time-scale",
+            "app.particle_runtime_time_scale",
+            "project-settings.particle-time-scale",
+            project.settings.particle_runtime.time_scale,
+            0.0,
+            4.0,
+            0.05,
+            format!("{:.2}x", project.settings.particle_runtime.time_scale),
+            false,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.particle-wind-x",
+            "app.particle_runtime_wind_x",
+            "project-settings.particle-wind-x",
+            project.settings.particle_runtime.wind[0],
+            -20.0,
+            20.0,
+            0.1,
+            format!("{:.2}", project.settings.particle_runtime.wind[0]),
+            false,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.particle-wind-y",
+            "app.particle_runtime_wind_y",
+            "project-settings.particle-wind-y",
+            project.settings.particle_runtime.wind[1],
+            -20.0,
+            20.0,
+            0.1,
+            format!("{:.2}", project.settings.particle_runtime.wind[1]),
+            false,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.particle-wind-z",
+            "app.particle_runtime_wind_z",
+            "project-settings.particle-wind-z",
+            project.settings.particle_runtime.wind[2],
+            -20.0,
+            20.0,
+            0.1,
+            format!("{:.2}", project.settings.particle_runtime.wind[2]),
+            false,
         ))
         .with_child(range_row_disabled(
             palette,
@@ -1242,7 +1465,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn project_settings_surface_keeps_the_six_legacy_sections() {
+    fn project_settings_surface_orders_game_sections_and_links_lighting() {
         let surface = build_project_settings_surface(
             StudioUiPalette::IndustrialDark,
             &Project {
@@ -1258,7 +1481,32 @@ mod tests {
             false,
         );
         let scroll = &surface.root.children[1];
-        assert_eq!(scroll.children.len(), 6);
+        let ids = scroll
+            .children
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "project-settings.overview",
+                "project-settings.layout",
+                "project-settings.saving",
+                "project-settings.graphics",
+                "project-settings.runtime",
+                "project-settings.lighting",
+                "project-settings.progress",
+                "project-settings.scripting",
+            ]
+        );
+        assert!(surface
+            .root
+            .find("project-settings.runtime-fps-limit.control")
+            .is_some());
+        assert!(surface
+            .root
+            .find("project-settings.open-lighting")
+            .is_some());
     }
 
     #[test]

@@ -6,9 +6,7 @@ fn node<'a>(root: &'a UiNode, id: &str) -> Option<&'a UiNode> {
     if root.id == id {
         return Some(root);
     }
-    root.children
-        .iter()
-        .find_map(|child| node(child, id))
+    root.children.iter().find_map(|child| node(child, id))
 }
 
 fn has_prefix(root: &UiNode, prefix: &str) -> bool {
@@ -77,16 +75,19 @@ fn evidence_gallery_renders_capture_map_selection_and_comparison() {
         }),
     );
     for result in [capture, map] {
-        let mut message = raf_ai::chat::ChatMessage::assistant(
-            &serde_json::to_string(&result).unwrap(),
-        );
+        let mut message =
+            raf_ai::chat::ChatMessage::assistant(&serde_json::to_string(&result).unwrap());
         message.role = MessageRole::Tool;
         panel.runtime.messages.push(message);
     }
     let artifacts = collect_evidence_artifacts(&panel);
     assert_eq!(artifacts.len(), 2);
-    assert!(artifacts.iter().any(|artifact| artifact.kind == EvidenceKind::Capture));
-    assert!(artifacts.iter().any(|artifact| artifact.kind == EvidenceKind::TopDownMap));
+    assert!(artifacts
+        .iter()
+        .any(|artifact| artifact.kind == EvidenceKind::Capture));
+    assert!(artifacts
+        .iter()
+        .any(|artifact| artifact.kind == EvidenceKind::TopDownMap));
     assert!(artifacts
         .iter()
         .find(|artifact| artifact.kind == EvidenceKind::TopDownMap)
@@ -97,11 +98,7 @@ fn evidence_gallery_renders_capture_map_selection_and_comparison() {
 
     panel.evidence_selected = vec![capture_uri.to_string()];
     panel.evidence_pinned = Some(capture_uri.to_string());
-    let detail = evidence_gallery(
-        StudioUiPalette::IndustrialDark,
-        &panel,
-        Language::English,
-    );
+    let detail = evidence_gallery(StudioUiPalette::IndustrialDark, &panel, Language::English);
     assert!(node(&detail, "agent.workspace.evidence.gallery").is_some());
     assert!(has_prefix(&detail, "agent.workspace.evidence.card."));
     assert!(node(
@@ -123,11 +120,7 @@ fn evidence_gallery_renders_capture_map_selection_and_comparison() {
 
     panel.evidence_selected = vec![capture_uri.to_string(), map_uri.to_string()];
     panel.evidence_compare = true;
-    let compare = evidence_gallery(
-        StudioUiPalette::IndustrialDark,
-        &panel,
-        Language::English,
-    );
+    let compare = evidence_gallery(StudioUiPalette::IndustrialDark, &panel, Language::English);
     assert!(node(&compare, "agent.workspace.evidence.compare").is_some());
     assert!(has_prefix(
         &compare,
@@ -141,10 +134,8 @@ fn evidence_gallery_renders_capture_map_selection_and_comparison() {
 
 #[test]
 fn world_panel_shows_brief_plan_issues_evidence_and_checkpoints() {
-    let root = std::env::temp_dir().join(format!(
-        "raf-world-panel-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("raf-world-panel-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&root).unwrap();
     let project = raf_core::project::Project::create(
         "WorldPanelDemo",
@@ -178,17 +169,13 @@ fn world_panel_shows_brief_plan_issues_evidence_and_checkpoints() {
             "preview": {"chunks": 2}
         }),
     );
-    let mut warning = AgentToolResult::success(
-        "Scene check",
-        serde_json::json!({"ok": true}),
-    );
+    let mut warning = AgentToolResult::success("Scene check", serde_json::json!({"ok": true}));
     warning
         .warnings
         .push("One aisle is below the requested width.".to_string());
     for result in [plan, warning] {
-        let mut message = raf_ai::chat::ChatMessage::assistant(
-            &serde_json::to_string(&result).unwrap(),
-        );
+        let mut message =
+            raf_ai::chat::ChatMessage::assistant(&serde_json::to_string(&result).unwrap());
         message.role = MessageRole::Tool;
         panel.runtime.messages.push(message);
     }
@@ -199,11 +186,7 @@ fn world_panel_shows_brief_plan_issues_evidence_and_checkpoints() {
     assert!(model.plan.is_some());
     assert_eq!(model.issues.len(), 1);
 
-    let panel_node = world_panel(
-        StudioUiPalette::IndustrialDark,
-        Language::English,
-        &model,
-    );
+    let panel_node = world_panel(StudioUiPalette::IndustrialDark, Language::English, &model);
     for id in [
         "agent.workspace.world",
         "agent.workspace.world.brief",
@@ -216,7 +199,10 @@ fn world_panel_shows_brief_plan_issues_evidence_and_checkpoints() {
         "agent.workspace.world.evidence.open",
         "agent.workspace.world.checkpoints",
     ] {
-        assert!(node(&panel_node, id).is_some(), "missing world panel node {id}");
+        assert!(
+            node(&panel_node, id).is_some(),
+            "missing world panel node {id}"
+        );
     }
     let _ = std::fs::remove_dir_all(root);
 }

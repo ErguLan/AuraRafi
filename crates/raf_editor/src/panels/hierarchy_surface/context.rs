@@ -1,9 +1,7 @@
 //! Context menus of the retained Hierarchy and their viewport-bounded geometry.
 
 use raf_core::scene::Primitive;
-use raf_render::api_graphic_basic::ui_surface::{
-    StudioUiPalette, UiIcon, UiIconId, UiIconSize,
-};
+use raf_render::api_graphic_basic::ui_surface::{StudioUiPalette, UiIcon, UiIconId, UiIconSize};
 use raf_ui::{
     UiAlign, UiEventBinding, UiEventKind, UiFlow, UiLayout, UiNode, UiNodeKind, UiOverflow,
     UiSizeMode, UiSpacing, UiStyle, UiSurfaceMaterial, UiTextStyle,
@@ -278,9 +276,9 @@ fn primitive_menu_item(
         )
         .with_icon(
             UiIcon::new(match primitive {
-                Primitive::Cube => UiIconId::Cube,
-                Primitive::Sphere => UiIconId::Sphere,
-                Primitive::Cylinder => UiIconId::Cylinder,
+                Primitive::Cube | Primitive::Wedge => UiIconId::Cube,
+                Primitive::Sphere | Primitive::Sphere2D | Primitive::Torus => UiIconId::Sphere,
+                Primitive::Cylinder | Primitive::Prism => UiIconId::Cylinder,
                 Primitive::Capsule => UiIconId::Capsule,
                 Primitive::Plane => UiIconId::Plane,
                 Primitive::Empty => UiIconId::Node,

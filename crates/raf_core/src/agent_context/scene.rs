@@ -92,7 +92,11 @@ pub fn scene_digest(
         if node.source_asset.is_some() {
             source_assets += 1;
         }
-        if let Some(role) = node.semantic_role.as_deref().filter(|role| !role.is_empty()) {
+        if let Some(role) = node
+            .semantic_role
+            .as_deref()
+            .filter(|role| !role.is_empty())
+        {
             *roles.entry(role.to_string()).or_default() += 1;
         }
         for tag in &node.tags {
@@ -490,8 +494,7 @@ pub fn scene_inspect(
         if partial {
             format!(
                 "Inspected {} entity(ies); {} target(s) were not found.",
-                item_count,
-                unresolved_count
+                item_count, unresolved_count
             )
         } else if found {
             format!("Inspected {item_count} entity(ies).")
@@ -509,9 +512,9 @@ pub fn scene_inspect(
         }),
     );
     if partial {
-        result
-            .warnings
-            .push(format!("Some targets were not resolved: {unresolved_text}."));
+        result.warnings.push(format!(
+            "Some targets were not resolved: {unresolved_text}."
+        ));
     }
     result
 }
@@ -534,7 +537,11 @@ pub fn selection_info(scene: &SceneGraph, selected: &[SceneNodeId]) -> AgentObse
     )
 }
 
-pub(super) fn scene_item(scene: &SceneGraph, id: SceneNodeId, include_details: bool) -> Option<Value> {
+pub(super) fn scene_item(
+    scene: &SceneGraph,
+    id: SceneNodeId,
+    include_details: bool,
+) -> Option<Value> {
     if !scene.is_valid_node(id) {
         return None;
     }
@@ -569,6 +576,37 @@ pub(super) fn scene_item(scene: &SceneGraph, id: SceneNodeId, include_details: b
     item.insert("kind".to_string(), json!(node_kind(node)));
     item.insert("primitive".to_string(), json!(node.primitive.label()));
     item.insert("has_camera".to_string(), json!(node.game_camera.is_some()));
+    item.insert("has_light".to_string(), json!(node.light.is_some()));
+    item.insert(
+        "light_kind".to_string(),
+        json!(node.light.as_ref().map(|light| light.kind)),
+    );
+    item.insert(
+        "mesh_asset".to_string(),
+        json!(node.mesh_asset.as_ref().map(|mesh| &mesh.path)),
+    );
+    item.insert(
+        "has_editable_mesh".to_string(),
+        json!(node.editable_mesh.is_some()),
+    );
+    let editable_mesh_summary = node.editable_mesh.as_ref().map(|mesh| {
+        json!({
+            "revision": mesh.revision,
+            "vertices": mesh.vertices.len(),
+            "faces": mesh.face_count(),
+        })
+    });
+    item.insert("editable_mesh".to_string(), json!(editable_mesh_summary));
+    item.insert("surface".to_string(), json!(node.surface));
+    item.insert("pivot".to_string(), json!(node.pivot.slug()));
+    item.insert("spawn_marker".to_string(), json!(node.spawn_marker));
+    item.insert("linked_assembly".to_string(), json!(node.linked_assembly));
+    item.insert("has_audio".to_string(), json!(node.audio_source.enabled));
+    item.insert("audio_bus".to_string(), json!(node.audio_source.bus.slug()));
+    item.insert(
+        "audio_spatial".to_string(),
+        json!(node.audio_source.spatial),
+    );
     item.insert("is_folder".to_string(), json!(node.is_folder));
     item.insert("visible".to_string(), json!(node.visible));
     item.insert("casts_shadows".to_string(), json!(node.casts_shadows));
@@ -590,7 +628,10 @@ pub(super) fn scene_item(scene: &SceneGraph, id: SceneNodeId, include_details: b
         "scale".to_string(),
         json!([node.scale.x, node.scale.y, node.scale.z]),
     );
-    item.insert("size".to_string(), json!(node.primitive.dimensions(node.scale).to_array()));
+    item.insert(
+        "size".to_string(),
+        json!(node.primitive.dimensions(node.scale).to_array()),
+    );
     if include_details {
         item.insert(
             "world_position".to_string(),
@@ -885,6 +926,10 @@ pub(super) fn node_kind(node: &SceneNode) -> &'static str {
             Primitive::Plane => "plane",
             Primitive::Cylinder => "cylinder",
             Primitive::Capsule => "capsule",
+            Primitive::Wedge => "wedge",
+            Primitive::Torus => "torus",
+            Primitive::Prism => "prism",
+            Primitive::Sphere2D => "sphere2d",
         }
     }
 }

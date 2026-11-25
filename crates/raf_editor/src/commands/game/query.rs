@@ -48,7 +48,11 @@ pub(crate) fn text_argument(command: &ParsedCommand, name: &str) -> Option<Strin
     command.arg(name).map(str::to_string)
 }
 
-pub(super) fn bool_argument(command: &ParsedCommand, name: &str, default: bool) -> Result<bool, String> {
+pub(super) fn bool_argument(
+    command: &ParsedCommand,
+    name: &str,
+    default: bool,
+) -> Result<bool, String> {
     if let Some(value) = command.structured_arg(name) {
         return match value {
             Value::Bool(value) => Ok(*value),
@@ -235,7 +239,10 @@ pub(super) fn live_scene_entity_count(scene: &SceneGraph) -> usize {
     scene.all_live_ids().len()
 }
 
-pub(super) fn presentation_name(id: SceneNodeId, node: &raf_core::scene::graph::SceneNode) -> String {
+pub(super) fn presentation_name(
+    id: SceneNodeId,
+    node: &raf_core::scene::graph::SceneNode,
+) -> String {
     let cleaned = display_name(&node.name);
     if cleaned.is_empty() {
         format!("Entity_{}", id.0)
@@ -281,6 +288,29 @@ pub(super) fn node_detail_lines(
     if let Some(schema_version) = node.source_schema_version {
         lines.push(format!("source_schema_version: {schema_version}"));
     }
+    if let Some(light) = &node.light {
+        lines.push(format!(
+            "light: {:?} intensity={:.2} range={:.2} enabled={}",
+            light.kind, light.intensity, light.range, light.enabled
+        ));
+    }
+    if node.audio_source.enabled || !node.audio_source.clip.is_empty() {
+        lines.push(format!(
+            "audio: enabled={} clip={} bus={} volume={:.2} spatial={} loop={}",
+            node.audio_source.enabled,
+            node.audio_source.clip,
+            node.audio_source.bus.slug(),
+            node.audio_source.volume,
+            node.audio_source.spatial,
+            node.audio_source.looping
+        ));
+    }
+    if let Some(mesh) = &node.mesh_asset {
+        lines.push(format!(
+            "mesh_asset: {} (scale {:.3})",
+            mesh.path, mesh.import_scale
+        ));
+    }
     lines
 }
 
@@ -291,6 +321,16 @@ pub(super) fn node_json(
 ) -> serde_json::Value {
     let (bounds_min, bounds_max) = primitive_bounds(node.primitive);
     let world_position = scene.world_matrix(id).col(3).truncate();
+    let editable_mesh_json = node.editable_mesh.as_ref().map(|mesh| {
+        let (min, max) = mesh.bounds().unwrap_or((Vec3::ZERO, Vec3::ZERO));
+        serde_json::json!({
+            "revision": mesh.revision,
+            "vertex_count": mesh.vertices.len(),
+            "face_count": mesh.face_count(),
+            "bounds_min": vec3_json(min),
+            "bounds_max": vec3_json(max),
+        })
+    });
     serde_json::json!({
         "ok": true,
         "entity": {
@@ -319,6 +359,9 @@ pub(super) fn node_json(
             "is_folder": node.is_folder,
             "primitive": node.primitive.label(),
             "game_camera": node.game_camera,
+            "audio": node.audio_source,
+            "light": node.light,
+            "mesh_asset": node.mesh_asset,
             "animation_layers": node.animation.as_ref().map(|rig| rig.layers.len()),
             "animation_asset": node.animation_asset,
             "position": vec3_json(node.position),
@@ -341,6 +384,12 @@ pub(super) fn node_json(
                 "bounds_min": vec3_json(bounds_min),
                 "bounds_max": vec3_json(bounds_max)
             },
+            "has_editable_mesh": node.editable_mesh.is_some(),
+            "editable_mesh": editable_mesh_json,
+            "surface": node.surface,
+            "pivot": node.pivot.slug(),
+            "spawn_marker": node.spawn_marker,
+            "linked_assembly": node.linked_assembly,
             "source_asset": node.source_asset,
             "source_schema_version": node.source_schema_version
         }
@@ -360,6 +409,10 @@ pub(super) fn mesh_vertex_count(primitive: Primitive) -> usize {
         Primitive::Plane => 4,
         Primitive::Capsule => 170,
         Primitive::Cylinder => 68,
+        Primitive::Wedge => 18,
+        Primitive::Torus => 576,
+        Primitive::Prism => 48,
+        Primitive::Sphere2D => 49,
     }
 }
 
@@ -371,6 +424,10 @@ pub(super) fn mesh_index_count(primitive: Primitive) -> usize {
         Primitive::Plane => 6,
         Primitive::Capsule => 768,
         Primitive::Cylinder => 192,
+        Primitive::Wedge => 24,
+        Primitive::Torus => 3456,
+        Primitive::Prism => 72,
+        Primitive::Sphere2D => 288,
     }
 }
 
@@ -385,7 +442,11 @@ pub(super) fn f32_arg(command: &ParsedCommand, name: &str, default: f32) -> f32 
     command.arg(name).and_then(parse_f32).unwrap_or(default)
 }
 
-pub(super) fn finite_f32_argument(command: &ParsedCommand, name: &str, default: f32) -> Result<f32, String> {
+pub(super) fn finite_f32_argument(
+    command: &ParsedCommand,
+    name: &str,
+    default: f32,
+) -> Result<f32, String> {
     if let Some(value) = command.structured_arg(name) {
         return parse_json_f32(value, name);
     }

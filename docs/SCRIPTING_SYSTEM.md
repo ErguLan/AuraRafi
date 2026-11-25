@@ -285,6 +285,18 @@ Time:
 Script interop:
 - `call_script_function(script_path: &str, function: &str, args: Vec<ScriptValue>) -> ScriptValue`
 
+Runtime quality (local to this Play instance):
+- `get_quality() -> record` with `viewport_resolution`, `geometry_detail`,
+  `texture_quality` and their `base_*` project values.
+- `set_quality(path, value)` for `viewport_resolution` (`efficient`,
+  `adaptive`, `native`), `geometry_detail` (`efficient`, `adaptive`,
+  `detailed`) and `texture_quality` (`efficient`, `adaptive`, `detailed`).
+- `clear_quality()` restores the project values.
+
+These calls never mutate the project file or another player. The runtime
+applies the effective values on the next safe frame and invalidates the cached
+canvas. A game settings menu can use them for per-player quality choices.
+
 All values are in SI units (meters, seconds, radians, 0-255 RGBA) as defined
 in `crates/raf_core/src/units.rs`. Scripts never convert units manually.
 

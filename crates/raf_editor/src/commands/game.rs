@@ -17,11 +17,15 @@ use uuid::Uuid;
 use crate::commands::output::CommandOutput;
 use crate::commands::parser::ParsedCommand;
 
-mod build;
 pub(crate) mod animation;
+mod audio;
+mod build;
 mod camera;
 mod entity;
+mod light;
 mod material;
+mod mesh;
+pub(crate) mod mesh_asset;
 mod prefab;
 mod query;
 #[cfg(test)]
@@ -31,15 +35,17 @@ mod tests;
 mod transform;
 
 mod visual;
+mod volume;
 mod world;
 
-pub use world::{bind_project_root, clear_project_root, set_project_root, ProjectRootGuard};
+use audio::execute as audio_command;
 use build::{build_scene, reconcile_scene, repair_scene};
 use camera::camera_entity;
 use entity::{
     add_entity, create_group, delete_entity, duplicate_entity, focus_entity, rename_entity,
     select_entity, update_entity,
 };
+use light::execute as light_command;
 use material::color_entity;
 use prefab::generate_prefab;
 use query::{
@@ -50,6 +56,7 @@ use transform::{
     arrange_grid, move_entity, reparent_entity, rotate_entity, scale_entity, set_transform,
     snap_entity,
 };
+pub use world::{bind_project_root, clear_project_root, set_project_root, ProjectRootGuard};
 use world::{
     execute_cancel, execute_commit, execute_plan, execute_world_brief, execute_world_recipe,
     execute_world_script,
@@ -67,6 +74,8 @@ pub trait GameViewportPort {
     fn selected_ids(&self) -> Vec<SceneNodeId>;
     fn set_selected_ids(&mut self, ids: Vec<SceneNodeId>);
     fn focus_entity(&mut self, scene: &SceneGraph, id: Option<SceneNodeId>);
+    /// Render the editor viewport through an entity camera until cleared.
+    fn set_look_through(&mut self, _scene: &SceneGraph, _id: Option<SceneNodeId>) {}
 }
 
 #[derive(Debug, Default)]
@@ -104,18 +113,26 @@ const KNOWN_GAME_COMMANDS: &[&str] = &[
     "game.set_transform",
     "game.update",
     "game.animation.sample",
+    "game.animation.bake",
+    "game.animation.retarget",
     "game.move",
     "game.rotate",
     "game.scale",
     "game.color",
     "game.arrange_grid",
     "game.generate_prefab",
+    "game.mesh_asset",
+    "game.mesh",
+    "game.spawn",
+    "game.trigger",
     "game.describe_scene",
     "game.focus",
     "game.batch",
     "game.create_group",
     "game.reparent",
     "game.camera",
+    "game.light",
+    "game.audio",
     "game.snap",
     "game.build",
     "game.reconcile",
@@ -174,18 +191,26 @@ pub fn execute(
         "game.set_transform" => set_transform(command, ctx),
         "game.update" => update_entity(command, ctx),
         "game.animation.sample" => animation::sample(command, ctx),
+        "game.animation.bake" => animation::bake(command, ctx),
+        "game.animation.retarget" => animation::retarget(command, ctx),
         "game.move" => move_entity(command, ctx),
         "game.rotate" => rotate_entity(command, ctx),
         "game.scale" => scale_entity(command, ctx),
         "game.color" => color_entity(command, ctx),
         "game.arrange_grid" => arrange_grid(command, ctx),
         "game.generate_prefab" => generate_prefab(command, ctx),
+        "game.mesh_asset" => mesh_asset::execute(command, ctx),
+        "game.mesh" => mesh::execute(command, ctx),
+        "game.spawn" => volume::spawn(command, ctx),
+        "game.trigger" => volume::trigger(command, ctx),
         "game.describe_scene" => describe_scene(ctx),
         "game.focus" => focus_entity(command, ctx),
         "game.batch" => batch(command, ctx),
         "game.create_group" | "scene.group" | "scene.folder" => create_group(command, ctx),
         "game.reparent" | "scene.reparent" => reparent_entity(command, ctx),
         "game.camera" => camera_entity(command, ctx),
+        "game.light" => light_command(command, ctx),
+        "game.audio" => audio_command(command, ctx),
         "game.snap" | "scene.snap" => snap_entity(command, ctx),
         "game.build" | "scene.build" => build_scene(command, ctx),
         "game.reconcile" | "scene.reconcile" => reconcile_scene(command, ctx),

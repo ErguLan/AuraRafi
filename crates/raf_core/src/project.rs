@@ -6,7 +6,7 @@
 //! - `scenes/` (scene files)
 //! - `scripts/` (user scripts, if any)
 
-use crate::config::{RenderPreset, ScriptExecutionMode, ScriptLanguageFlags};
+use crate::config::{ScriptExecutionMode, ScriptLanguageFlags};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -81,10 +81,6 @@ pub struct ProjectSettings {
     /// Save immediately after each committed editor action.
     #[serde(default)]
     pub linear_save: bool,
-    /// Legacy runtime preset retained for existing project files. The editor
-    /// viewport does not apply these effect presets.
-    #[serde(default)]
-    pub runtime_render_preset: RenderPreset,
     /// Resolution policy for the editor viewport. This only changes render
     /// resolution; it does not enable optional effects or alter frame pacing.
     #[serde(default)]
@@ -95,6 +91,10 @@ pub struct ProjectSettings {
     /// Per-project cap for decoded and resident base-color textures.
     #[serde(default)]
     pub texture_quality: TextureQualityMode,
+    /// Runtime particle policy for Play. The editor preview has its own
+    /// global preview controls and does not read this field.
+    #[serde(default)]
+    pub particle_runtime: crate::scene::ParticleRuntimeSettings,
     /// Legacy software-depth preference retained for existing project files.
     #[serde(default)]
     pub depth_accurate: bool,
@@ -210,11 +210,11 @@ pub enum GeometryDetailMode {
 /// Hard image-dimension and residency caps for scene base-color textures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextureQualityMode {
-    /// 256px maximum and a 4 MiB CPU/GPU texture-cache budget.
+    /// 256px maximum and an 8 MiB CPU/GPU texture-cache budget.
     Efficient,
-    /// 512px maximum and a 12 MiB CPU/GPU texture-cache budget.
+    /// 512px maximum and a 24 MiB CPU/GPU texture-cache budget.
     Adaptive,
-    /// 1024px maximum and a 32 MiB CPU/GPU texture-cache budget.
+    /// 1024px maximum and a 64 MiB CPU/GPU texture-cache budget.
     Detailed,
 }
 
@@ -241,9 +241,9 @@ impl TextureQualityMode {
 
     pub const fn cache_budget_bytes(self) -> u64 {
         match self {
-            Self::Efficient => 4 * 1024 * 1024,
-            Self::Adaptive => 12 * 1024 * 1024,
-            Self::Detailed => 32 * 1024 * 1024,
+            Self::Efficient => 8 * 1024 * 1024,
+            Self::Adaptive => 24 * 1024 * 1024,
+            Self::Detailed => 64 * 1024 * 1024,
         }
     }
 }
@@ -285,10 +285,10 @@ impl Default for ProjectSettings {
             enable_physics: true,
             pause_when_unfocused: true,
             linear_save: false,
-            runtime_render_preset: RenderPreset::Potato,
             viewport_resolution: ViewportResolutionMode::Adaptive,
             geometry_detail: GeometryDetailMode::Adaptive,
             texture_quality: TextureQualityMode::Adaptive,
+            particle_runtime: crate::scene::ParticleRuntimeSettings::default(),
             depth_accurate: false,
             depth_resolution_scale: default_depth_resolution_scale(),
             world_streaming_enabled: false,
@@ -445,7 +445,8 @@ impl Project {
         let meta_path = self.path.join(Self::META_FILE);
         let pretty = ron::ser::PrettyConfig::default();
         let data = ron::ser::to_string_pretty(self, pretty)?;
-        std::fs::write(meta_path, data)?;
+        crate::project_store::write_atomic(&meta_path, data.as_bytes())
+            .map_err(|error| std::io::Error::other(error))?;
         Ok(())
     }
 
@@ -640,6 +641,7 @@ mod tests {
         );
         assert_eq!(settings.geometry_detail, GeometryDetailMode::Adaptive);
         assert_eq!(settings.texture_quality, TextureQualityMode::Adaptive);
+        assert_eq!(settings.runtime.fps_limit, 60);
         assert!(!settings.world_streaming_enabled);
         assert_eq!(settings.world_stream_region_size, 128.0);
         assert_eq!(settings.world_stream_load_radius, 3);
@@ -650,6 +652,7 @@ mod tests {
         assert_eq!(loaded.viewport_resolution, ViewportResolutionMode::Adaptive);
         assert_eq!(loaded.geometry_detail, GeometryDetailMode::Adaptive);
         assert_eq!(loaded.texture_quality, TextureQualityMode::Adaptive);
+        assert_eq!(loaded.runtime.fps_limit, 60);
         assert_eq!(loaded.world_stream_region_size, 128.0);
     }
 
@@ -658,17 +661,17 @@ mod tests {
         assert_eq!(TextureQualityMode::Efficient.max_dimension(), 256);
         assert_eq!(
             TextureQualityMode::Efficient.cache_budget_bytes(),
-            4 * 1024 * 1024
+            8 * 1024 * 1024
         );
         assert_eq!(TextureQualityMode::Adaptive.max_dimension(), 512);
         assert_eq!(
             TextureQualityMode::Adaptive.cache_budget_bytes(),
-            12 * 1024 * 1024
+            24 * 1024 * 1024
         );
         assert_eq!(TextureQualityMode::Detailed.max_dimension(), 1024);
         assert_eq!(
             TextureQualityMode::Detailed.cache_budget_bytes(),
-            32 * 1024 * 1024
+            64 * 1024 * 1024
         );
     }
 

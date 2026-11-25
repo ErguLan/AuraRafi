@@ -275,13 +275,15 @@ pub(super) fn tool_is_engaged(command: &str, tool: ElectronicsTool) -> bool {
 pub(super) fn tool_island(command: &str) -> Option<ToolIsland> {
     match command {
         "electronics.select" | "electronics.pan" => Some(ToolIsland::Selection),
-        "electronics.wire" | "electronics.route" | "electronics.board-outline" | "electronics.pcb.via" => {
-            Some(ToolIsland::Connection)
-        }
+        "electronics.wire"
+        | "electronics.route"
+        | "electronics.board-outline"
+        | "electronics.pcb.via" => Some(ToolIsland::Connection),
         "electronics.place" => Some(ToolIsland::Placement),
-        "electronics.pcb.sync" | "electronics.rotate" | "edit.delete" | "electronics.pcb.menu:rules" => {
-            Some(ToolIsland::Operations)
-        }
+        "electronics.pcb.sync"
+        | "electronics.rotate"
+        | "edit.delete"
+        | "electronics.pcb.menu:rules" => Some(ToolIsland::Operations),
         _ => None,
     }
 }

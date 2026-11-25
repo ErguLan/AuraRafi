@@ -430,6 +430,18 @@ impl Generator<'_> {
                 let (pin, key) = if slug == "apply-impulse" { ("Impulse", "impulse") } else { ("Velocity", "velocity") };
                 code = format!("let h={entity}; h.{}({});", slug.replace('-', "_"), self.input(i, pin, key, "0,0,0", 0)?);
             }
+            "particles-play" | "particles-pause" | "particles-stop" | "particles-freeze" => {
+                code = format!("let h={entity}; {}(h);", slug.replace('-', "_"));
+            }
+            "particles-emit" => {
+                code = format!("let h={entity}; particle_emit(h, {});", self.input(i, "Count", "count", "16", 0)?);
+            }
+            "particles-set-rate" => {
+                code = format!("let h={entity}; particle_set_rate(h, {});", self.input(i, "Scale", "scale", "1", 0)?);
+            }
+            "particles-set-time-scale" => {
+                code = format!("let h={entity}; particle_set_time_scale(h, {});", self.input(i, "Scale", "scale", "1", 0)?);
+            }
             "configure-body" => code = format!("let h={entity}; h.configure_body({},{},{},{},{});",
                 self.input(i,"Body Type","body_type","dynamic",0)?, self.input(i,"Gravity","gravity","true",0)?,
                 self.input(i,"Trigger","trigger","false",0)?, self.input(i,"Mass","mass","1",0)?, self.input(i,"Damping","damping","0",0)?),
