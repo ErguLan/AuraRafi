@@ -19,7 +19,7 @@ use super::{
     UiDocumentUpdateError, UiFocusState, UiInputState, UiSurface, UiSurfaceDiagnostics,
     UiSurfaceDrawList, UiSurfaceFrame, UiSurfaceImageStore, UiSurfaceSession,
 };
-use raf_ui::UiEnvironment;
+use raf_ui::{UiEnvironment, UiNode};
 
 use crate::api_graphic_basic::capabilities::GraphicsMemoryBudget;
 
@@ -94,6 +94,35 @@ impl DirectUiSurfaceHost {
         self.source_paint_revision = self.source_paint_revision.wrapping_add(1).max(1);
         self.touch_paint();
         &mut self.surface
+    }
+
+    /// Replaces the retained document without discarding layout when only
+    /// paint or literal text changed. Runtime HUDs mutate one value per fixed
+    /// tick; recreating the whole surface used to rebuild layout and paint on
+    /// every frame even though geometry and text styles were unchanged.
+    pub fn replace_surface_incremental(&mut self, surface: UiSurface) -> bool {
+        if self.surface == surface {
+            return false;
+        }
+        let layout_compatible =
+            layout_compatible(&self.surface.root, &surface.root)
+                && self.surface.style_sheet == surface.style_sheet
+                && self.surface.palette == surface.palette
+                && self.surface.theme == surface.theme
+                && self.surface.retained_tooltips == surface.retained_tooltips;
+        if !layout_compatible {
+            self.set_surface(surface);
+            return true;
+        }
+        let mut text_changes = Vec::new();
+        collect_text_changes(&self.surface.root, &surface.root, &mut text_changes);
+        for (id, value) in text_changes {
+            self.compilation.patch_text_value(&id, &value);
+        }
+        self.surface = surface;
+        self.source_paint_revision = self.source_paint_revision.wrapping_add(1).max(1);
+        self.touch_paint();
+        true
     }
 
     pub fn set_surface(&mut self, surface: UiSurface) {
@@ -187,9 +216,9 @@ impl DirectUiSurfaceHost {
     /// document stays declarative while platform hosts can restore short-lived
     /// values after a renderer or surface transition.
     pub fn session_mut(&mut self) -> &mut UiSurfaceSession {
-        // Arbitrary session mutation can change paint without passing through a
-        // typed host mutator, so the produced revision advances conservatively.
-        self.touch_paint();
+        // Paint-relevant session state (focus, controls, motion, atlas) is
+        // observed before each composition, so obtaining mutable access no
+        // longer invalidates an otherwise idle frame.
         &mut self.session
     }
 
@@ -238,6 +267,9 @@ impl DirectUiSurfaceHost {
     }
 
     pub fn set_environment(&mut self, environment: UiEnvironment) {
+        if self.session.environment() == environment {
+            return;
+        }
         self.session.set_environment(environment);
         self.touch_paint();
     }
@@ -247,7 +279,8 @@ impl DirectUiSurfaceHost {
     }
 
     pub fn images_mut(&mut self) -> &mut UiSurfaceImageStore {
-        self.touch_paint();
+        // Image residency advances `images.generation()`, which
+        // `refresh_paint_revision` folds into the produced revision.
         &mut self.images
     }
 
@@ -274,6 +307,15 @@ impl DirectUiSurfaceHost {
     /// revision of the produced commands.
     pub fn paint_revision(&self) -> u64 {
         self.paint_generation
+    }
+
+    /// Folds live atlas, image and interaction changes into the paint revision
+    /// before a compositor fingerprints the UI packet. Obtaining
+    /// `session_mut()`/`images_mut()` alone no longer invalidates paint; only a
+    /// real state change advances the revision.
+    pub fn refresh_paint_revision(&mut self) {
+        self.sync_observed_generations();
+        self.sync_observed_interaction();
     }
 
     /// Revision of the retained text atlas pixels. A newly rasterized glyph
@@ -570,8 +612,7 @@ impl DirectUiSurfaceHost {
             self.compilation.metrics().paint_cache_hit,
         );
         self.last_paint_metrics = metrics;
-        self.sync_observed_generations();
-        self.sync_observed_interaction();
+        self.refresh_paint_revision();
         let produced = DirectUiSurfaceFrame {
             frame: compiled.frame,
             draw_list: compiled.draw_list,
@@ -654,6 +695,53 @@ impl DirectUiSurfaceHost {
     }
 }
 
+/// Whether two document trees produce the same retained layout, hit regions,
+/// and text request shapes. Paint-only state (colors, classes, icons, literal
+/// text values) is intentionally excluded so a changing HUD value does not
+/// rebuild layout.
+fn layout_compatible(a: &UiNode, b: &UiNode) -> bool {
+    a.id == b.id
+        && a.kind == b.kind
+        && a.layout == b.layout
+        && a.hidden == b.hidden
+        && a.disabled == b.disabled
+        && a.invalid == b.invalid
+        && a.interactive == b.interactive
+        && a.focusable == b.focusable
+        && a.text_selectable == b.text_selectable
+        && a.text_key == b.text_key
+        && a.text_style == b.text_style
+        && a.text_overflow == b.text_overflow
+        && a.control == b.control
+        && a.accessibility_role == b.accessibility_role
+        && a.accessibility_label_key == b.accessibility_label_key
+        && a.accessibility_description_key == b.accessibility_description_key
+        && a.accessibility_expanded == b.accessibility_expanded
+        && a.accessibility_checked == b.accessibility_checked
+        && a.accessibility_selected == b.accessibility_selected
+        && a.tooltip_key == b.tooltip_key
+        && a.tooltip_value == b.tooltip_value
+        && a.event_handlers == b.event_handlers
+        && a.children.len() == b.children.len()
+        && a.children
+            .iter()
+            .zip(&b.children)
+            .all(|(a, b)| layout_compatible(a, b))
+}
+
+/// Literal text values that changed without changing layout.
+fn collect_text_changes(old: &UiNode, new: &UiNode, out: &mut Vec<(String, String)>) {
+    if old.text_value != new.text_value {
+        out.push((
+            new.id.clone(),
+            new.text_value.clone().unwrap_or_default(),
+        ));
+    }
+    for (old, new) in old.children.iter().zip(&new.children) {
+        collect_text_changes(old, new, out);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DirectUiSurfaceFrame {
     pub frame: Arc<UiSurfaceFrame>,
@@ -665,5 +753,61 @@ pub struct DirectUiSurfaceFrame {
 impl DirectUiSurfaceFrame {
     pub fn diagnostics(&self) -> UiSurfaceDiagnostics {
         UiSurfaceDiagnostics::from_frame(&self.frame)
+    }
+}
+
+#[cfg(test)]
+mod incremental_surface_tests {
+    use super::*;
+    use raf_ui::{StudioUiPalette, UiLayout, UiNode, UiNodeKind};
+
+    fn surface(value: &str, width: f32) -> UiSurface {
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(
+            UiNode::new("value", UiNodeKind::Label)
+                .with_text_value(value)
+                .with_layout(UiLayout::fixed(width, 20.0)),
+        );
+        UiSurface::new("hud", StudioUiPalette::IndustrialDark, root)
+    }
+
+    #[test]
+    fn literal_text_replacement_keeps_the_retained_layout() {
+        let mut host = DirectUiSurfaceHost::new(surface("1", 100.0), [0; 4]);
+        let layout_revision = host.surface_revision;
+        let paint_revision = host.paint_generation;
+
+        assert!(host.replace_surface_incremental(surface("2", 100.0)));
+
+        assert_eq!(host.surface_revision, layout_revision);
+        assert_ne!(host.paint_generation, paint_revision);
+        assert_eq!(
+            host.surface().root.children[0].text_value.as_deref(),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn mutable_access_alone_keeps_the_paint_revision_stable() {
+        let mut host = DirectUiSurfaceHost::new(surface("1", 100.0), [0; 4]);
+        let paint_revision = host.paint_revision();
+
+        let _ = host.images_mut();
+        let _ = host.session_mut();
+        assert_eq!(host.paint_revision(), paint_revision);
+
+        host.refresh_paint_revision();
+        assert_eq!(host.paint_revision(), paint_revision);
+    }
+
+    #[test]
+    fn geometry_replacement_invalidates_the_retained_layout() {
+        let mut host = DirectUiSurfaceHost::new(surface("1", 100.0), [0; 4]);
+        let layout_revision = host.surface_revision;
+
+        let mut next = surface("1", 100.0);
+        next.root.children[0].layout = UiLayout::fixed(120.0, 20.0);
+        assert!(host.replace_surface_incremental(next));
+
+        assert!(host.surface_revision > layout_revision);
     }
 }

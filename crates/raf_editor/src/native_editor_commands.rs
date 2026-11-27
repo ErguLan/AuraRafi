@@ -4,7 +4,7 @@
 //! menus and context actions emit the same small set of intents; this file
 //! translates those intents into operations owned by [`NativeEditorRuntime`].
 
-use raf_core::project::Project;
+use raf_core::project::{EditorViewMode, Project};
 use raf_core::scene::{Primitive, SceneGraph, SceneNodeId};
 
 use crate::color_math::{hsv_to_node_color, rgb_to_hsv, HsvColor};
@@ -508,11 +508,24 @@ fn apply_console_command(
         "script.compile_nodes" | "script.run" | "script.validate" | "script.list"
     ) {
         let assets = project.map(|p| p.path.join("assets"));
+        let editor_view = Some(runtime.editor_view_mode());
         let mut context = crate::commands::script::ScriptCommandContext {
             scene,
             assets_root: assets.as_deref(),
+            editor_view,
         };
-        crate::commands::script::execute(&parsed.name, &parsed, &mut context)
+        let output = crate::commands::script::execute(&parsed.name, &parsed, &mut context);
+        if output.json.get("status").and_then(|value| value.as_str()) == Some("ok") {
+            if let Some(mode) = output
+                .json
+                .get("editor_view")
+                .and_then(|value| value.as_str())
+                .and_then(EditorViewMode::from_slug)
+            {
+                runtime.set_editor_view_mode(mode);
+            }
+        }
+        output
     } else {
         CommandOutput::error(
             "Console command",
@@ -547,6 +560,7 @@ fn apply_behavior_command(
     let mut context = crate::commands::script::ScriptCommandContext {
         scene,
         assets_root: assets.as_deref(),
+        editor_view: None,
     };
     let output = crate::commands::behavior::execute(command, &mut context, false);
     if output.changed {
@@ -710,12 +724,10 @@ pub(crate) fn apply_workbench_intents(
                         viewport.show_labels = !viewport.show_labels;
                     }
                     ViewportToolbarAction::View2d => {
-                        runtime.game_viewport_mut().mode =
-                            crate::panels::viewport_controller::NativeViewportMode::View2d
+                        runtime.set_editor_view_mode(EditorViewMode::View2d)
                     }
                     ViewportToolbarAction::View3d => {
-                        runtime.game_viewport_mut().mode =
-                            crate::panels::viewport_controller::NativeViewportMode::View3d
+                        runtime.set_editor_view_mode(EditorViewMode::View3d)
                     }
                     ViewportToolbarAction::ResetView => {
                         runtime

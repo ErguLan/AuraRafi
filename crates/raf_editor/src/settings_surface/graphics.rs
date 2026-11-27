@@ -1,6 +1,7 @@
 //! Render quality and viewport presentation settings.
 
 use raf_core::config::{EngineSettings, RenderExecutionPolicy, RenderQuality};
+use raf_core::project::TextureQualityMode;
 use raf_render::api_graphic_basic::ui_surface::{StudioUiPalette, UiNode, UiSelectOption};
 
 use super::controls::{
@@ -55,6 +56,31 @@ pub(super) fn performance(
             },
             open_select,
             "settings.render_execution_policy_desc",
+        ))
+        .with_child(select_row_with_description(
+            palette,
+            "settings.texture_quality",
+            "settings.texture_quality",
+            "settings.texture_quality",
+            vec![
+                UiSelectOption::new("efficient", "settings.texture_quality.efficient"),
+                UiSelectOption::new("adaptive", "settings.texture_quality.adaptive"),
+                UiSelectOption::new("detailed", "settings.texture_quality.detailed"),
+            ],
+            match settings.texture_quality {
+                TextureQualityMode::Efficient => 0,
+                TextureQualityMode::Adaptive => 1,
+                TextureQualityMode::Detailed => 2,
+            },
+            open_select,
+            "settings.texture_quality_desc",
+        ))
+        .with_child(toggle_row_with_description(
+            palette,
+            "settings.scene-packet-reuse",
+            "settings.scene_packet_reuse",
+            settings.scene_packet_reuse,
+            "settings.scene_packet_reuse_desc",
         ))
         .with_child(group_label(palette, "settings.group.frame_pacing"))
         .with_child(toggle_row_with_description(

@@ -50,6 +50,36 @@ impl ProjectType {
     }
 }
 
+/// Editor camera view used when a project opens. This never changes the
+/// runtime world: 2D is an orthographic authoring view of the same 3D scene.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EditorViewMode {
+    #[default]
+    View3d,
+    View2d,
+}
+
+impl EditorViewMode {
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::View3d => "3d",
+            Self::View2d => "2d",
+        }
+    }
+
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        match slug.trim().to_ascii_lowercase().as_str() {
+            "2d" | "view_2d" | "view2d" => Some(Self::View2d),
+            "3d" | "view_3d" | "view3d" => Some(Self::View3d),
+            _ => None,
+        }
+    }
+
+    pub const fn is_2d(self) -> bool {
+        matches!(self, Self::View2d)
+    }
+}
+
 /// Per-project settings stored inside `project.ron`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectSettings {
@@ -81,6 +111,10 @@ pub struct ProjectSettings {
     /// Save immediately after each committed editor action.
     #[serde(default)]
     pub linear_save: bool,
+    /// Editor camera view applied when this project opens. The authoring world
+    /// remains 3D; 2D only fixes the editor camera to an orthographic view.
+    #[serde(default)]
+    pub default_editor_view: EditorViewMode,
     /// Resolution policy for the editor viewport. This only changes render
     /// resolution; it does not enable optional effects or alter frame pacing.
     #[serde(default)]
@@ -91,6 +125,10 @@ pub struct ProjectSettings {
     /// Per-project cap for decoded and resident base-color textures.
     #[serde(default)]
     pub texture_quality: TextureQualityMode,
+    /// Retains static scene resources and patches only dynamic instances during
+    /// Play. Disable it to force full packet rebuilds for diagnostics.
+    #[serde(default = "default_true")]
+    pub scene_packet_reuse: bool,
     /// Runtime particle policy for Play. The editor preview has its own
     /// global preview controls and does not read this field.
     #[serde(default)]
@@ -241,9 +279,9 @@ impl TextureQualityMode {
 
     pub const fn cache_budget_bytes(self) -> u64 {
         match self {
-            Self::Efficient => 8 * 1024 * 1024,
-            Self::Adaptive => 24 * 1024 * 1024,
-            Self::Detailed => 64 * 1024 * 1024,
+            Self::Efficient => 16 * 1024 * 1024,
+            Self::Adaptive => 48 * 1024 * 1024,
+            Self::Detailed => 128 * 1024 * 1024,
         }
     }
 }
@@ -285,9 +323,11 @@ impl Default for ProjectSettings {
             enable_physics: true,
             pause_when_unfocused: true,
             linear_save: false,
+            default_editor_view: EditorViewMode::View3d,
             viewport_resolution: ViewportResolutionMode::Adaptive,
             geometry_detail: GeometryDetailMode::Adaptive,
             texture_quality: TextureQualityMode::Adaptive,
+            scene_packet_reuse: true,
             particle_runtime: crate::scene::ParticleRuntimeSettings::default(),
             depth_accurate: false,
             depth_resolution_scale: default_depth_resolution_scale(),
@@ -343,6 +383,23 @@ impl Project {
         parent_dir: &Path,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::create_in(parent_dir.join(name), name.to_string(), project_type)
+    }
+
+    /// Create a project and apply the authored editor camera preference before
+    /// the editor opens it. Only Game projects expose this choice.
+    pub fn create_with_initial_view(
+        name: &str,
+        project_type: ProjectType,
+        parent_dir: &Path,
+        initial_view: EditorViewMode,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut project = Self::create(name, project_type, parent_dir)?;
+        if project_type == ProjectType::Game && project.settings.default_editor_view != initial_view
+        {
+            project.settings.default_editor_view = initial_view;
+            project.save()?;
+        }
+        Ok(project)
     }
 
     /// Turn an existing folder into an AuraRafi project. The folder becomes the
@@ -639,8 +696,12 @@ mod tests {
             settings.viewport_resolution,
             ViewportResolutionMode::Adaptive
         );
+        assert_eq!(settings.default_editor_view, EditorViewMode::View3d);
         assert_eq!(settings.geometry_detail, GeometryDetailMode::Adaptive);
         assert_eq!(settings.texture_quality, TextureQualityMode::Adaptive);
+        assert!(settings.scene_packet_reuse);
+        assert_eq!(settings.runtime.script_budget_ms, 10);
+        assert_eq!(settings.runtime.script_operation_limit, 100_000);
         assert_eq!(settings.runtime.fps_limit, 60);
         assert!(!settings.world_streaming_enabled);
         assert_eq!(settings.world_stream_region_size, 128.0);
@@ -650,6 +711,7 @@ mod tests {
         let serialized = ron::ser::to_string(&settings).expect("settings serialize");
         let loaded: ProjectSettings = ron::from_str(&serialized).expect("settings deserialize");
         assert_eq!(loaded.viewport_resolution, ViewportResolutionMode::Adaptive);
+        assert_eq!(loaded.default_editor_view, EditorViewMode::View3d);
         assert_eq!(loaded.geometry_detail, GeometryDetailMode::Adaptive);
         assert_eq!(loaded.texture_quality, TextureQualityMode::Adaptive);
         assert_eq!(loaded.runtime.fps_limit, 60);
@@ -661,17 +723,17 @@ mod tests {
         assert_eq!(TextureQualityMode::Efficient.max_dimension(), 256);
         assert_eq!(
             TextureQualityMode::Efficient.cache_budget_bytes(),
-            8 * 1024 * 1024
+            16 * 1024 * 1024
         );
         assert_eq!(TextureQualityMode::Adaptive.max_dimension(), 512);
         assert_eq!(
             TextureQualityMode::Adaptive.cache_budget_bytes(),
-            24 * 1024 * 1024
+            48 * 1024 * 1024
         );
         assert_eq!(TextureQualityMode::Detailed.max_dimension(), 1024);
         assert_eq!(
             TextureQualityMode::Detailed.cache_budget_bytes(),
-            64 * 1024 * 1024
+            128 * 1024 * 1024
         );
     }
 
@@ -679,6 +741,7 @@ mod tests {
     fn older_settings_files_receive_adaptive_geometry_detail() {
         let loaded: ProjectSettings = serde_json::from_str("{}").expect("legacy settings load");
         assert_eq!(loaded.geometry_detail, GeometryDetailMode::Adaptive);
+        assert_eq!(loaded.default_editor_view, EditorViewMode::View3d);
     }
 
     #[test]

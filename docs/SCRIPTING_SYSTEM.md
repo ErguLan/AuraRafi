@@ -297,6 +297,16 @@ These calls never mutate the project file or another player. The runtime
 applies the effective values on the next safe frame and invalidates the cached
 canvas. A game settings menu can use them for per-player quality choices.
 
+Editor authoring view (editor scripts only):
+- `viewport_view_mode() -> "2d" | "3d"` reads the current authoring camera.
+- `set_viewport_view_mode("2d" | "3d")` requests one camera switch after the
+  script returns.
+
+These functions are available when `/script.run` executes from the editor
+console. Runtime Play scripts receive a clear error because they do not own the
+authoring camera. The request changes only the editor camera; the scene remains
+3D and the 2D view is an orthographic projection of the same world.
+
 All values are in SI units (meters, seconds, radians, 0-255 RGBA) as defined
 in `crates/raf_core/src/units.rs`. Scripts never convert units manually.
 

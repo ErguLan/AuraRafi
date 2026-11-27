@@ -13,11 +13,18 @@ use crate::{Batch, DrawMode, Error, Instance, Result, Texture, Vertex, Workload}
 
 use super::{Command, Cull, Depth, Feature, Material, Mesh, MeshSpan, Pipeline, ProductPacket};
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct InstanceStyle {
+    pub raster_kind: u32,
+    pub tint: [f32; 4],
+}
+
 pub(super) struct Encoded {
     pub workload: Workload,
     pub clear: [f32; 4],
     pub meshes: HashMap<(u32, bool), MeshSpan>,
     pub instances: HashMap<usize, Range<u32>>,
+    pub instance_styles: HashMap<usize, InstanceStyle>,
 }
 
 pub(super) fn encode(packet: ProductPacket, limit: u64) -> Result<Encoded> {
@@ -25,17 +32,20 @@ pub(super) fn encode(packet: ProductPacket, limit: u64) -> Result<Encoded> {
         meshes,
         materials,
         mut textures,
+        mut texture_ids,
+        texture_updates,
         commands,
     } = packet;
+    texture_ids.resize(textures.len(), 0);
     let white = u32::try_from(textures.len()).map_err(|_| Error::Invalid("too many textures"))?;
-    textures.push(Texture {
-        size: [1, 1],
-        rgba: vec![255; 4],
-    });
+    textures.push(Texture::new([1, 1], vec![255; 4]).without_mipmaps());
+    texture_ids.push(0);
     let overlay = Instance::new(Mat4::IDENTITY, [1.; 4]);
     let mut encoder = Encoder {
         workload: Workload {
             textures,
+            texture_ids,
+            texture_updates,
             instances: vec![overlay],
             ..Workload::default()
         },
@@ -43,6 +53,7 @@ pub(super) fn encode(packet: ProductPacket, limit: u64) -> Result<Encoded> {
         materials: &materials,
         mesh_cache: HashMap::new(),
         instance_ranges: HashMap::new(),
+        instance_styles: HashMap::new(),
         remaining: limit,
         limit,
         white,
@@ -66,6 +77,7 @@ pub(super) fn encode(packet: ProductPacket, limit: u64) -> Result<Encoded> {
         clear: encoder.clear,
         meshes: encoder.mesh_cache,
         instances: encoder.instance_ranges,
+        instance_styles: encoder.instance_styles,
     })
 }
 
@@ -75,6 +87,7 @@ struct Encoder<'a> {
     materials: &'a [Material],
     mesh_cache: HashMap<(u32, bool), MeshSpan>,
     instance_ranges: HashMap<usize, Range<u32>>,
+    instance_styles: HashMap<usize, InstanceStyle>,
     remaining: u64,
     limit: u64,
     white: u32,
@@ -282,6 +295,14 @@ impl Encoder<'_> {
             self.mesh_cache.insert(key, ranges.clone());
             ranges
         };
+        let raster_kind = if self.shadow_receiver { 256 } else { 0 }
+            | if self.pipeline.cull == Cull::None {
+                512
+            } else {
+                0
+            };
+        self.instance_styles
+            .insert(command, InstanceStyle { raster_kind, tint });
         let instance_range = stream_range(self.workload.instances.len(), instances.len())?;
         self.reserve(std::mem::size_of_val(instances) as u64)?;
         for instance in instances {
@@ -299,12 +320,7 @@ impl Encoder<'_> {
             .instances
             .extend(instances.iter().map(|instance| {
                 let mut instance = *instance;
-                instance.raster_kind = if self.shadow_receiver { 256 } else { 0 };
-                if self.pipeline.cull == Cull::None {
-                    // Bit 9 tells the scene shader that both windings are
-                    // visible and lighting must use abs(N dot L).
-                    instance.raster_kind |= 512;
-                }
+                instance.raster_kind = raster_kind;
                 multiply(&mut instance.tint, tint);
                 instance
             }));
@@ -455,7 +471,7 @@ fn validate_vertex(vertex: &Vertex) -> Result<()> {
     }
 }
 
-fn multiply(color: &mut [f32; 4], tint: [f32; 4]) {
+pub(crate) fn multiply(color: &mut [f32; 4], tint: [f32; 4]) {
     color
         .iter_mut()
         .zip(tint)

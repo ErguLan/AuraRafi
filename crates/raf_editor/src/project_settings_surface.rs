@@ -5,7 +5,7 @@
 
 use raf_core::config::{ScriptExecutionMode, ScriptLanguage};
 use raf_core::project::{
-    BuildingStyle, GeometryDetailMode, Project, ProjectType, TextureQualityMode,
+    BuildingStyle, EditorViewMode, GeometryDetailMode, Project, ProjectType, TextureQualityMode,
     ViewportResolutionMode,
 };
 use raf_render::api_graphic_basic::ui_surface::{
@@ -51,6 +51,7 @@ pub fn build_project_settings_surface(
         settings_scroll = settings_scroll.with_child(electronics(palette, project));
     } else {
         settings_scroll = settings_scroll
+            .with_child(editor_view(palette, project))
             .with_child(graphics(palette, project))
             .with_child(runtime(palette, project, global_console_commands_enabled))
             .with_child(lighting(palette))
@@ -234,6 +235,30 @@ fn runtime(
             1.0,
             format!("{} fps", project.settings.runtime.fps_limit),
             false,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.runtime-script-budget",
+            "runtime.script_budget_ms",
+            "project-settings.runtime-script-budget",
+            project.settings.runtime.script_budget_ms as f32,
+            1.0,
+            100.0,
+            1.0,
+            format!("{} ms", project.settings.runtime.script_budget_ms),
+            !project.settings.enable_scripting,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.runtime-script-operation-limit",
+            "runtime.script_operation_limit",
+            "project-settings.runtime-script-operation-limit",
+            project.settings.runtime.script_operation_limit as f32,
+            1_000.0,
+            1_000_000.0,
+            1_000.0,
+            project.settings.runtime.script_operation_limit.to_string(),
+            !project.settings.enable_scripting,
         ))
         .with_child(toggle_row(
             palette,
@@ -781,6 +806,36 @@ fn scripting(palette: StudioUiPalette, project: &Project) -> UiNode {
     ))
 }
 
+fn editor_view(palette: StudioUiPalette, project: &Project) -> UiNode {
+    section(
+        palette,
+        "project-settings.editor-view",
+        "app.project_editor_view",
+    )
+    .with_child(segment_row(
+        palette,
+        "project-settings.default-view",
+        "app.project_editor_initial_view",
+        &[
+            (
+                "app.viewport_2d_short",
+                "project-settings.default-view.2d",
+                project.settings.default_editor_view == EditorViewMode::View2d,
+            ),
+            (
+                "app.viewport_3d_short",
+                "project-settings.default-view.3d",
+                project.settings.default_editor_view == EditorViewMode::View3d,
+            ),
+        ],
+    ))
+    .with_child(graphics_help_text(
+        palette,
+        "project-settings.editor-view-description",
+        "app.project_editor_view_desc",
+    ))
+}
+
 fn graphics(palette: StudioUiPalette, project: &Project) -> UiNode {
     section(palette, "project-settings.graphics", "app.graphics_policy")
         .with_child(segment_row(
@@ -852,6 +907,18 @@ fn graphics(palette: StudioUiPalette, project: &Project) -> UiNode {
             ],
         ))
         .with_child(texture_quality_description(palette, project))
+        .with_child(toggle_row(
+            palette,
+            "project-settings.scene-packet-reuse",
+            "app.scene_packet_reuse",
+            "project-settings.scene-packet-reuse",
+            project.settings.scene_packet_reuse,
+        ))
+        .with_child(graphics_help_text(
+            palette,
+            "project-settings.scene-packet-reuse-description",
+            "app.scene_packet_reuse_desc",
+        ))
         .with_child(toggle_row(
             palette,
             "project-settings.world-streaming",
@@ -1492,6 +1559,7 @@ mod tests {
                 "project-settings.overview",
                 "project-settings.layout",
                 "project-settings.saving",
+                "project-settings.editor-view",
                 "project-settings.graphics",
                 "project-settings.runtime",
                 "project-settings.lighting",
@@ -1499,6 +1567,14 @@ mod tests {
                 "project-settings.scripting",
             ]
         );
+        assert!(surface
+            .root
+            .find("project-settings.default-view.2d")
+            .is_some());
+        assert!(surface
+            .root
+            .find("project-settings.default-view.3d")
+            .is_some());
         assert!(surface
             .root
             .find("project-settings.runtime-fps-limit.control")

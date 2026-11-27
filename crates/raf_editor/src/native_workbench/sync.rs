@@ -1,5 +1,7 @@
 //! Workbench synchronization: retained surface refresh, overlays and seeded controls.
 
+use raf_core::project::EditorViewMode;
+
 use super::*;
 
 impl NativeGameWorkbench {
@@ -138,8 +140,13 @@ impl NativeGameWorkbench {
         now_seconds: f64,
         compass: ViewportCompassState,
         electronics: Option<&NativeElectronicsEditor>,
+        editor_view: EditorViewMode,
     ) {
         self.rect = layout.window;
+        if self.toolbar_state.view_mode != editor_view {
+            self.toolbar_state.view_mode = editor_view;
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        }
         if self.footprint_chooser.sync(project, electronics) {
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
@@ -226,7 +233,7 @@ impl NativeGameWorkbench {
         self.nodes_host.note_selection(selected_graph_node);
         self.nodes_host
             .tick_motion(delta, self.agent_settings.prefers_reduced_motion);
-        let hierarchy_fingerprint = scene.document_revision();
+        let hierarchy_fingerprint = scene.hierarchy_fingerprint();
         if self.last_hierarchy_fingerprint != hierarchy_fingerprint {
             self.hierarchy_folder_ids = scene
                 .iter()
@@ -297,7 +304,8 @@ impl NativeGameWorkbench {
         self.verify_assets_operation(now_seconds);
         self.bottom_dock.sync_project_layout(project);
         self.sync_search_surface(layout, scene, project);
-        let fingerprint = scene.render_fingerprint();
+        let environment_fingerprint = scene.environment().render_fingerprint();
+        let selected_fingerprint = selected_render_fingerprint(scene, selected);
         let node_fingerprint = node_graph_revision;
         if self.last_node_fingerprint != node_fingerprint {
             self.nodes_host.clear_pending_pin();
@@ -316,7 +324,7 @@ impl NativeGameWorkbench {
         }
         let layout_changed = self.last_layout != Some(layout);
         let status_refresh_due = self.last_status_text.is_empty()
-            || now_seconds - self.last_status_refresh_seconds >= 0.25;
+            || now_seconds - self.last_status_refresh_seconds >= 1.0;
         let status_text = status_refresh_due.then(|| self.performance_status_text());
         if status_refresh_due {
             // Sampling has its own cadence even when the displayed value is
@@ -331,8 +339,9 @@ impl NativeGameWorkbench {
         let surface_changed = selection_changed
             || layout_changed
             || self.toolbar_revision != self.last_toolbar_revision
-            || self.last_scene_fingerprint != fingerprint
             || self.last_hierarchy_fingerprint != hierarchy_fingerprint
+            || self.last_environment_fingerprint != environment_fingerprint
+            || self.last_selected_fingerprint != selected_fingerprint
             || self.last_node_fingerprint != node_fingerprint
             || self.last_history_state != (can_undo, can_redo, can_paste)
             || self.last_console_revision != self.console.revision()
@@ -377,7 +386,13 @@ impl NativeGameWorkbench {
             return;
         }
         let document_started = std::time::Instant::now();
-        let document_cause = self.workbench_change_cause(layout, fingerprint, selected);
+        let document_cause = self.workbench_change_cause(
+            layout,
+            hierarchy_fingerprint,
+            environment_fingerprint,
+            selected_fingerprint,
+            selected,
+        );
         let mut surface = self.build_surface(
             layout,
             scene,
@@ -675,8 +690,9 @@ impl NativeGameWorkbench {
         }
         self.surface_revision = self.surface_revision.wrapping_add(1).max(1);
         self.last_toolbar_revision = self.toolbar_revision;
-        self.last_scene_fingerprint = fingerprint;
+        self.last_environment_fingerprint = environment_fingerprint;
         self.last_hierarchy_fingerprint = hierarchy_fingerprint;
+        self.last_selected_fingerprint = selected_fingerprint;
         self.last_node_fingerprint = node_fingerprint;
         self.last_selection = selected.to_vec();
         self.last_layout = Some(layout);
@@ -1080,6 +1096,18 @@ pub(crate) fn nodes_graph_bounds(graph: &NodeGraph) -> [f32; 4] {
         return [0.0, 0.0, 0.0, 0.0];
     }
     [min[0], min[1], max[0] - min[0], max[1] - min[1]]
+}
+
+/// Visual identity of the current selection only. The inspector shows live
+/// transform and material values for selected nodes; unselected animation must
+/// not invalidate the retained workbench document or its texture table.
+fn selected_render_fingerprint(scene: &SceneGraph, selected: &[SceneNodeId]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for id in selected {
+        hash ^= scene.node_render_fingerprint(*id);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 pub(super) fn sync_hierarchy_scroll_state(

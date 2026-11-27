@@ -110,6 +110,10 @@ pub fn run(launch: PlayerLaunch, options: HeadlessOptions) -> Result<(), String>
     let mut tick_ms = 0.0_f64;
     let mut render_ms = 0.0_f64;
     let mut capture_ms = 0.0_f64;
+    let mut scene_rebuilds = 0_u64;
+    let mut ui_rebuilds = 0_u64;
+    let mut upload_bytes = 0_u64;
+    let mut draw_calls = 0_u64;
 
     for frame in 0..frames {
         input_script.fill_snapshot(frame, fixed_dt, &mut input_state, &mut frame_input);
@@ -118,6 +122,11 @@ pub fn run(launch: PlayerLaunch, options: HeadlessOptions) -> Result<(), String>
         let step_started = Instant::now();
         session.step_with_snapshot(&mut host, &mut compositor, &input, &frame_input, fixed_dt)?;
         let step_ms = step_started.elapsed().as_secs_f64() * 1000.0;
+        let metrics = compositor.metrics();
+        scene_rebuilds = scene_rebuilds.saturating_add(u64::from(metrics.scene_packet_rebuilds));
+        ui_rebuilds = ui_rebuilds.saturating_add(u64::from(metrics.ui_packet_rebuilds));
+        upload_bytes = upload_bytes.saturating_add(metrics.upload_bytes);
+        draw_calls = draw_calls.saturating_add(u64::from(metrics.draw_calls));
         let frame_render_ms = session.last_render_millis().clamp(0.0, step_ms);
         render_ms += frame_render_ms;
         tick_ms += (step_ms - frame_render_ms).max(0.0);
@@ -161,6 +170,10 @@ pub fn run(launch: PlayerLaunch, options: HeadlessOptions) -> Result<(), String>
         avg_tick_ms: tick_ms / divisor,
         avg_render_ms: render_ms / divisor,
         avg_capture_ms: capture_ms / divisor,
+        scene_packet_rebuilds: scene_rebuilds,
+        ui_packet_rebuilds: ui_rebuilds,
+        upload_bytes,
+        avg_draw_calls: draw_calls as f64 / divisor,
         first_frame_hash: hex_hash(first_frame_hash),
         last_frame_hash: hex_hash(last_frame_hash),
         diagnostics,
@@ -185,6 +198,10 @@ struct HeadlessReport {
     avg_tick_ms: f64,
     avg_render_ms: f64,
     avg_capture_ms: f64,
+    scene_packet_rebuilds: u64,
+    ui_packet_rebuilds: u64,
+    upload_bytes: u64,
+    avg_draw_calls: f64,
     first_frame_hash: String,
     last_frame_hash: String,
     diagnostics: Vec<String>,

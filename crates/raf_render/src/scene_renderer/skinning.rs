@@ -1,5 +1,6 @@
 //! CPU pose deformation reused by all ApiGraphicBasic devices.
 
+use crate::bounded_cache::BoundedCache;
 use crate::geometry::mesh_data::MeshData;
 use glam::{Mat3, Mat4};
 use raf_assets::skeletal_model::{self, SkeletalModel};
@@ -7,17 +8,24 @@ use raf_core::scene::{
     animation::resolve_path, mesh_asset::SkinBinding, MeshAssetRef, SceneGraph, SceneNodeId,
     WorldTransformCache,
 };
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 const MAX_SOURCES: usize = 8;
 const MAX_POSES: usize = 16;
 
-#[derive(Default)]
 pub(super) struct SkinCache {
-    sources: HashMap<(String, Option<String>), Arc<SkeletalModel>>,
-    poses: HashMap<u128, SkinPose>,
+    sources: BoundedCache<(String, Option<String>), Arc<SkeletalModel>>,
+    poses: BoundedCache<u128, SkinPose>,
+}
+
+impl Default for SkinCache {
+    fn default() -> Self {
+        Self {
+            sources: BoundedCache::new(MAX_SOURCES),
+            poses: BoundedCache::new(MAX_POSES),
+        }
+    }
 }
 
 struct SkinPose {
@@ -45,10 +53,6 @@ impl SkinCache {
             let file =
                 raf_assets::asset_paths::resolve_confined(asset_root, &reference.path).ok()?;
             let source = Arc::new(skeletal_model::load(&file, false).ok()?);
-            if self.sources.len() >= MAX_SOURCES {
-                self.sources.clear();
-                self.poses.clear();
-            }
             self.sources.insert(key, Arc::clone(&source));
             source
         };
@@ -105,9 +109,6 @@ impl SkinCache {
         }
         mesh.indices.clone_from(&shape.indices);
         let mesh = Arc::new(mesh);
-        if self.poses.len() >= MAX_POSES && !self.poses.contains_key(&identity) {
-            self.poses.clear();
-        }
         self.poses.insert(
             identity,
             SkinPose {

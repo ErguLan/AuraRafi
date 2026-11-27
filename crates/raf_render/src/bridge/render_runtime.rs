@@ -212,6 +212,11 @@ impl RenderRuntime {
         &self.scheduler
     }
 
+    /// Window-focus state currently driving the frame pacing policy.
+    pub fn window_focused(&self) -> bool {
+        self.scheduler.window_focused()
+    }
+
     pub fn scheduler_mut(&mut self) -> &mut FrameScheduler {
         &mut self.scheduler
     }

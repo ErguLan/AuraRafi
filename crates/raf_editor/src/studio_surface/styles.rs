@@ -832,6 +832,76 @@ pub(crate) fn hub_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 },
             ),
             UiStyleRule::new(
+                UiStyleSelector::Class("hub-create-advanced-toggle".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(4.0),
+                    text: Some(tokens.accent),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-create-advanced-toggle".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    text: Some(tokens.accent_hot),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-create-view-picker".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(4.0),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-create-view-option".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(3.0),
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-create-view-option".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-create-view-option-selected".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.selection),
+                    border: Some(tokens.accent),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    text: Some(tokens.accent),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-create-view-option-selected".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.accent_hot),
+                    text: Some(tokens.accent_hot),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
                 UiStyleSelector::Class("hub-recent".to_string()),
                 UiStylePatch {
                     fill: Some(tokens.surface),

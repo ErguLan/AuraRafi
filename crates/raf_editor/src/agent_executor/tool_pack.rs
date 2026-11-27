@@ -97,6 +97,9 @@ pub(super) fn build_tool_pack(
         ..AgentToolPack::default()
     };
     add_project_read_tools(&mut pack, intent, project_type);
+    if project_type == Some(ProjectType::Game) {
+        add_performance_tools(&mut pack);
+    }
     if project_type.is_some() && mode != AgentMode::Inspect && intent.assets {
         add_asset_generation_tools(&mut pack);
     }
@@ -904,4 +907,90 @@ impl AgentToolExecutor<'_> {
             }),
         )
     }
+}
+
+fn add_performance_tools(pack: &mut AgentToolPack) {
+    pack.push_native(
+        "performance_stats",
+        "Read windowed engine performance: presented FPS (avg/min/max/p50/p95), frame/CPU/GPU milliseconds, draw calls, uploads, memory, hitches, bottleneck diagnosis and suggestions. Requires a live editor viewport.",
+        object_schema(
+            Map::from_iter([(
+                "window_seconds".to_string(),
+                number_schema("Window size in seconds.", 0.5, 600.0),
+            )]),
+            &[],
+        ),
+        AgentToolKind::Read,
+        None,
+    );
+    pack.push_native(
+        "performance_benchmark_start",
+        "Start a reproducible performance benchmark: warmup, then measured seconds. The report is saved under .aura_rafi/benchmarks. Keep the viewport active and poll status.",
+        object_schema(
+            Map::from_iter([
+                (
+                    "seconds".to_string(),
+                    number_schema("Measured seconds.", 1.0, 600.0),
+                ),
+                (
+                    "warmup_seconds".to_string(),
+                    number_schema("Warmup seconds before measuring.", 0.0, 60.0),
+                ),
+                (
+                    "label".to_string(),
+                    string_schema("Optional human label for the report."),
+                ),
+            ]),
+            &[],
+        ),
+        AgentToolKind::Read,
+        None,
+    );
+    pack.push_native(
+        "performance_benchmark_status",
+        "Read the active benchmark phase, elapsed/remaining seconds and partial FPS. When the run completes it finalizes and saves the report.",
+        object_schema(
+            Map::from_iter([(
+                "id".to_string(),
+                string_schema("Optional benchmark id to verify."),
+            )]),
+            &[],
+        ),
+        AgentToolKind::Read,
+        None,
+    );
+    pack.push_native(
+        "performance_benchmark_stop",
+        "Stop the active benchmark early and save its report.",
+        object_schema(Map::new(), &[]),
+        AgentToolKind::Read,
+        None,
+    );
+    pack.push_native(
+        "performance_benchmark_cancel",
+        "Cancel the active benchmark without saving a report.",
+        object_schema(Map::new(), &[]),
+        AgentToolKind::Read,
+        None,
+    );
+    pack.push_native(
+        "performance_benchmark_list",
+        "List saved benchmark reports for the open project, newest first.",
+        object_schema(Map::new(), &[]),
+        AgentToolKind::Read,
+        None,
+    );
+    pack.push_native(
+        "performance_benchmark_compare",
+        "Compare two saved benchmarks: FPS, p95 frame time, CPU, GPU and draw-call deltas, with warnings when the scene, resolution, target FPS or backend changed.",
+        object_schema(
+            Map::from_iter([
+                ("a".to_string(), string_schema("Left benchmark id.")),
+                ("b".to_string(), string_schema("Right benchmark id.")),
+            ]),
+            &["a", "b"],
+        ),
+        AgentToolKind::Read,
+        None,
+    );
 }

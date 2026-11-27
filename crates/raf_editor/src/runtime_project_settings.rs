@@ -46,6 +46,22 @@ pub fn apply_text(
             candidate.validate_input()?;
             settings.input_axes = candidate.input_axes;
         }
+        "script_budget_ms" => {
+            let next = value
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "runtime.expected_positive_integer".to_string())?
+                .clamp(1, 100);
+            settings.script_budget_ms = next;
+        }
+        "script_operation_limit" => {
+            let next = value
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| "runtime.expected_positive_integer".to_string())?
+                .clamp(1_000, 1_000_000);
+            settings.script_operation_limit = next;
+        }
         "progress_schema" | "progress_slot_kib" | "progress_slot_count" | "autosave_slot" => {
             let mut policy = settings.progress.clone();
             let integer = || {

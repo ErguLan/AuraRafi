@@ -364,7 +364,11 @@ impl NativeEditorApplication {
             runtime.apply_engine_settings(&self.settings_state, allow_gpu_features);
             if let Some(project) = self.project.as_ref() {
                 runtime.apply_project_settings(&project.settings);
+                if project.project_type == ProjectType::Game {
+                    runtime.set_editor_view_mode(project.settings.default_editor_view);
+                }
                 runtime.set_project_asset_root(Some(project.path.as_path()));
+                runtime.prewarm_scene_textures(&self.scene, project.settings.texture_quality);
             }
         }
         self.electronics_editor = mounted_electronics;

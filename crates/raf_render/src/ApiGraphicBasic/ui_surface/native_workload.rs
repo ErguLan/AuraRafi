@@ -94,6 +94,7 @@ pub fn append_ui_fixture(
         painter.texture(Texture {
             size: [aw.into(), active_height.into()],
             rgba,
+            mipmaps: false,
         })
     } else {
         0
@@ -256,6 +257,7 @@ pub fn append_ui_fixture(
                         painter.texture(Texture {
                             size: source.size,
                             rgba: source.pixels.clone(),
+                            mipmaps: true,
                         })
                     });
                 let effect = list.effects.get(&UiPaintKey::Image(index));

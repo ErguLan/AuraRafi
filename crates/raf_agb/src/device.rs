@@ -290,6 +290,16 @@ pub trait Backend {
     fn supports_layers(&self) -> bool {
         false
     }
+    /// True when the executor can patch existing instance/vertex/texture
+    /// ranges without replacing the whole retained workload.
+    fn supports_frame_instance_patches(&self) -> bool {
+        false
+    }
+    /// Upper bound for GPU textures retained across packet replacement.
+    /// Executors without a cross-packet texture cache ignore it.
+    fn set_texture_cache_budget(&mut self, bytes: u64) {
+        let _ = bytes;
+    }
     fn configure(&mut self, plan: &FramePlan) -> Result<()>;
     fn upload(&mut self, workload: &Workload) -> Result<Self::Resident>;
     fn patch_row_alignment(&self) -> u64 {
@@ -399,10 +409,11 @@ pub struct Device<B: Backend> {
 }
 
 impl<B: Backend> Device<B> {
-    pub fn new(backend: B, budget: GraphicsMemoryBudget) -> Result<Self> {
+    pub fn new(mut backend: B, budget: GraphicsMemoryBudget) -> Result<Self> {
         budget
             .validate()
             .map_err(|error| Error::Backend(error.to_string()))?;
+        backend.set_texture_cache_budget(budget.gpu_bytes / 4);
         let mut ledger = GraphicsResourceLedger::new(budget.gpu_bytes);
         ledger.set_family_budget(GraphicsResourceFamily::Mesh, budget.gpu_bytes);
         ledger.set_family_budget(GraphicsResourceFamily::Transient, budget.gpu_bytes);
@@ -430,6 +441,11 @@ impl<B: Backend> Device<B> {
     /// acquisition. A false value keeps the single-packet composition path.
     pub fn supports_layers(&self) -> bool {
         self.backend.supports_layers()
+    }
+
+    /// True when the active executor accepts partial frame instance patches.
+    pub fn supports_frame_instance_patches(&self) -> bool {
+        self.backend.supports_frame_instance_patches()
     }
 
     /// The target must be configured before querying its filter support.
@@ -471,10 +487,14 @@ impl<B: Backend> Device<B> {
             .saturating_sub(self.backend.extra_target_bytes())
             .saturating_sub(target_bytes)
             .saturating_sub(self.resources.metrics().resident_bytes);
-        if bytes > available || bytes > self.budget.staging_bytes {
+        // Whole packets are retained after upload, so their one-shot staging
+        // copy is bounded by the packet limit rather than by the much smaller
+        // per-frame patch staging allowance.
+        let packet_limit = self.budget.packet_upload_bytes();
+        if bytes > available || bytes > packet_limit {
             return Err(Error::Budget {
                 requested: bytes,
-                available: available.min(self.budget.staging_bytes),
+                available: available.min(packet_limit),
             });
         }
         let charge = self
@@ -514,7 +534,7 @@ impl<B: Backend> Device<B> {
     }
 
     pub(crate) fn workload_budget(&self) -> u64 {
-        self.budget.staging_bytes.min(
+        self.budget.packet_upload_bytes().min(
             self.budget
                 .gpu_bytes
                 .saturating_sub(self.backend.extra_target_bytes())

@@ -9,6 +9,7 @@ use crate::cli::mcp::read_plan_resource;
 use crate::cli::{CliResult, PROTOCOL_VERSION, PROGRAM};
 use raf_core::agent_context::{self, AgentObservationResult};
 use raf_core::capabilities::CapabilityCatalog;
+use raf_core::performance::BenchmarkStore;
 use raf_core::project::{Project, ProjectType};
 use raf_core::session::ProjectSessionRegistry;
 use raf_core::transaction::{
@@ -589,6 +590,89 @@ impl HeadlessEngine {
         )
     }
 
+    fn execute_benchmark_list(&self, request: &EngineCommandRequest) -> EngineCommandResponse {
+        let Some(root) = self.project_path() else {
+            return self.error(
+                request.id,
+                "Performance benchmark",
+                "Benchmark history requires a mounted project. Pass --project PATH or run \
+                 `raf perf` with a live editor.",
+            );
+        };
+        match BenchmarkStore::for_project(root).list() {
+            Ok(benchmarks) => {
+                let mut lines: Vec<String> = benchmarks
+                    .iter()
+                    .take(6)
+                    .map(|benchmark| {
+                        format!(
+                            "{} — {:.1} FPS avg, p95 {:.2} ms ({})",
+                            benchmark.id,
+                            benchmark.fps_avg,
+                            benchmark.frame_p95,
+                            benchmark.verdict
+                        )
+                    })
+                    .collect();
+                if lines.is_empty() {
+                    lines.push("No saved benchmarks yet.".to_string());
+                }
+                self.response(
+                    request.id,
+                    "Benchmarks",
+                    lines,
+                    json!({"count": benchmarks.len(), "benchmarks": benchmarks}),
+                    false,
+                    None,
+                )
+            }
+            Err(error) => self.error(request.id, "Performance benchmark", error),
+        }
+    }
+
+    fn execute_benchmark_compare(&self, request: &EngineCommandRequest) -> EngineCommandResponse {
+        let (Some(left), Some(right)) = (
+            string_param(&request.params, "a"),
+            string_param(&request.params, "b"),
+        ) else {
+            return self.error(
+                request.id,
+                "Performance benchmark",
+                "performance.benchmark.compare requires 'a' and 'b' benchmark ids.",
+            );
+        };
+        let Some(root) = self.project_path() else {
+            return self.error(
+                request.id,
+                "Performance benchmark",
+                "Benchmark history requires a mounted project. Pass --project PATH or run \
+                 `raf perf` with a live editor.",
+            );
+        };
+        match BenchmarkStore::for_project(root).compare(left, right) {
+            Ok(comparison) => {
+                let mut lines = vec![format!(
+                    "{} → {}: {} | FPS {:+.1}% | p95 frame {:+.1}%",
+                    comparison.left.id,
+                    comparison.right.id,
+                    comparison.verdict,
+                    comparison.fps.delta_percent,
+                    comparison.frame_p95.delta_percent
+                )];
+                lines.extend(comparison.warnings.clone());
+                self.response(
+                    request.id,
+                    "Benchmark comparison",
+                    lines,
+                    json!(comparison),
+                    false,
+                    None,
+                )
+            }
+            Err(error) => self.error(request.id, "Performance benchmark", error),
+        }
+    }
+
     fn execute_observation(
         &self,
         request: &EngineCommandRequest,
@@ -732,14 +816,19 @@ impl HeadlessEngine {
         let rust_project = cwd
             .as_ref()
             .is_some_and(|path| path.join("Cargo.toml").exists());
+        let hardware = raf_core::hardware::report();
+        let hardware_line = hardware_summary(&hardware);
         self.response(
             request.id,
             "Rafi doctor",
-            vec![if rust_project {
-                "CLI environment looks usable.".to_string()
-            } else {
-                "CLI started outside a Rust workspace.".to_string()
-            }],
+            vec![
+                if rust_project {
+                    "CLI environment looks usable.".to_string()
+                } else {
+                    "CLI started outside a Rust workspace.".to_string()
+                },
+                hardware_line,
+            ],
             json!({
                 "cwd": cwd,
                 "cargo_manifest": rust_project,
@@ -747,6 +836,7 @@ impl HeadlessEngine {
                 "capability_count": self.catalog.capabilities.len(),
                 "protocol": raf_core::COMMAND_PROTOCOL_VERSION,
                 "mcp_protocol": PROTOCOL_VERSION,
+                "hardware": hardware,
             }),
             false,
             None,
@@ -894,6 +984,22 @@ impl HeadlessEngine {
     }
 }
 
+/// One-line machine summary for `doctor`. The OS constant is lowercase
+/// (`windows`), so common values get their display spelling.
+fn hardware_summary(hardware: &raf_core::hardware::HardwareReport) -> String {
+    let os = match hardware.os.as_str() {
+        "windows" => "Windows",
+        "macos" => "macOS",
+        "linux" => "Linux",
+        other => other,
+    };
+    let ram = hardware
+        .ram_total_mb
+        .map(|megabytes| format!("{megabytes} MB RAM"))
+        .unwrap_or_else(|| "unknown RAM".to_string());
+    format!("{os} · {} cores · {ram}", hardware.cpu_cores)
+}
+
 impl CommandEndpoint for HeadlessEngine {
     fn execute(&mut self, request: EngineCommandRequest) -> EngineCommandResponse {
         if let Err(error) = request.validate() {
@@ -944,6 +1050,18 @@ impl CommandEndpoint for HeadlessEngine {
             | "project.health"
             | "scene.verify"
             | "game.validate_layout" => self.execute_observation(&request, &name),
+            "performance.stats"
+            | "performance.benchmark.start"
+            | "performance.benchmark.status"
+            | "performance.benchmark.stop"
+            | "performance.benchmark.cancel" => self.error(
+                request.id,
+                "Performance telemetry unavailable",
+                "Performance telemetry requires an attached editor viewport. Run `raf perf` with \
+                 a live editor.",
+            ),
+            "performance.benchmark.list" => self.execute_benchmark_list(&request),
+            "performance.benchmark.compare" => self.execute_benchmark_compare(&request),
             "viewport.capture" | "viewport.screenshot" => self.error(
                 request.id,
                 "Viewport capture unavailable",

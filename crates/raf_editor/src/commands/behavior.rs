@@ -711,6 +711,7 @@ mod tests {
         let mut context = ScriptCommandContext {
             scene: &mut scene,
             assets_root: None,
+            editor_view: None,
         };
         let output = execute(
             &command("assembly.make_unique", &[("target", uuid.to_string())]),
@@ -760,6 +761,7 @@ mod tests {
         let mut context = ScriptCommandContext {
             scene: &mut scene,
             assets_root: Some(&assets),
+            editor_view: None,
         };
         let output = execute(
             &command("assembly.revert", &[("target", uuid.to_string())]),

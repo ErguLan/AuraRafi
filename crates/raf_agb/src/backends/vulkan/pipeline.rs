@@ -65,6 +65,8 @@ impl Bindings {
                     &vk::SamplerCreateInfo::default()
                         .min_filter(vk::Filter::LINEAR)
                         .mag_filter(vk::Filter::LINEAR)
+                        .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+                        .max_lod(16.0)
                         .address_mode_u(vk::SamplerAddressMode::REPEAT)
                         .address_mode_v(vk::SamplerAddressMode::REPEAT),
                     None,
@@ -116,7 +118,7 @@ impl Descriptors {
         gpu: &Rc<Gpu>,
         bindings: Rc<Bindings>,
         camera: &Buffer,
-        textures: &[Image],
+        textures: &[Rc<Image>],
     ) -> Result<Self> {
         let device = &gpu.device;
         let count = textures.len() as u32;

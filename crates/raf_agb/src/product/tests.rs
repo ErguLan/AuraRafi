@@ -34,8 +34,11 @@ fn packet() -> ProductPacket {
         }],
         textures: vec![Texture {
             size: [1, 1],
-            rgba: vec![255, 0, 0, 255],
+            rgba: vec![255, 0, 0, 255].into(),
+            mipmaps: false,
         }],
+        texture_ids: vec![0],
+        texture_updates: Vec::new(),
         commands: vec![
             Command::Clear([0., 0., 0., 1.]),
             Command::SetPipeline(Pipeline::LIT),
@@ -53,6 +56,36 @@ fn open_recorder() -> ProductDevice<Recorder> {
         ProductDevice::new(Recorder::default(), GraphicsMemoryBudget::potato()).unwrap();
     device.configure([64, 64], Output::Capture).unwrap();
     device
+}
+
+#[test]
+fn stable_texture_ids_survive_encoding_for_cross_packet_reuse() {
+    let mut source = packet();
+    source.texture_ids = vec![42];
+    let encoded = super::encode::encode(source, u64::MAX).unwrap();
+    assert_eq!(encoded.workload.texture_ids, vec![42, 0]);
+}
+
+#[test]
+fn frame_instance_patch_updates_instances_without_replacing_the_packet() {
+    let mut device = open_recorder();
+    let key = PacketKey(11);
+    let handle = device.prepare(key, 4, packet).unwrap();
+    let moved = [Instance::new(
+        Mat4::from_translation(glam::Vec3::X),
+        [1.; 4],
+    )];
+    device
+        .patch_frame_instances(handle, &[(2, moved.as_slice())])
+        .unwrap();
+    let frame = device.draw(handle, &FrameUniforms::default()).unwrap();
+    assert_eq!(frame.upload_bytes, std::mem::size_of::<Instance>() as u64);
+    assert_eq!(
+        device
+            .prepare(key, 4, || panic!("same topology must keep the packet"))
+            .unwrap(),
+        handle
+    );
 }
 
 #[test]

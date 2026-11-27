@@ -20,14 +20,22 @@ pub(super) fn execute(
     assets_root: Option<&Path>,
 ) -> Option<CommandOutput> {
     if command.name.starts_with("behavior.") || command.name.starts_with("prefab.") {
-        let mut context = ScriptCommandContext { scene, assets_root };
+        let mut context = ScriptCommandContext {
+            scene,
+            assets_root,
+            editor_view: None,
+        };
         Some(crate::commands::behavior::execute(
             command,
             &mut context,
             false,
         ))
     } else if command.name.starts_with("script.") {
-        let mut context = ScriptCommandContext { scene, assets_root };
+        let mut context = ScriptCommandContext {
+            scene,
+            assets_root,
+            editor_view: None,
+        };
         Some(script::execute(&command.name, command, &mut context))
     } else {
         None
@@ -44,6 +52,7 @@ pub(super) fn preview(
         let mut context = ScriptCommandContext {
             scene: &mut scene,
             assets_root,
+            editor_view: None,
         };
         return Some(crate::commands::behavior::execute(
             command,

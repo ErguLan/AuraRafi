@@ -4,7 +4,7 @@
 //! exposes the existing editor tools as a bounded, retained overlay.
 
 use super::primitive_create::{primitive_key, primitive_slug, CREATEABLE_PRIMITIVES};
-use raf_core::project::BuildingStyle;
+use raf_core::project::{BuildingStyle, EditorViewMode};
 use raf_core::scene::Primitive;
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiIcon, UiIconId, UiIconSize, UiSurface,
@@ -42,13 +42,10 @@ pub enum ViewportToolbarAction {
 pub struct ViewportToolbarState {
     pub select_mode: bool,
     pub tool: ViewportTool,
-    pub render_style: ViewportRenderStyle,
     pub polygons_visible: bool,
     pub grid_visible: bool,
     pub labels_visible: bool,
-    pub view_mode: ViewportViewMode,
-    pub view_menu_open: bool,
-    pub shading_menu_open: bool,
+    pub view_mode: EditorViewMode,
     pub primitive_menu_open: bool,
     pub building_style: BuildingStyle,
     pub building_menu_open: bool,
@@ -64,20 +61,12 @@ pub enum ViewportTool {
     Scale,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ViewportRenderStyle {
-    Solid,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ViewportViewMode {
-    View2d,
-    View3d,
-}
-
 const TOP_BAR_HEIGHT: f32 = 46.0;
 const RAIL_TOP: f32 = 54.0;
 const RAIL_WIDTH: f32 = 42.0;
+const VIEW_SWITCH_WIDTH: f32 = 58.0;
+const VIEW_SWITCH_COMPACT_WIDTH: f32 = 58.0;
+const VIEW_SWITCH_OPTION_HEIGHT: f32 = 26.0;
 const DROPDOWN_MIN_WIDTH: f32 = 152.0;
 const DROPDOWN_OPTION_HEIGHT: f32 = 27.0;
 const DROPDOWN_GAP: f32 = 4.0;
@@ -115,16 +104,18 @@ pub fn plan_viewport_toolbar_actions(
     measure_text: impl FnMut(&str) -> f32,
 ) -> (Vec<UiActionBarItem>, UiActionBarPlan) {
     let items = viewport_toolbar_action_items(state, language);
-    let view_width = if state.compact { 42.0 } else { 112.0 };
-    let shading_width = if state.compact { 42.0 } else { 96.0 };
+    let view_width = if state.compact {
+        VIEW_SWITCH_COMPACT_WIDTH
+    } else {
+        VIEW_SWITCH_WIDTH
+    };
     let separator_width = 4.0;
     let top_layout = top_toolbar_layout(toolbar_width);
     let fixed_width = top_layout.padding.left
         + top_layout.padding.right
         + view_width
-        + shading_width
-        + separator_width * 2.0
-        + top_layout.gap * 4.0;
+        + separator_width
+        + top_layout.gap * 2.0;
     let available_width = (toolbar_width - fixed_width).max(0.0);
     let plan = plan_action_bar(&items, available_width, theme, measure_text);
     (items, plan)
@@ -260,8 +251,11 @@ fn top_toolbar_measured(
     theme: UiThemeMetrics,
 ) -> UiNode {
     let tokens = palette.tokens();
-    let view_width = if state.compact { 42.0 } else { 112.0 };
-    let shading_width = if state.compact { 42.0 } else { 96.0 };
+    let view_width = if state.compact {
+        VIEW_SWITCH_COMPACT_WIDTH
+    } else {
+        VIEW_SWITCH_WIDTH
+    };
     let mut row = UiNode::new("viewport.toolbar.top", UiNodeKind::Toolbar)
         .with_class("viewport-toolbar-top")
         .with_material(UiSurfaceMaterial::TranslucentChrome)
@@ -274,16 +268,10 @@ fn top_toolbar_measured(
             radius: 5.0,
             opacity: 1.0,
         })
-        .with_child(view_dropdown(palette, state, view_width))
+        .with_child(view_switcher(palette, state, view_width))
         .with_child(separator(
             palette,
             "viewport.toolbar.top.separator-view",
-            4.0,
-        ))
-        .with_child(shading_dropdown(palette, state, shading_width))
-        .with_child(separator(
-            palette,
-            "viewport.toolbar.top.separator-actions",
             4.0,
         ))
         .with_child(action_bar_node(
@@ -299,9 +287,13 @@ fn top_toolbar_measured(
 
 fn top_toolbar(palette: StudioUiPalette, state: ViewportToolbarState) -> UiNode {
     let tokens = palette.tokens();
-    let width = if state.compact { 230.0 } else { 396.0 };
-    let shading_width = if state.compact { 42.0 } else { 96.0 };
+    let width = if state.compact { 196.0 } else { 232.0 };
     let labels_width = if state.compact { 34.0 } else { 68.0 };
+    let view_width = if state.compact {
+        VIEW_SWITCH_COMPACT_WIDTH
+    } else {
+        VIEW_SWITCH_WIDTH
+    };
     let mut row = UiNode::new("viewport.toolbar.top", UiNodeKind::Toolbar)
         .with_class("viewport-toolbar-top")
         .with_material(UiSurfaceMaterial::TranslucentChrome)
@@ -321,17 +313,12 @@ fn top_toolbar(palette: StudioUiPalette, state: ViewportToolbarState) -> UiNode 
             opacity: 1.0,
         });
     row = row
-        .with_child(view_dropdown(
-            palette,
-            state,
-            if state.compact { 42.0 } else { 112.0 },
-        ))
+        .with_child(view_switcher(palette, state, view_width))
         .with_child(separator(
             palette,
             "viewport.toolbar.top.separator-view",
             4.0,
         ))
-        .with_child(shading_dropdown(palette, state, shading_width))
         .with_child(toolbar_button(
             palette,
             "viewport.toolbar.polygons",
@@ -558,92 +545,50 @@ fn select_popup_option(
         })
 }
 
-fn view_dropdown(palette: StudioUiPalette, state: ViewportToolbarState, width: f32) -> UiNode {
-    let options = vec![
-        UiSelectOption::new("2d", "app.viewport_2d_short"),
-        UiSelectOption::new("3d", "app.viewport_3d_short"),
-    ];
-    let selected_index = match state.view_mode {
-        ViewportViewMode::View2d => 0,
-        ViewportViewMode::View3d => 1,
-    };
-    let (selected_icon, label_key) = match state.view_mode {
-        ViewportViewMode::View2d => (UiIconId::View2d, "app.viewport_2d_short"),
-        ViewportViewMode::View3d => (UiIconId::View3d, "app.viewport_3d_short"),
-    };
-    let trigger_id = "viewport.toolbar.view-mode.trigger";
-    let popup_id = "viewport.toolbar.view-mode.menu";
-    let trigger = toolbar_select_trigger(
-        palette,
-        trigger_id,
-        "viewport.view_mode",
-        options.clone(),
-        selected_index,
-        state.view_menu_open,
-        selected_icon,
-        label_key,
-        width,
-        state.compact,
-        popup_id,
-    );
+fn view_switcher(palette: StudioUiPalette, state: ViewportToolbarState, width: f32) -> UiNode {
+    let tokens = palette.tokens();
+    let option_width = ((width - 4.0 - 2.0) / 2.0).max(20.0);
     let mut group = UiNode::new("viewport.toolbar.view-mode", UiNodeKind::Panel)
-        .with_layout(UiLayout::fixed(width, 30.0))
-        .with_style(UiStyle::transparent())
-        .with_child(trigger);
-    if state.view_menu_open {
-        group = group.with_child(toolbar_dropdown_menu(
-            palette,
-            popup_id,
-            "viewport-toolbar-menu",
-            UiRect::new(0.0, 32.0, 0.0, 0.0),
-            options.as_slice(),
-            "viewport.view_mode",
-            selected_index,
-            trigger_id,
-            "viewport.toolbar.view-mode.option",
-            None,
-        ));
-    }
-    group
-}
-
-fn shading_dropdown(palette: StudioUiPalette, state: ViewportToolbarState, width: f32) -> UiNode {
-    let options = vec![UiSelectOption::new("solid", "app.viewport_lit_short")];
-    let selected_index = 0;
-    let label_key = "app.viewport_lit_short";
-    let icon = UiIconId::Shaded;
-    let trigger_id = "viewport.toolbar.shading.trigger";
-    let popup_id = "viewport.toolbar.shading.menu";
-    let trigger = toolbar_select_trigger(
-        palette,
-        trigger_id,
-        "viewport.render_style",
-        options.clone(),
-        selected_index,
-        state.shading_menu_open,
-        icon,
-        label_key,
-        width,
-        state.compact,
-        popup_id,
-    );
-    let mut group = UiNode::new("viewport.toolbar.shading", UiNodeKind::Panel)
-        .with_layout(UiLayout::fixed(width, 30.0))
-        .with_style(UiStyle::transparent())
-        .with_child(trigger);
-    if state.shading_menu_open {
-        group = group.with_child(toolbar_dropdown_menu(
-            palette,
-            popup_id,
-            "viewport-toolbar-menu",
-            UiRect::new(0.0, 32.0, 0.0, 0.0),
-            options.as_slice(),
-            "viewport.render_style",
-            selected_index,
-            trigger_id,
-            "viewport.toolbar.shading.option",
-            None,
-        ));
+        .with_class("viewport-toolbar-view-switch")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 2.0,
+            padding: UiSpacing::xy(2.0, 0.0),
+            ..UiLayout::fixed(width, 30.0)
+        });
+    for (mode, slug, label_key) in [
+        (EditorViewMode::View2d, "2d", "app.viewport_2d_short"),
+        (EditorViewMode::View3d, "3d", "app.viewport_3d_short"),
+    ] {
+        let selected = state.view_mode == mode;
+        group = group.with_child(
+            UiNode::new(format!("viewport.toolbar.view-{slug}"), UiNodeKind::Button)
+                .with_class(if selected {
+                    "viewport-toolbar-view-option-active"
+                } else {
+                    "viewport-toolbar-view-option"
+                })
+                .with_layout(UiLayout::fixed(option_width, VIEW_SWITCH_OPTION_HEIGHT))
+                .with_text_key(label_key)
+                .with_text_style(UiTextStyle {
+                    inherit_color: true,
+                    ..UiTextStyle::button(tokens.text_muted)
+                })
+                .with_tooltip_key(if mode.is_2d() {
+                    "viewport.hud.2d_view"
+                } else {
+                    "viewport.hud.3d_view"
+                })
+                .with_accessibility_label_key(label_key)
+                .with_accessibility_role(UiAccessibilityRole::Button)
+                .with_accessibility_selected(selected)
+                .focusable()
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    format!("viewport.view-{slug}"),
+                )),
+        );
     }
     group
 }
@@ -1091,6 +1036,56 @@ fn viewport_toolbar_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             )
             .when(UiStyleRuleState::Hovered),
             UiStyleRule::new(
+                UiStyleSelector::Class("viewport-toolbar-view-switch".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(4.0),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("viewport-toolbar-view-option".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(3.0),
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("viewport-toolbar-view-option".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("viewport-toolbar-view-option-active".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.selection),
+                    border: Some(tokens.accent),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    text: Some(tokens.accent),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("viewport-toolbar-view-option-active".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.accent_hot),
+                    text: Some(tokens.accent_hot),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
                 UiStyleSelector::Class("viewport-primitive-option".to_string()),
                 UiStylePatch {
                     fill: Some(tokens.surface_raised),
@@ -1152,7 +1147,6 @@ pub fn parse_viewport_toolbar_select_action(
     match (key, value) {
         ("viewport.view_mode", "2d") => Some(ViewportToolbarAction::View2d),
         ("viewport.view_mode", "3d") => Some(ViewportToolbarAction::View3d),
-        ("viewport.render_style", "solid") => Some(ViewportToolbarAction::Solid),
         ("viewport.building_style", "free") => {
             Some(ViewportToolbarAction::SetBuildingStyle(BuildingStyle::Free))
         }
@@ -1191,13 +1185,10 @@ mod tests {
         ViewportToolbarState {
             select_mode: true,
             tool: ViewportTool::Select,
-            render_style: ViewportRenderStyle::Solid,
             polygons_visible: false,
             grid_visible: true,
             labels_visible: true,
-            view_mode: ViewportViewMode::View3d,
-            view_menu_open: false,
-            shading_menu_open: false,
+            view_mode: EditorViewMode::View3d,
             primitive_menu_open: false,
             building_style: BuildingStyle::Free,
             building_menu_open: false,
@@ -1212,7 +1203,7 @@ mod tests {
         let top = find_node(&surface.root, "viewport.toolbar.top").expect("top bar");
         let rail = find_node(&surface.root, "viewport.toolbar.rail").expect("tool rail");
 
-        assert_eq!(top.layout.rect, Some(UiRect::new(0.0, 0.0, 396.0, 46.0)));
+        assert_eq!(top.layout.rect, Some(UiRect::new(0.0, 0.0, 232.0, 46.0)));
         assert_eq!(rail.layout.rect, Some(UiRect::new(0.0, 54.0, 42.0, 308.0)));
         assert!(find_node(&surface.root, "viewport.toolbar.select").is_some());
         assert!(find_node(&surface.root, "viewport.toolbar.view-mode").is_some());
@@ -1247,95 +1238,70 @@ mod tests {
     }
 
     #[test]
-    fn compact_toolbar_keeps_actions_available_as_icons() {
+    fn compact_toolbar_keeps_the_view_switch_and_actions_reachable() {
         let surface = build_viewport_toolbar_surface(StudioUiPalette::IndustrialDark, state(true));
-        let perspective = find_node(&surface.root, "viewport.toolbar.view-mode.trigger")
-            .expect("view mode trigger");
-        let shading =
-            find_node(&surface.root, "viewport.toolbar.shading.trigger").expect("shading dropdown");
+        let two_d = find_node(&surface.root, "viewport.toolbar.view-2d").expect("2D option");
+        let three_d = find_node(&surface.root, "viewport.toolbar.view-3d").expect("3D option");
         let show = find_node(&surface.root, "viewport.toolbar.labels").expect("show toggle");
 
-        assert!(perspective.text_key.is_none());
-        assert!(shading.text_key.is_none());
+        assert_eq!(two_d.text_key.as_deref(), Some("app.viewport_2d_short"));
+        assert_eq!(three_d.text_key.as_deref(), Some("app.viewport_3d_short"));
+        assert!(two_d.tooltip_key.is_some());
+        assert!(three_d.tooltip_key.is_some());
         assert!(show.text_key.is_none());
-        assert!(perspective.tooltip_key.is_some());
-        assert!(shading.tooltip_key.is_some());
         assert!(show.tooltip_key.is_some());
     }
 
     #[test]
-    fn rafui_regression_view_selector_icon_label_and_chevron_do_not_overlap() {
-        for open in [false, true] {
-            let mut toolbar_state = state(false);
-            toolbar_state.view_menu_open = open;
-            let surface =
-                build_viewport_toolbar_surface(StudioUiPalette::IndustrialDark, toolbar_state);
-            let mut session =
-                raf_render::api_graphic_basic::ui_surface::UiSurfaceSession::default();
-            let frame = session.build_frame_with_resolved_text_at_scale(
-                &surface,
-                800,
-                600,
-                [0; 4],
-                1.25,
-                |key| match key {
-                    "app.viewport_3d_short" => "3D".into(),
-                    "app.viewport_2d_short" => "2D".into(),
-                    _ => key.to_owned(),
-                },
-            );
-            let bounds = |suffix: &str| {
-                frame
-                    .layout_boxes
-                    .iter()
-                    .find(|b| b.id == format!("viewport.toolbar.view-mode.trigger.{suffix}"))
-                    .unwrap()
-                    .rect
-            };
-            assert!(bounds("icon").right() <= bounds("label").x);
-            assert!(bounds("label").right() <= bounds("chevron").x);
+    fn view_switch_buttons_fit_without_overlap() {
+        let surface = build_viewport_toolbar_surface(StudioUiPalette::IndustrialDark, state(false));
+        let mut session = raf_render::api_graphic_basic::ui_surface::UiSurfaceSession::default();
+        let frame = session.build_frame_with_resolved_text_at_scale(
+            &surface,
+            800,
+            600,
+            [0; 4],
+            1.25,
+            |key| match key {
+                "app.viewport_3d_short" => "3D".into(),
+                "app.viewport_2d_short" => "2D".into(),
+                _ => key.to_owned(),
+            },
+        );
+        let bounds = |id: &str| frame.layout_boxes.iter().find(|b| b.id == id).unwrap().rect;
+        let group = bounds("viewport.toolbar.view-mode");
+        let two_d = bounds("viewport.toolbar.view-2d");
+        let three_d = bounds("viewport.toolbar.view-3d");
+        assert!(two_d.right() <= three_d.x);
+        assert!(group.x <= two_d.x);
+        assert!(three_d.right() <= group.right());
+    }
+
+    #[test]
+    fn view_switch_exposes_two_direct_actions_without_a_menu() {
+        let surface = build_viewport_toolbar_surface(StudioUiPalette::IndustrialDark, state(false));
+
+        assert!(find_node(&surface.root, "viewport.toolbar.view-mode.menu").is_none());
+        assert!(find_node(&surface.root, "viewport.toolbar.view-mode.trigger").is_none());
+        for (id, command) in [
+            ("viewport.toolbar.view-2d", "viewport.view-2d"),
+            ("viewport.toolbar.view-3d", "viewport.view-3d"),
+        ] {
+            let node = find_node(&surface.root, id).expect("view option");
+            assert!(node.event_handlers.iter().any(|binding| matches!(
+                &binding.action,
+                UiAction::Command { name } if name == command
+            )));
         }
     }
 
     #[test]
-    fn view_dropdown_exposes_only_the_two_view_modes() {
-        let mut toolbar_state = state(false);
-        toolbar_state.view_menu_open = true;
-        let surface =
-            build_viewport_toolbar_surface(StudioUiPalette::IndustrialDark, toolbar_state);
+    fn shading_dropdown_is_removed_and_polygon_edges_remain_a_quick_toggle() {
+        let surface = build_viewport_toolbar_surface(StudioUiPalette::IndustrialDark, state(false));
 
-        assert!(find_node(&surface.root, "viewport.toolbar.view-mode.menu").is_some());
-        assert!(find_node(&surface.root, "viewport.toolbar.view-mode.option.0").is_some());
-        assert!(find_node(&surface.root, "viewport.toolbar.view-mode.option.1").is_some());
-        assert!(find_node(&surface.root, "viewport.toolbar.view-2d").is_none());
-        assert!(find_node(&surface.root, "viewport.toolbar.view-3d").is_none());
-        let menu = find_node(&surface.root, "viewport.toolbar.view-mode.menu").expect("view menu");
-        assert_eq!(menu.layout.flow, UiFlow::Column);
-        assert_eq!(menu.layout.rect.map(|rect| rect.height), Some(74.0));
-    }
-
-    #[test]
-    fn shading_is_a_dropdown_and_polygon_edges_are_a_quick_toggle() {
-        let mut toolbar_state = state(false);
-        toolbar_state.shading_menu_open = true;
-        let surface =
-            build_viewport_toolbar_surface(StudioUiPalette::IndustrialDark, toolbar_state);
-
-        assert!(find_node(&surface.root, "viewport.toolbar.shading.menu").is_some());
+        assert!(find_node(&surface.root, "viewport.toolbar.shading").is_none());
+        assert!(find_node(&surface.root, "viewport.toolbar.shading.menu").is_none());
         assert!(find_node(&surface.root, "viewport.toolbar.polygons").is_some());
-        assert!(find_node(&surface.root, "viewport.toolbar.solid").is_none());
-        assert!(find_node(&surface.root, "viewport.toolbar.preview").is_none());
-        let menu = find_node(&surface.root, "viewport.toolbar.shading.menu").expect("shading menu");
-        assert_eq!(menu.layout.flow, UiFlow::Column);
-        assert_eq!(menu.layout.rect.map(|rect| rect.height), Some(43.0));
-        assert!(find_node(&surface.root, "viewport.toolbar.shading.option.0").is_some());
-        assert_eq!(
-            find_node(&surface.root, "viewport.toolbar.shading.option.0")
-                .and_then(|node| node.text_key.as_deref()),
-            Some("app.viewport_lit_short")
-        );
-        assert!(find_node(&surface.root, "viewport.toolbar.shading.option.1").is_none());
-        assert!(find_node(&surface.root, "viewport.toolbar.shading.option.2").is_none());
         assert!(parse_viewport_toolbar_action(&UiAction::Command {
             name: "viewport.render.wireframe".to_string(),
         })

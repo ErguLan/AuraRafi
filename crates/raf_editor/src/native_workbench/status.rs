@@ -148,7 +148,7 @@ impl NativeGameWorkbench {
         let memory = self.last_performance_segment.as_str();
         let memory_separator = if memory.is_empty() { "" } else { " | " };
         format!(
-            "CAP:{capacity} FPS | FPS:{presented_fps:.0}/{target} | VP:{viewport} | CPU:{frame_cpu_ms:.1}ms | GPU:{gpu} | P95:{p95_frame_time_ms:.1}ms{memory_separator}{memory} | D{scene_draw_calls} | U{upload_kib:.0}K{upload_warning}{shadow} | H{hitch_count} | {frame_activity_label} | {redraw_reason_label} | {canvas_status_label} | {presentation_label}",
+            "CAP:{capacity} | FPS:{presented_fps:.0}/{target} | VP:{viewport} | CPU:{frame_cpu_ms:.1}ms | GPU:{gpu} | P95:{p95_frame_time_ms:.1}ms{memory_separator}{memory} | D{scene_draw_calls} | U{upload_kib:.0}K{upload_warning}{shadow} | H{hitch_count} | {frame_activity_label} | {redraw_reason_label} | {canvas_status_label} | {presentation_label}",
             capacity = capacity,
             presented_fps = self.presented_fps,
             target = target,

@@ -153,6 +153,24 @@ fn append(list: &UiSurfaceDrawList, atlas: &UiTextAtlas, images: &UiSurfaceImage
 }
 
 #[test]
+fn texture_ids_are_stable_across_ui_packet_rebuilds() {
+    let mut list = UiSurfaceDrawList {
+        text: vec![glyph(rect(0.0, 0.0, 8.0, 8.0), [255; 4])],
+        images: vec![image("img", 200.0, UiImageFit::Stretch)],
+        ..UiSurfaceDrawList::default()
+    };
+    list.paint_order = vec![text_command(0, 0), image_command(0, 1)];
+    let mut images = UiSurfaceImageStore::default();
+    images.insert_rgba("img", [2, 2], vec![255; 16]).unwrap();
+    let atlas = UiTextAtlas::new([16, 16]);
+
+    let first = append(&list, &atlas, &images);
+    let second = append(&list, &atlas, &images);
+    assert_eq!(first.texture_ids, second.texture_ids);
+    assert!(first.texture_ids.iter().all(|id| *id != 0));
+}
+
+#[test]
 fn paint_order_is_preserved_exactly() {
     // Deliberately interleaved: a kind-ordered emitter would reorder this.
     let mut list = UiSurfaceDrawList {

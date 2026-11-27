@@ -9,6 +9,7 @@ mod evidence;
 mod execution;
 mod image;
 mod intent;
+mod performance;
 mod schemas;
 mod scripting;
 #[cfg(test)]
@@ -444,6 +445,10 @@ impl ToolExecutor for AgentToolExecutor<'_> {
 
         if name == "viewport_capture" {
             return self.execute_viewport_capture(arguments);
+        }
+
+        if name.starts_with("performance_") {
+            return self.execute_performance(name, &arguments);
         }
 
         if name == "scene_visual_review" {

@@ -290,5 +290,7 @@ Usage:\n  raf doctor [--json]\n  raf editors [--json]                 list known
     println!("Project persistence: raf project save|checkpoint [--wait] --confirm");
     println!("Budgets: --budget JSON or --max-tool-calls N --max-milliseconds N --max-scene-operations N --max-scene-entities N --max-result-bytes N --budget-profile NAME");
     println!("Additional inspection: raf context [--project PATH]");
+    println!("Performance: raf perf [--window SECONDS] [--json]");
+    println!("Benchmarks: raf benchmark start [--seconds N] [--warmup N] [--label TEXT] | status [--id ID] | stop [--id ID] | cancel | list | compare A B, all with [--json]");
     println!("Scene automation: raf scene outline|digest|query|inspect|selection|verify|navigation|map|create|update|build|reconcile|repair|program|commit|cancel|brief|batch, raf selection, raf viewport capture [--preset contact_sheet|top_down_map], raf task list|get|events|cancel, raf assets search|inspect, raf scripts search, raf health");
 }

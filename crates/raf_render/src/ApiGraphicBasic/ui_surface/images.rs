@@ -516,7 +516,11 @@ impl UiSurfaceImageStore {
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
         if let Ok(mut last_used) = self.last_used.lock() {
-            last_used.insert(key.to_string(), sequence);
+            if let Some(entry) = last_used.get_mut(key) {
+                *entry = sequence;
+            } else {
+                last_used.insert(key.to_string(), sequence);
+            }
         }
     }
 

@@ -40,6 +40,7 @@ impl<'a> Painter<'a> {
             workload.textures.push(Texture {
                 size: [1, 1],
                 rgba: vec![255; 4],
+                mipmaps: false,
             });
         }
         let instance = workload

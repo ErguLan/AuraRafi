@@ -67,6 +67,9 @@ impl CapabilityDefinition {
             || name == "task.get"
             || name == "task.events"
             || name == "selection.get"
+            || name == "performance.stats"
+            || name == "performance.benchmark.status"
+            || name == "performance.benchmark.compare"
             || name == "workspace.read"
             || name == "workspace.search"
     }

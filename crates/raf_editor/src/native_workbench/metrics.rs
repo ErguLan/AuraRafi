@@ -18,7 +18,15 @@ impl NativeGameWorkbench {
         frame_activity_label: &'static str,
         redraw_reason_label: &'static str,
         canvas_status_label: &'static str,
+        camera_navigation_active: bool,
     ) {
+        // Reformatting FPS/CPU text every frame during camera movement forces
+        // the retained workbench surface to resubmit its resources. Freeze the
+        // readout for the gesture; it refreshes as soon as navigation settles.
+        if camera_navigation_active && self.performance_initialized {
+            return;
+        }
+        self.performance_initialized = true;
         self.presented_fps = presented_fps.max(0.0);
         self.estimated_capacity_fps = estimated_capacity_fps(
             capacity_cpu_ms,

@@ -745,6 +745,10 @@ impl UiSurfaceSession {
         self.environment.high_contrast = high_contrast;
     }
 
+    pub fn environment(&self) -> UiEnvironment {
+        self.environment
+    }
+
     pub fn set_environment(&mut self, environment: UiEnvironment) {
         self.environment = environment;
         self.reduced_motion = environment.prefers_reduced_motion;

@@ -30,7 +30,8 @@ pub fn scene(shadows: bool, repeat: u32) -> Workload {
     let mut workload = Workload::default();
     workload.textures.push(Texture {
         size: [1, 1],
-        rgba: vec![255; 4],
+        rgba: vec![255; 4].into(),
+        mipmaps: false,
     });
     let mut checker = Vec::new();
     for y in 0..32 {
@@ -45,7 +46,8 @@ pub fn scene(shadows: bool, repeat: u32) -> Workload {
     }
     workload.textures.push(Texture {
         size: [32, 32],
-        rgba: checker,
+        rgba: checker.into(),
+        mipmaps: true,
     });
     let ground = quad(
         &mut workload,

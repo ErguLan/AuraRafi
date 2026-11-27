@@ -673,6 +673,71 @@ pub(super) fn mcp_semantic_tools() -> Vec<Value> {
                 true,
             ),
         ),
+        mcp_tool(
+            "raf_performance",
+            "Read the live editor performance window: FPS, frame/CPU/GPU time, draw calls, uploads, hitches and an automatic bottleneck diagnosis. Requires a live attached editor viewport.",
+            schema(
+                vec![(
+                    "window_seconds",
+                    json!({"type":"number","minimum":0.5,"maximum":600,"description":"Sampling window in seconds; defaults to the last 5 seconds."}),
+                )],
+                &[],
+                false,
+            ),
+        ),
+        mcp_tool(
+            "raf_benchmark_start",
+            "Start a timed frame benchmark on the attached editor viewport. Keep the viewport active, then poll raf_benchmark_status or finish early with raf_benchmark_stop.",
+            schema(
+                vec![
+                    ("seconds", json!({"type":"number","minimum":1,"maximum":600,"description":"Measured duration in seconds; defaults to 10."})),
+                    ("warmup_seconds", json!({"type":"number","minimum":0,"maximum":60,"description":"Discarded warmup in seconds; defaults to 2."})),
+                    ("label", json!({"type":"string","description":"Optional human label used in the benchmark id and report."})),
+                ],
+                &[],
+                false,
+            ),
+        ),
+        mcp_tool(
+            "raf_benchmark_status",
+            "Read progress for the active benchmark; when no run is active, load a saved report by id instead.",
+            schema(
+                vec![("id", json!({"type":"string","minLength":1,"description":"Optional active benchmark id or saved report id."}))],
+                &[],
+                false,
+            ),
+        ),
+        mcp_tool(
+            "raf_benchmark_stop",
+            "Finish the active benchmark now, persist the report and return its measured summary.",
+            schema(
+                vec![("id", json!({"type":"string","minLength":1,"description":"Optional id that must match the active benchmark."}))],
+                &[],
+                false,
+            ),
+        ),
+        mcp_tool(
+            "raf_benchmark_cancel",
+            "Cancel the active benchmark and discard its samples without saving a report.",
+            schema(Vec::new(), &[], false),
+        ),
+        mcp_tool(
+            "raf_benchmark_list",
+            "List saved benchmark reports for the project with FPS, p95 frame time, verdict and measurement environment.",
+            schema(Vec::new(), &[], false),
+        ),
+        mcp_tool(
+            "raf_benchmark_compare",
+            "Compare two saved benchmark reports and report FPS and frame-time deltas, comparability warnings and an improved, regressed or incomparable verdict.",
+            schema(
+                vec![
+                    ("a", json!({"type":"string","minLength":1,"description":"Baseline benchmark id."})),
+                    ("b", json!({"type":"string","minLength":1,"description":"Candidate benchmark id."})),
+                ],
+                &["a", "b"],
+                false,
+            ),
+        ),
     ]
 }
 
@@ -902,7 +967,7 @@ pub(super) fn mcp_tool(name: &str, description: &str, input_schema: Value) -> Va
         "_capture", "_get", "_events", "_preview", "_plan", "_program", "_verify", "_health",
         "_review", "_map",
         "_capabilities", "_doctor", "_assets", "_scripts", "_task_get", "_task_events",
-        "_lighting_inspect",
+        "_lighting_inspect", "_performance", "_compare",
     ]
     .iter()
     .any(|suffix| name.contains(suffix));

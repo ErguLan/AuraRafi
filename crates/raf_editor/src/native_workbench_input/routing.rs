@@ -19,8 +19,6 @@ impl NativeGameWorkbench {
             .snapshot()
             .button_pressed(raf_core::PointerButton::Primary)
             && (self.toolbar_state.primitive_menu_open
-                || self.toolbar_state.view_menu_open
-                || self.toolbar_state.shading_menu_open
                 || self.toolbar_state.building_menu_open
                 || self.inspector_view.color_picker
                 || self.inspector_view.dropdown.is_some());
@@ -459,29 +457,9 @@ impl NativeGameWorkbench {
                                 self.agent_panel.borrow_mut().add_model_open = false;
                             }
                         }
-                        "viewport.toolbar.view-mode.trigger" => {
-                            self.toolbar_state.view_menu_open = open;
-                            if open {
-                                self.toolbar_state.shading_menu_open = false;
-                                self.toolbar_state.building_menu_open = false;
-                                self.toolbar_state.primitive_menu_open = false;
-                                self.toolbar_state.actions_menu_open = false;
-                            }
-                        }
-                        "viewport.toolbar.shading.trigger" => {
-                            self.toolbar_state.shading_menu_open = open;
-                            if open {
-                                self.toolbar_state.view_menu_open = false;
-                                self.toolbar_state.building_menu_open = false;
-                                self.toolbar_state.primitive_menu_open = false;
-                                self.toolbar_state.actions_menu_open = false;
-                            }
-                        }
                         "viewport.toolbar.building-style" => {
                             self.toolbar_state.building_menu_open = open;
                             if open {
-                                self.toolbar_state.view_menu_open = false;
-                                self.toolbar_state.shading_menu_open = false;
                                 self.toolbar_state.primitive_menu_open = false;
                                 self.toolbar_state.actions_menu_open = false;
                             }
@@ -490,8 +468,6 @@ impl NativeGameWorkbench {
                         | "viewport.toolbar.actions.more.menu" => {
                             self.toolbar_state.actions_menu_open = open;
                             if open {
-                                self.toolbar_state.view_menu_open = false;
-                                self.toolbar_state.shading_menu_open = false;
                                 self.toolbar_state.building_menu_open = false;
                                 self.toolbar_state.primitive_menu_open = false;
                             }

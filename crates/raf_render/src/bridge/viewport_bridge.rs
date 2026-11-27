@@ -138,6 +138,15 @@ impl ViewportBridge {
             .set_asset_root(project_root.map(|root| root.join("assets")));
     }
 
+    /// Decode visible scene textures ahead of the first textured frame.
+    pub fn prewarm_scene_textures(
+        &mut self,
+        scene: &raf_core::scene::graph::SceneGraph,
+        quality: raf_core::project::TextureQualityMode,
+    ) {
+        self.renderer.prewarm_scene_textures(scene, quality);
+    }
+
     pub fn editor_camera_block(&self) -> EditorCameraBlock {
         EditorCameraBlock {
             mode: match self.camera.mode {

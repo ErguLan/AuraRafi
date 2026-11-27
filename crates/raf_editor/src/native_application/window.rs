@@ -377,6 +377,9 @@ impl NativeEditorApplication {
             );
             if let Some(project) = self.project.as_ref() {
                 runtime.apply_project_settings(&project.settings);
+                if project.project_type == ProjectType::Game {
+                    runtime.set_editor_view_mode(project.settings.default_editor_view);
+                }
             }
             runtime.set_node_graph(startup_node_graph);
         }

@@ -258,6 +258,10 @@ impl Backend for Dx12 {
         self.shadow_capability.available && self.info.max_texture >= crate::device::SHADOW_MAP_SIDE
     }
 
+    fn supports_frame_instance_patches(&self) -> bool {
+        true
+    }
+
     fn shadow_bytes(&self) -> u64 {
         self.shadow
             .as_ref()

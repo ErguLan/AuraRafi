@@ -129,6 +129,10 @@ pub struct BasicCommandList {
     pub environment: Option<crate::environment_frame::EnvironmentFrame>,
     pub shadows: Option<crate::shadow_frame::ShadowFrame>,
     pub shadow_budget_exceeded: bool,
+    /// Allows the compositor to retain static scene resources and patch only
+    /// dynamic instance data. Disable it to force a full packet rebuild while
+    /// diagnosing a renderer issue.
+    pub packet_reuse: bool,
     /// Bounded local point/spot lights for this frame.
     pub entity_lights: crate::entity_lights_frame::EntityLightFrame,
     commands: Vec<GraphicCommand>,
@@ -162,6 +166,7 @@ impl BasicCommandList {
             environment: None,
             shadows: None,
             shadow_budget_exceeded: false,
+            packet_reuse: true,
             entity_lights: Default::default(),
             commands: Vec::with_capacity(command_capacity),
             meshes: Vec::with_capacity(mesh_capacity),
@@ -311,7 +316,9 @@ impl BasicCommandList {
         }
         if let Some(shadow) = &self.shadows {
             mix(10);
-            mix(shadow.geometry.key);
+            // The fitted light projection is a frame uniform handled by
+            // ShadowUniforms. Only retained caster topology belongs here.
+            mix(shadow.geometry.content_key);
             mix(u64::from(shadow.geometry.resolution));
             mix(u64::from(shadow.settings.enabled));
             mix(bits(shadow.settings.distance));
@@ -345,6 +352,258 @@ impl BasicCommandList {
         for word in &self.entity_lights.words {
             for value in word {
                 mix(bits(*value));
+            }
+        }
+        hash
+    }
+
+    /// Structural hash used by the retained scene packet.
+    ///
+    /// Unlike [`Self::content_hash`], mesh instance transforms, instance colors
+    /// and entity-light uniforms are excluded. A moving rigid body therefore
+    /// keeps the same packet topology and can be updated through an instance
+    /// buffer patch instead of rebuilding and re-uploading the whole scene.
+    /// Lines and screen-space geometry keep their full payload because they do
+    /// not have a bounded instance-patch path yet.
+    pub fn structure_hash(&self) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        let mut mix = |value: u64| {
+            hash = (hash ^ value).wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        let bits = |value: f32| value.to_bits() as u64;
+        mix(self.commands.len() as u64);
+        mix(self.meshes.len() as u64);
+        mix(self.textures.len() as u64);
+        for command in &self.commands {
+            match command {
+                GraphicCommand::Clear { r, g, b, a } => {
+                    mix(1);
+                    mix(u64::from(*r)
+                        | (u64::from(*g) << 8)
+                        | (u64::from(*b) << 16)
+                        | (u64::from(*a) << 24));
+                }
+                GraphicCommand::SetPipeline(pipeline) => {
+                    mix(2);
+                    mix(*pipeline as u64);
+                }
+                GraphicCommand::SetShadowReceiver(value) => {
+                    mix(3);
+                    mix(u64::from(*value));
+                }
+                GraphicCommand::DrawMesh {
+                    mesh_id,
+                    texture_id,
+                    color,
+                    ..
+                } => {
+                    mix(4);
+                    mix(*mesh_id as u64);
+                    mix(texture_id.map(|id| id as u64).unwrap_or(u64::MAX));
+                    mix(u64::from(color[3] == u8::MAX));
+                    mix(1);
+                }
+                GraphicCommand::DrawMeshBatch {
+                    mesh_id,
+                    texture_id,
+                    instances,
+                } => {
+                    mix(5);
+                    mix(*mesh_id as u64);
+                    mix(texture_id.map(|id| id as u64).unwrap_or(u64::MAX));
+                    mix(instances.len() as u64);
+                    mix(u64::from(
+                        instances
+                            .iter()
+                            .all(|instance| instance.color[3] == u8::MAX),
+                    ));
+                }
+                GraphicCommand::DrawLine {
+                    start,
+                    end,
+                    color,
+                    width,
+                    no_depth_test,
+                    depth_bias,
+                } => {
+                    mix(6);
+                    for value in [start.x, start.y, start.z, end.x, end.y, end.z] {
+                        mix(bits(value));
+                    }
+                    mix(u64::from(color[0])
+                        | (u64::from(color[1]) << 8)
+                        | (u64::from(color[2]) << 16)
+                        | (u64::from(color[3]) << 24));
+                    mix(bits(*width));
+                    mix(u64::from(*no_depth_test));
+                    mix(bits(*depth_bias));
+                }
+                GraphicCommand::DrawLineBatch {
+                    lines,
+                    no_depth_test,
+                } => {
+                    mix(7);
+                    mix(u64::from(*no_depth_test));
+                    mix(lines.len() as u64);
+                    for line in lines {
+                        for value in [
+                            line.start.x,
+                            line.start.y,
+                            line.start.z,
+                            line.end.x,
+                            line.end.y,
+                            line.end.z,
+                        ] {
+                            mix(bits(value));
+                        }
+                        mix(u64::from(line.color[0])
+                            | (u64::from(line.color[1]) << 8)
+                            | (u64::from(line.color[2]) << 16)
+                            | (u64::from(line.color[3]) << 24));
+                        mix(bits(line.width));
+                        mix(bits(line.depth_bias));
+                    }
+                }
+                GraphicCommand::DrawScreenTriangleBatch { triangles } => {
+                    mix(8);
+                    mix(triangles.len() as u64);
+                    for triangle in triangles {
+                        for point in triangle.points {
+                            mix(bits(point[0]));
+                            mix(bits(point[1]));
+                        }
+                        mix(u64::from(triangle.color[0])
+                            | (u64::from(triangle.color[1]) << 8)
+                            | (u64::from(triangle.color[2]) << 16)
+                            | (u64::from(triangle.color[3]) << 24));
+                    }
+                }
+                GraphicCommand::DrawGrid {
+                    grid_y,
+                    spacing,
+                    no_depth_test,
+                } => {
+                    mix(9);
+                    mix(bits(*grid_y));
+                    mix(bits(*spacing));
+                    mix(u64::from(*no_depth_test));
+                }
+            }
+        }
+        if let Some(environment) = &self.environment {
+            // The packet owns the resolved sky colors and star/disk controls.
+            // Camera-dependent inverse matrices and exposure uniforms are
+            // deliberately excluded.
+            mix(10);
+            mix(u64::from(
+                environment.settings.mode == raf_core::environment::EnvironmentMode::Scene,
+            ));
+            mix(u64::from(environment.improved()));
+            mix(u64::from(
+                environment.settings.sky.mode == raf_core::environment::SkyMode::Solid,
+            ));
+            mix(u64::from(environment.settings.sun.enabled));
+            mix(u64::from(environment.settings.sun.disk_visible));
+            mix(bits(environment.settings.sun.angular_radius));
+            mix(bits(environment.settings.sky.haze));
+            mix(u64::from(environment.settings.sky.stars_enabled));
+            mix(bits(environment.settings.sky.stars_density));
+            mix(bits(environment.settings.sky.stars_intensity));
+            for value in [
+                environment.sun_direction.x,
+                environment.sun_direction.y,
+                environment.sun_direction.z,
+                environment.sun.x,
+                environment.sun.y,
+                environment.sun.z,
+                environment.ambient.x,
+                environment.ambient.y,
+                environment.ambient.z,
+                environment.sky_top.x,
+                environment.sky_top.y,
+                environment.sky_top.z,
+                environment.sky_horizon.x,
+                environment.sky_horizon.y,
+                environment.sky_horizon.z,
+                environment.sky_ground.x,
+                environment.sky_ground.y,
+                environment.sky_ground.z,
+            ] {
+                mix(bits(value));
+            }
+            mix(bits(environment.halo_strength));
+            mix(bits(environment.halo_cos));
+        }
+        if let Some(shadow) = &self.shadows {
+            // Caster membership is packet topology. Caster transforms remain
+            // outside this hash so they travel through the instance patch.
+            mix(11);
+            mix(shadow.geometry.casters.len() as u64);
+            for caster in &shadow.geometry.casters {
+                mix(Arc::as_ptr(&caster.mesh) as *const () as usize as u64);
+            }
+        }
+        hash
+    }
+
+    /// Hash of the mutable instance payload only. The compositor uses it to
+    /// skip a GPU instance patch on idle frames while still reacting to any
+    /// transform, color, batch membership or texture change.
+    pub fn instance_state_hash(&self) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        let mut mix = |value: u64| {
+            hash = (hash ^ value).wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        let bits = |value: f32| value.to_bits() as u64;
+        for command in &self.commands {
+            match command {
+                GraphicCommand::DrawMesh {
+                    mesh_id,
+                    transform,
+                    color,
+                    texture_id,
+                } => {
+                    mix(1);
+                    mix(*mesh_id as u64);
+                    mix(texture_id.map(|id| id as u64).unwrap_or(u64::MAX));
+                    mix(u64::from(color[0])
+                        | (u64::from(color[1]) << 8)
+                        | (u64::from(color[2]) << 16)
+                        | (u64::from(color[3]) << 24));
+                    for column in transform.to_cols_array() {
+                        mix(bits(column));
+                    }
+                }
+                GraphicCommand::DrawMeshBatch {
+                    mesh_id,
+                    texture_id,
+                    instances,
+                } => {
+                    mix(2);
+                    mix(*mesh_id as u64);
+                    mix(texture_id.map(|id| id as u64).unwrap_or(u64::MAX));
+                    mix(instances.len() as u64);
+                    for instance in instances {
+                        mix(u64::from(instance.color[0])
+                            | (u64::from(instance.color[1]) << 8)
+                            | (u64::from(instance.color[2]) << 16)
+                            | (u64::from(instance.color[3]) << 24));
+                        for column in instance.transform.to_cols_array() {
+                            mix(bits(column));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(shadow) = &self.shadows {
+            mix(3);
+            mix(shadow.geometry.casters.len() as u64);
+            for caster in &shadow.geometry.casters {
+                mix(Arc::as_ptr(&caster.mesh) as *const () as usize as u64);
+                for column in caster.model.to_cols_array() {
+                    mix(bits(column));
+                }
             }
         }
         hash
@@ -635,6 +894,37 @@ impl BasicCommandList {
         &self.commands
     }
 
+    /// Number of distinct mesh payloads referenced by this frame.
+    pub fn mesh_count(&self) -> usize {
+        self.meshes.len()
+    }
+
+    /// Number of distinct texture payloads referenced by this frame.
+    pub fn texture_count(&self) -> usize {
+        self.textures.len()
+    }
+
+    /// Number of instances carried by batched draws. Dynamic effects such as
+    /// particles change this count without changing the mesh or texture set.
+    pub fn batched_instance_count(&self) -> usize {
+        self.commands
+            .iter()
+            .map(|command| match command {
+                GraphicCommand::DrawMeshBatch { instances, .. } => instances.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// Debug summaries used by the opt-in scene rebuild profiler to identify
+    /// which command changed between two otherwise identical frames.
+    pub fn debug_command_summaries(&self) -> Vec<String> {
+        self.commands
+            .iter()
+            .map(|command| format!("{command:?}"))
+            .collect()
+    }
+
     /// Summarize submitted work without exposing backend-specific counters.
     pub fn stats(&self) -> BasicCommandStats {
         let mut stats = BasicCommandStats {
@@ -846,5 +1136,28 @@ mod tests {
         assert_eq!(stats.mesh_instances, 2);
         assert_eq!(stats.line_instances, 2);
         assert_eq!(stats.command_count, 2);
+    }
+
+    #[test]
+    fn structure_hash_ignores_instance_transforms_but_content_hash_does_not() {
+        let mesh = Arc::new(BasicMesh::new(
+            vec![BasicVertex {
+                position: Vec3::ZERO,
+                normal: Vec3::Y,
+                uv: [0.0, 0.0],
+            }],
+            vec![0],
+        ));
+        let build = |translation: Vec3| {
+            let mut commands = BasicCommandList::new();
+            let mesh_id = commands.register_mesh(Arc::clone(&mesh));
+            commands.draw_mesh(mesh_id, Mat4::from_translation(translation), [255; 4]);
+            commands
+        };
+        let first = build(Vec3::ZERO);
+        let second = build(Vec3::X);
+
+        assert_eq!(first.structure_hash(), second.structure_hash());
+        assert_ne!(first.content_hash(), second.content_hash());
     }
 }

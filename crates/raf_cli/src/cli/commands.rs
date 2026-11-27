@@ -20,10 +20,10 @@ use raf_core::{
     serve_lines, CommandEndpoint, CommandSource, EngineCommandRequest, EngineCommandResponse,
 };
 use self::engine::HeadlessEngine;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::env;
 use std::io::{self, BufWriter};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(super) fn run_command_request<E: CommandEndpoint>(
     engine: &mut E,
@@ -75,6 +75,14 @@ pub(crate) fn run_cli(arguments: Vec<String>) -> CliResult<()> {    let options 
     // raf_editors / raf_attach or a single-live-editor auto-attach.
     if command == "mcp" && !options.has("project") {
         return run_mcp_stdio(McpHost::unattached());
+    }
+    // Performance commands route to the live editor directly, before the
+    // headless engine is created, so they never load a project just to fail.
+    if command == "perf" {
+        return run_perf(&options, format);
+    }
+    if command == "benchmark" {
+        return run_benchmark(&options, format);
     }
     let mut engine = HeadlessEngine::new(project_path.as_deref())?;
 
@@ -307,4 +315,189 @@ fn run_jsonl_stdio(mut engine: HeadlessEngine) -> CliResult<()> {
     let count = serve_lines(stdin.lock(), BufWriter::new(stdout.lock()), &mut engine)?;
     eprintln!("{PROGRAM}: processed {count} command frame(s)");
     Ok(())
+}
+
+/// Resolves the editor to attach to: an explicit `--project` wins, otherwise
+/// the single live editor discovered on this machine.
+fn attached_project_path(options: &Options) -> CliResult<PathBuf> {
+    if let Some(path) = options.path("project") {
+        return Ok(path);
+    }
+    discovery::pick_single_live(None)
+        .map(|editor| editor.project_path)
+        .map_err(|error| {
+            format!(
+                "{error} Open the project with `raf open PATH`, or run `raf editors` to list \
+                 live editors."
+            )
+        })
+}
+
+fn attached_client(path: &Path) -> CliResult<AttachedClient> {
+    AttachedClient::connect(path, "raf-cli").map_err(|error| {
+        format!(
+            "{error}\nOpen the project with `raf open {}` or run `raf editors` to list live editors.",
+            path.display()
+        )
+    })
+}
+
+/// `raf perf`: one windowed snapshot from the attached editor. The editor owns
+/// the frame loop, so there is no headless fallback for live telemetry.
+fn run_perf(options: &Options, format: OutputFormat) -> CliResult<()> {
+    let window_seconds = match options.value("window") {
+        Some(raw) => raw
+            .parse::<f64>()
+            .ok()
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .ok_or_else(|| "perf --window must be a positive number of seconds.".to_string())?,
+        None => f64::from(raf_core::performance::DEFAULT_WINDOW_SECONDS),
+    };
+    let path = attached_project_path(options)?;
+    let mut client = attached_client(&path)?;
+    let response = client.execute(EngineCommandRequest::new(
+        "performance.stats",
+        json!({"window_seconds": window_seconds}),
+        CommandSource::Cli,
+    ));
+    print_response(&response, format)
+}
+
+/// `raf benchmark`: live commands require the attached editor, while `list`
+/// and `compare` read the same on-disk store headlessly when no editor is up.
+fn run_benchmark(options: &Options, format: OutputFormat) -> CliResult<()> {
+    let subcommand = options
+        .positionals
+        .get(1)
+        .map(String::as_str)
+        .unwrap_or("list");
+    match subcommand {
+        "start" => run_benchmark_attached(
+            options,
+            format,
+            "performance.benchmark.start",
+            benchmark_start_params(options)?,
+        ),
+        "status" => run_benchmark_attached(
+            options,
+            format,
+            "performance.benchmark.status",
+            benchmark_id_params(options),
+        ),
+        "stop" => run_benchmark_attached(
+            options,
+            format,
+            "performance.benchmark.stop",
+            benchmark_id_params(options),
+        ),
+        "cancel" => run_benchmark_attached(
+            options,
+            format,
+            "performance.benchmark.cancel",
+            json!({}),
+        ),
+        "list" => run_benchmark_read(
+            options,
+            format,
+            "performance.benchmark.list",
+            json!({}),
+        ),
+        "compare" => run_benchmark_read(
+            options,
+            format,
+            "performance.benchmark.compare",
+            benchmark_compare_params(options)?,
+        ),
+        other => Err(format!(
+            "Unknown benchmark command: {other}. Use start, status, stop, cancel, list or compare."
+        )),
+    }
+}
+
+fn run_benchmark_attached(
+    options: &Options,
+    format: OutputFormat,
+    name: &str,
+    params: Value,
+) -> CliResult<()> {
+    let path = attached_project_path(options)?;
+    let mut client = attached_client(&path)?;
+    let response = client.execute(EngineCommandRequest::new(name, params, CommandSource::Cli));
+    print_response(&response, format)
+}
+
+fn run_benchmark_read(
+    options: &Options,
+    format: OutputFormat,
+    name: &str,
+    params: Value,
+) -> CliResult<()> {
+    if let Some(path) = options.path("project") {
+        // Saved reports live on disk; reading them never needs a live editor,
+        // and this keeps `list`/`compare` working across engine restarts.
+        let mut engine = HeadlessEngine::new(Some(path.as_path()))?;
+        let response = engine.execute(EngineCommandRequest::new(name, params, CommandSource::Cli));
+        return print_response(&response, format);
+    }
+    let editor = discovery::pick_single_live(None).map_err(|error| {
+        format!(
+            "{error} Pass --project PATH to read saved benchmarks without a live editor, or run \
+             `raf editors` to list live projects."
+        )
+    })?;
+    let mut client = AttachedClient::connect(&editor.project_path, "raf-cli")?;
+    let response = client.execute(EngineCommandRequest::new(name, params, CommandSource::Cli));
+    print_response(&response, format)
+}
+
+fn benchmark_start_params(options: &Options) -> CliResult<Value> {
+    let mut params = serde_json::Map::new();
+    if let Some(raw) = options.value("seconds") {
+        let seconds = raw
+            .parse::<f64>()
+            .map_err(|_| "benchmark start --seconds must be a number of seconds.".to_string())?;
+        params.insert("seconds".to_string(), json!(seconds));
+    }
+    if let Some(raw) = options.value("warmup") {
+        let warmup = raw
+            .parse::<f64>()
+            .map_err(|_| "benchmark start --warmup must be a number of seconds.".to_string())?;
+        params.insert("warmup_seconds".to_string(), json!(warmup));
+    }
+    if let Some(label) = options.value("label") {
+        let label = label.trim();
+        if !label.is_empty() {
+            params.insert("label".to_string(), json!(label));
+        }
+    }
+    Ok(Value::Object(params))
+}
+
+fn benchmark_id_params(options: &Options) -> Value {
+    let id = options
+        .value("id")
+        .or_else(|| options.positionals.get(2).map(String::as_str));
+    match id.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => json!({"id": id}),
+        None => json!({}),
+    }
+}
+
+fn benchmark_compare_params(options: &Options) -> CliResult<Value> {
+    let left = options
+        .value("a")
+        .map(str::to_string)
+        .or_else(|| options.positionals.get(2).cloned());
+    let right = options
+        .value("b")
+        .map(str::to_string)
+        .or_else(|| options.positionals.get(3).cloned());
+    let (Some(left), Some(right)) = (left, right) else {
+        return Err(
+            "benchmark compare requires two benchmark ids: `raf benchmark compare A B` or \
+             `--a A --b B`."
+                .to_string(),
+        );
+    };
+    Ok(json!({"a": left, "b": right}))
 }

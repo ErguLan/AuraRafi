@@ -6,6 +6,8 @@ use raf_render::api_graphic_basic::ui_surface::{
     UiTokens,
 };
 
+use raf_core::project::ProjectType;
+
 use super::*;
 
 /// The Hub has a quieter neutral surface than the editor canvas. Keep this
@@ -68,12 +70,30 @@ pub(crate) fn hub_body_style(palette: StudioUiPalette) -> UiStyle {
     }
 }
 
+pub(crate) const HUB_CREATE_ROW_HEIGHT: f32 = 52.0;
+pub(crate) const HUB_CREATE_GAP: f32 = 6.0;
+pub(crate) const HUB_ADVANCED_TOGGLE_HEIGHT: f32 = 24.0;
+pub(crate) const HUB_ADVANCED_VIEW_HEIGHT: f32 = 54.0;
+pub(crate) const HUB_ADVANCED_NOTE_HEIGHT: f32 = 26.0;
+pub(crate) const HUB_CREATE_STATUS_HEIGHT: f32 = 44.0;
+
 pub(crate) fn hub_create_height(model: &HubSurfaceModel) -> f32 {
-    if model.create_error.is_some() || model.create_path_is_project {
-        102.0
-    } else {
-        52.0
+    let mut height = HUB_CREATE_ROW_HEIGHT;
+    if !model.create_path_is_project {
+        height += HUB_CREATE_GAP + HUB_ADVANCED_TOGGLE_HEIGHT;
+        if model.create_advanced_open {
+            height += HUB_CREATE_GAP
+                + if model.create_project_type == ProjectType::Game {
+                    HUB_ADVANCED_VIEW_HEIGHT
+                } else {
+                    HUB_ADVANCED_NOTE_HEIGHT
+                };
+        }
     }
+    if model.create_error.is_some() || model.create_path_is_project {
+        height += HUB_CREATE_GAP + HUB_CREATE_STATUS_HEIGHT;
+    }
+    height
 }
 
 pub(crate) fn studio_root() -> UiNode {

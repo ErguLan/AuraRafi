@@ -10,6 +10,7 @@
 use std::path::Path;
 
 use raf_core::config::ScriptLanguage;
+use raf_core::project::EditorViewMode;
 use raf_core::scene::{Primitive, SceneGraph};
 use raf_script::{InputSnapshot, RhaiScriptRuntime, ScriptRuntimeOptions};
 
@@ -21,6 +22,8 @@ use crate::script_support::{scan_script_catalog, validate_attached_script};
 pub struct ScriptCommandContext<'a> {
     pub scene: &'a mut SceneGraph,
     pub assets_root: Option<&'a Path>,
+    /// Current editor view when the command can influence the authoring camera.
+    pub editor_view: Option<EditorViewMode>,
 }
 
 /// Entry point for script domain commands.
@@ -661,6 +664,9 @@ fn run_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) -> Co
         ctx.assets_root,
         ScriptRuntimeOptions::default(),
     );
+    if let Some(editor_view) = ctx.editor_view {
+        runtime.view.set_editor_view_context(editor_view);
+    }
     let loaded_scripts = runtime.script_count();
     let start_report = if loaded_scripts > 0 {
         runtime.call_start(&mut runtime_scene)
@@ -726,6 +732,7 @@ fn run_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) -> Co
         .truncate()
         .to_array()
         .map(|value| (value * 1000.0).round() / 1000.0);
+    let requested_editor_view = runtime.view.take_editor_view_request();
 
     let mut lines = vec![
         format!("Target: {relative}"),
@@ -756,6 +763,7 @@ fn run_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) -> Co
         "physics_steps": physics_steps,
         "keys": keys,
         "final_position": final_position,
+        "editor_view": requested_editor_view.map(|view| view.slug()),
         "physics_error": physics_error,
         "logs": logs,
         "errors": errors,
@@ -1013,6 +1021,7 @@ mod tests {
         let mut ctx = ScriptCommandContext {
             scene: &mut scene,
             assets_root: Some(&assets),
+            editor_view: None,
         };
         let command = |args: &[(&str, &str)]| ParsedCommand {
             raw: String::new(),
@@ -1087,6 +1096,7 @@ fn on_start() {
         let mut ctx = ScriptCommandContext {
             scene: &mut scene,
             assets_root: Some(&project_root.join("assets")),
+            editor_view: None,
         };
 
         let output = execute("script.run", &command, &mut ctx);
@@ -1127,6 +1137,7 @@ fn on_fixed_update(dt) {
         let mut ctx = ScriptCommandContext {
             scene: &mut scene,
             assets_root: Some(&project_root.join("assets")),
+            editor_view: None,
         };
 
         let output = execute("script.run", &command, &mut ctx);
@@ -1157,6 +1168,7 @@ fn on_fixed_update(dt) {
         let mut ctx = ScriptCommandContext {
             scene: &mut scene,
             assets_root: None,
+            editor_view: None,
         };
         let command = ParsedCommand {
             raw: String::new(),

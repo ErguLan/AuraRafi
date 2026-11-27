@@ -501,6 +501,11 @@ impl FrameScheduler {
         }
     }
 
+    /// Current window-focus state used by the pacing policy.
+    pub fn window_focused(&self) -> bool {
+        self.window_focused
+    }
+
     pub fn set_suspended(&mut self, suspended: bool) {
         if self.suspended == suspended {
             return;
@@ -658,7 +663,10 @@ impl FrameScheduler {
         if activity == FrameActivity::Benchmark {
             return 0;
         }
-        if !self.window_focused {
+        // Active camera/keyboard work is interactive even if the platform focus
+        // event is stale. Do not strand an editing gesture on the 5 FPS
+        // background ceiling; idle/passive background frames still throttle.
+        if !self.window_focused && activity != FrameActivity::Interactive {
             let background_limit = self
                 .frame_limit
                 .filter(|limit| *limit > 0)

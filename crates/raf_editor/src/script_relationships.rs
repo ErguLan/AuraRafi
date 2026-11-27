@@ -109,7 +109,7 @@ impl ScriptRelationshipIndex {
         if self.root.is_none() {
             return None;
         }
-        let mut changed = self.revision != Some(scene.document_revision());
+        let mut changed = self.revision != Some(scene.hierarchy_fingerprint());
         if let Some(worker) = &self.worker {
             // Single-slot publication and coalesced notifications bound both queues.
             if let Some(result) = worker.result.lock().ok().and_then(|mut slot| slot.take()) {
@@ -121,7 +121,7 @@ impl ScriptRelationshipIndex {
         if !changed {
             return None;
         }
-        self.revision = Some(scene.document_revision());
+        self.revision = Some(scene.hierarchy_fingerprint());
         let mut paths: Vec<String> = scene
             .iter()
             .filter(|(id, _)| scene.is_valid_node(*id))

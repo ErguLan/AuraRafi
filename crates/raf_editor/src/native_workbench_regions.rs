@@ -43,7 +43,7 @@ impl NativeGameWorkbench {
             ],
             palette: self.palette,
             bookmarks: self.hierarchy_bookmarks,
-            scene_revision: scene.document_revision(),
+            scene_revision: scene.hierarchy_fingerprint(),
             insertion_parent: self.hierarchy_model.insertion_parent,
         };
         let reusable = self.hierarchy_active_tab == "hierarchy"

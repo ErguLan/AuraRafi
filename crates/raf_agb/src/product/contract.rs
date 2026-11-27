@@ -1,6 +1,6 @@
 use glam::{Mat4, Vec3};
 
-use crate::{Error, Frame, Instance, Result, Texture, Vertex};
+use crate::{Error, Frame, Instance, Result, Texture, TextureUpdate, Vertex};
 
 pub use crate::device::{LOCAL_LIGHT_STRIDE, LOCAL_LIGHT_VECS, MAX_LOCAL_LIGHTS};
 
@@ -239,6 +239,12 @@ pub struct ProductPacket {
     pub meshes: Vec<Mesh>,
     pub materials: Vec<Material>,
     pub textures: Vec<Texture>,
+    /// Stable per-texture identity used by executors to reuse a GPU image
+    /// across packet replacements. Zero (or a missing entry) falls back to a
+    /// content hash.
+    pub texture_ids: Vec<u64>,
+    /// Rectangular content refreshes for textures whose GPU image is retained.
+    pub texture_updates: Vec<TextureUpdate>,
     pub commands: Vec<Command>,
 }
 

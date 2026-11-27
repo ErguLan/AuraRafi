@@ -36,7 +36,8 @@ fn quad(rect: [f32; 4], color: [f32; 4]) -> PaintQuad {
 fn white() -> Texture {
     Texture {
         size: [1, 1],
-        rgba: vec![255; 4],
+        rgba: vec![255; 4].into(),
+        mipmaps: false,
     }
 }
 
@@ -281,7 +282,8 @@ fn linear_gradients_drive_fills_and_strokes() {
 fn image_fit_and_nine_slice_emit_expected_patches() {
     let texture = Texture {
         size: [200, 100],
-        rgba: vec![255; 200 * 100 * 4],
+        rgba: vec![255; 200 * 100 * 4].into(),
+        mipmaps: true,
     };
     let layout = |fit| {
         encode(ProductPacket {
@@ -331,7 +333,8 @@ fn image_fit_and_nine_slice_emit_expected_patches() {
     let sliced = encode(ProductPacket {
         textures: vec![Texture {
             size: [32, 32],
-            rgba: vec![255; 32 * 32 * 4],
+            rgba: vec![255; 32 * 32 * 4].into(),
+            mipmaps: true,
         }],
         commands: vec![Command::StyledPaint {
             paint: Paint::Image {
@@ -375,7 +378,8 @@ fn unsupported_combinations_reject_explicitly() {
         ProductPacket {
             textures: vec![Texture {
                 size: [32, 32],
-                rgba: vec![255; 32 * 32 * 4],
+                rgba: vec![255; 32 * 32 * 4].into(),
+                mipmaps: true,
             }],
             commands: vec![Command::StyledPaint {
                 paint: Paint::Image {
@@ -455,7 +459,8 @@ fn dpi_fixture_keeps_stroke_width_radius_and_text_sharp() {
                 white(),
                 Texture {
                     size: [glyph_texels, glyph_texels],
-                    rgba: vec![255; (glyph_texels * glyph_texels * 4) as usize],
+                    rgba: vec![255; (glyph_texels * glyph_texels * 4) as usize].into(),
+                    mipmaps: false,
                 },
             ],
             commands: vec![
@@ -606,7 +611,8 @@ fn text_atlas_patch_uploads_only_its_rectangle() {
     let mut device = open_recorder();
     let atlas = Texture {
         size: [64, 16],
-        rgba: vec![0; 64 * 16 * 4],
+        rgba: vec![0; 64 * 16 * 4].into(),
+        mipmaps: false,
     };
     let handle = device
         .prepare(PacketKey(1), 1, || ProductPacket {

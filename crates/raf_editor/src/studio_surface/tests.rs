@@ -575,6 +575,52 @@ fn hub_create_row_offers_open_when_the_path_is_a_project() {
 }
 
 #[test]
+fn hub_advanced_options_expose_the_game_initial_view() {
+    let game = HubSurfaceModel {
+        create_advanced_open: true,
+        create_project_type: ProjectType::Game,
+        create_initial_view: raf_core::project::EditorViewMode::View2d,
+        ..HubSurfaceModel::default()
+    };
+    let surface = build_hub_surface_with_model(StudioUiPalette::IndustrialDark, &game);
+    assert!(surface.root.find("hub.create.advanced-toggle").is_some());
+    let two_d = surface
+        .root
+        .find("hub.create.advanced.view.2d")
+        .expect("2D initial view");
+    assert!(two_d
+        .classes
+        .iter()
+        .any(|class| class == "hub-create-view-option-selected"));
+    let frame = surface.build_frame(1_300, 900, [8, 11, 15, 255]);
+    let form = frame
+        .layout_boxes
+        .iter()
+        .find(|layout| layout.id == "hub.create-form")
+        .expect("create form");
+    assert_eq!(form.rect.height, 142.0);
+
+    let electronics = HubSurfaceModel {
+        create_advanced_open: true,
+        create_project_type: ProjectType::Electronics,
+        ..HubSurfaceModel::default()
+    };
+    let electronics_surface =
+        build_hub_surface_with_model(StudioUiPalette::IndustrialDark, &electronics);
+    assert_eq!(
+        electronics_surface
+            .root
+            .find("hub.create.advanced.game-only")
+            .and_then(|node| node.text_key.as_deref()),
+        Some("hub.create.advanced.game_only")
+    );
+    assert!(electronics_surface
+        .root
+        .find("hub.create.advanced.view.2d")
+        .is_none());
+}
+
+#[test]
 fn hub_context_menu_confirms_destructive_removal_before_acting() {
     let project = hub_test_project("Demo");
     let model = HubSurfaceModel {

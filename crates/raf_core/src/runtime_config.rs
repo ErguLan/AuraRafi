@@ -164,6 +164,10 @@ pub struct ProjectRuntimeSettings {
     /// Presentation frame cap for Play in this project. The editor keeps its
     /// own frame cap in the global editor settings.
     pub fps_limit: u32,
+    /// Per-frame script execution budget for this project's Play runtime.
+    pub script_budget_ms: u32,
+    /// Per-frame script VM operation ceiling for this project's Play runtime.
+    pub script_operation_limit: u64,
     /// Enables full dynamic simulation; basic mode retains character movement.
     pub advanced_physics: bool,
     pub physics_debug_draw: bool,
@@ -188,6 +192,8 @@ impl Default for ProjectRuntimeSettings {
             active_camera: None,
             fixed_hz: 60,
             fps_limit: 60,
+            script_budget_ms: 10,
+            script_operation_limit: 100_000,
             advanced_physics: true,
             physics_debug_draw: false,
             animation_debug_draw: false,
@@ -281,6 +287,11 @@ impl ProjectRuntimeSettings {
             || !(0.0..=89.0).contains(&self.character_max_slope_degrees)
         {
             return Err("runtime.invalid_character_settings".into());
+        }
+        if !(1..=100).contains(&self.script_budget_ms)
+            || !(1_000..=1_000_000).contains(&self.script_operation_limit)
+        {
+            return Err("runtime.invalid_script_budget".into());
         }
         let mut actions = std::collections::HashSet::new();
         let mut axes = std::collections::HashSet::new();
@@ -377,5 +388,25 @@ mod physics_settings_tests {
         assert!(settings.validate_input().is_err());
         settings.gravity = Vec3::new(0.0, -1001.0, 0.0);
         assert!(settings.validate_input().is_err());
+    }
+
+    #[test]
+    fn script_budget_and_operation_limit_stay_inside_the_vm_budget() {
+        let mut settings = ProjectRuntimeSettings::default();
+        settings.script_budget_ms = 0;
+        assert_eq!(
+            settings.validate_input(),
+            Err("runtime.invalid_script_budget".to_string())
+        );
+
+        settings.script_budget_ms = 10;
+        settings.script_operation_limit = 999;
+        assert_eq!(
+            settings.validate_input(),
+            Err("runtime.invalid_script_budget".to_string())
+        );
+
+        settings.script_operation_limit = 100_000;
+        assert!(settings.validate_input().is_ok());
     }
 }

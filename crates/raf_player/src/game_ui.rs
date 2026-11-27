@@ -116,7 +116,7 @@ impl GameUiPresenter {
                 if item.generation != source.generation {
                     item.host.session_mut().interaction = Default::default();
                 }
-                item.host.set_surface(UiSurface::from_document(
+                item.host.replace_surface_incremental(UiSurface::from_document(
                     &source.document,
                     crate::session::palette(theme),
                 ));

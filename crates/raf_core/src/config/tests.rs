@@ -9,6 +9,11 @@ fn default_settings() {
     assert_eq!(s.language, Language::English);
     assert_eq!(s.render_execution_policy, RenderExecutionPolicy::Auto);
     assert_eq!(s.fps_limit, 60);
+    assert!(s.scene_packet_reuse);
+    assert_eq!(
+        s.texture_quality,
+        crate::project::TextureQualityMode::Adaptive
+    );
     assert_eq!(s.agent_message_page_size, AGENT_MESSAGE_PAGE_SIZE_DEFAULT);
     assert!(s.agent_streaming_enabled);
     assert!(s.ai_persist_credentials);

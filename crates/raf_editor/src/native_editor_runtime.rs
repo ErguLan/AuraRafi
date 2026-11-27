@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use raf_core::config::EngineSettings;
-use raf_core::project::{ProjectSettings, ProjectType, ViewportResolutionMode};
+use raf_core::project::{EditorViewMode, ProjectSettings, ProjectType, ViewportResolutionMode};
 use raf_core::scene::SceneGraph;
 use raf_core::{InputRouter, InputSnapshot, Revision, UndoToken};
 use raf_render::api_graphic_basic::{
@@ -55,6 +55,10 @@ pub struct NativeEditorRuntime {
     scene_rendered_this_frame: bool,
     viewport_fps: f32,
     last_viewport_present_seconds: f64,
+    /// Set when the retained compositor rejects the current frame. Consumers
+    /// report zero effective FPS instead of the scheduler cadence while no
+    /// pixels are being presented.
+    composition_error: Option<String>,
     frame_started_at: Option<Instant>,
     last_frame_cpu_ms: f32,
     command_registry: EditorCommandRegistry,
@@ -121,6 +125,7 @@ impl NativeEditorRuntime {
             scene_rendered_this_frame: false,
             viewport_fps: 0.0,
             last_viewport_present_seconds: 0.0,
+            composition_error: None,
             frame_started_at: None,
             last_frame_cpu_ms: 0.0,
             command_registry: EditorCommandRegistry::default(),
@@ -1126,6 +1131,17 @@ impl NativeEditorRuntime {
             .reset(self.graphics.scheduler().budget());
     }
 
+    /// Switches the editor camera between the authored 3D perspective and the
+    /// fixed orthographic 2D authoring view of the same 3D world.
+    pub fn set_editor_view_mode(&mut self, mode: EditorViewMode) {
+        self.game_viewport.set_editor_view_mode(mode);
+        self.request_canvas_frame();
+    }
+
+    pub fn editor_view_mode(&self) -> EditorViewMode {
+        self.game_viewport.editor_view_mode()
+    }
+
     /// Applies project-local viewport options on top of the global engine policy.
     pub fn apply_project_settings(&mut self, settings: &ProjectSettings) {
         self.game_viewport.apply_project_settings(settings);
@@ -1143,6 +1159,18 @@ impl NativeEditorRuntime {
 
     pub fn set_project_asset_root(&mut self, project_root: Option<&Path>) {
         self.game_viewport.set_project_asset_root(project_root);
+        self.cached_game_canvas = None;
+        self.graphics
+            .request_frame(FrameInvalidation::ASSET_UPLOAD | FrameInvalidation::EXPLICIT);
+    }
+
+    /// Decode visible project textures before the first textured viewport frame.
+    pub fn prewarm_scene_textures(
+        &mut self,
+        scene: &raf_core::scene::graph::SceneGraph,
+        quality: raf_core::project::TextureQualityMode,
+    ) {
+        self.game_viewport.prewarm_scene_textures(scene, quality);
         self.cached_game_canvas = None;
         self.graphics
             .request_frame(FrameInvalidation::ASSET_UPLOAD | FrameInvalidation::EXPLICIT);
@@ -1310,6 +1338,11 @@ impl NativeEditorRuntime {
         self.request_ui_frame();
     }
 
+    /// Window-focus state last applied to the frame scheduler.
+    pub fn window_focused(&self) -> bool {
+        self.graphics.window_focused()
+    }
+
     pub fn set_continuous_ui_motion(&mut self, active: bool) {
         self.graphics
             .set_continuous_frame_reason(FrameInvalidation::ANIMATION, active);
@@ -1329,10 +1362,51 @@ impl NativeEditorRuntime {
             .set_continuous_frame_reason(FrameInvalidation::UI, active);
     }
 
+    /// Keeps the native frame loop active while a performance benchmark is
+    /// sampling. Without this an idle editor stops presenting frames and the
+    /// benchmark would only capture a handful of samples.
+    pub fn set_benchmark_sampling(&mut self, active: bool) {
+        let reasons =
+            FrameInvalidation::DOCUMENT | FrameInvalidation::WINDOW | FrameInvalidation::UI;
+        self.graphics.set_continuous_frame_reason(reasons, active);
+        if active {
+            self.cached_game_canvas = None;
+            self.graphics.request_frame(reasons);
+        }
+    }
+
     /// Returns the measured presentation rate of the completed editor frames.
     /// This is not the configured FPS ceiling from EngineSettings.
     pub fn presented_fps(&self) -> f32 {
+        if self.composition_error.is_some() {
+            return 0.0;
+        }
         self.graphics.snapshot().scheduler_metrics.presented_fps
+    }
+
+    /// Records that the retained compositor could not produce a frame. While
+    /// this is set, FPS readouts report zero instead of the retry cadence.
+    pub fn note_composition_failure(&mut self, error: String) {
+        self.composition_error = Some(error);
+        self.viewport_fps = 0.0;
+    }
+
+    /// Clears the failure state after a frame was presented again.
+    pub fn note_composition_success(&mut self) {
+        self.composition_error = None;
+    }
+
+    pub fn composition_failed(&self) -> bool {
+        self.composition_error.is_some()
+    }
+
+    pub fn composition_error(&self) -> Option<&str> {
+        self.composition_error.as_deref()
+    }
+
+    /// Actual render target size in physical pixels.
+    pub fn target_size(&self) -> [u32; 2] {
+        self.target_size
     }
 
     /// Returns the refresh rate of the 3D viewport layer, not the final
@@ -1340,7 +1414,8 @@ impl NativeEditorRuntime {
     /// deliberately excluded so the editor can reveal whether the viewport
     /// itself is refreshing or merely being composited again.
     pub fn viewport_fps(&self, now_seconds: f64) -> f32 {
-        if self.last_viewport_present_seconds <= 0.0
+        if self.composition_error.is_some()
+            || self.last_viewport_present_seconds <= 0.0
             || !now_seconds.is_finite()
             || now_seconds - self.last_viewport_present_seconds > 0.75
         {
@@ -1475,6 +1550,19 @@ impl NativeEditorRuntime {
             .filter(|value| value.is_finite())
             .unwrap_or(frame_cpu_ms.max(0.0));
         self.last_frame_cpu_ms = measured_frame_cpu_ms;
+        if measured_frame_cpu_ms > 100.0 {
+            let snapshot = self.graphics.snapshot();
+            let metrics = snapshot.last_frame_metrics;
+            tracing::debug!(
+                cpu_ms = measured_frame_cpu_ms,
+                scene_rendered = self.scene_rendered_this_frame,
+                packet_rebuilds = metrics.product_packet_rebuilds,
+                upload_bytes = metrics.total_upload_bytes(),
+                draw_calls = metrics.total_draw_calls(),
+                product_revision = metrics.product_packet_revision,
+                "editor frame exceeded 100 ms"
+            );
+        }
         if self.scene_rendered_this_frame {
             let presented_at_seconds = presented_at_seconds
                 .max(self.last_viewport_present_seconds)
@@ -1517,6 +1605,13 @@ impl NativeEditorRuntime {
             measured_frame_cpu_ms,
             frame_gpu_ms,
             total_cpu_ms,
+        );
+        crate::performance_telemetry::record_frame(
+            measured_frame_cpu_ms,
+            frame_gpu_ms,
+            total_cpu_ms,
+            self.target_size,
+            &self.graphics.snapshot(),
         );
     }
 

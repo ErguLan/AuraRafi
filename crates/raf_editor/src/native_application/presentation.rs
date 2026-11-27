@@ -286,6 +286,7 @@ impl NativeEditorApplication {
                     runtime.active_frame_activity().label(),
                     runtime.active_frame_reason_label(),
                     runtime.canvas_status_label(),
+                    runtime.game_viewport().camera_navigation_active,
                 );
                 let selected = selected_before_input.clone();
                 let compass_state = if runtime.project_type() == ProjectType::Game
@@ -346,6 +347,7 @@ impl NativeEditorApplication {
                     now,
                     compass_state,
                     self.electronics_editor.as_ref(),
+                    runtime.game_viewport().mode.editor_view(),
                 );
                 let old_canvas = runtime.layout().electronics_canvas_for_pcb(
                     self.electronics_editor.as_ref().is_some_and(|e| {
@@ -1115,6 +1117,7 @@ impl NativeEditorApplication {
             None
         };
         let frame_was_deferred;
+        let frame_error;
         if loading_active {
             let Some(loading) = self.loading.as_mut() else {
                 runtime.cancel_frame();
@@ -1142,6 +1145,7 @@ impl NativeEditorApplication {
             frame_was_deferred = rendered
                 .as_ref()
                 .is_ok_and(|frame| frame.metrics.presents == 0);
+            frame_error = rendered.as_ref().err().cloned();
             #[cfg(windows)]
             if let (Some(accessibility), Some(window)) = (&mut self.accessibility, &self.window) {
                 accessibility.publish(
@@ -1196,6 +1200,7 @@ impl NativeEditorApplication {
             frame_was_deferred = rendered
                 .as_ref()
                 .is_ok_and(|frame| frame.metrics.presents == 0);
+            frame_error = rendered.as_ref().err().cloned();
             #[cfg(windows)]
             if let (Some(accessibility), Some(window)) = (&mut self.accessibility, &self.window) {
                 accessibility.publish(
@@ -1253,6 +1258,7 @@ impl NativeEditorApplication {
                     now,
                     compass,
                     self.electronics_editor.as_ref(),
+                    runtime.game_viewport().mode.editor_view(),
                 );
             }
             let mut layers =
@@ -1285,6 +1291,7 @@ impl NativeEditorApplication {
             frame_was_deferred = rendered
                 .as_ref()
                 .is_ok_and(|frame| frame.metrics.presents == 0);
+            frame_error = rendered.as_ref().err().cloned();
             #[cfg(windows)]
             if let (Some(accessibility), Some(window)) = (&mut self.accessibility, &self.window) {
                 accessibility.publish(
@@ -1331,6 +1338,7 @@ impl NativeEditorApplication {
             frame_was_deferred = rendered
                 .as_ref()
                 .is_ok_and(|frame| frame.metrics.presents == 0);
+            frame_error = rendered.as_ref().err().cloned();
             #[cfg(windows)]
             if let (Some(accessibility), Some(window)) = (&mut self.accessibility, &self.window) {
                 accessibility.publish(
@@ -1348,6 +1356,11 @@ impl NativeEditorApplication {
                     },
                 );
             }
+        }
+        if let Some(error) = frame_error {
+            runtime.note_composition_failure(error);
+        } else {
+            runtime.note_composition_success();
         }
         if frame_was_deferred {
             runtime.cancel_frame();

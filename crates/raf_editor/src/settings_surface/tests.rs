@@ -596,7 +596,7 @@ fn settings_performance_metadata_matches_the_visible_rows() {
     let palette = StudioUiPalette::IndustrialDark;
     let expected = [
         (SettingsSection::Appearance, 3, 0),
-        (SettingsSection::Performance, 12, 6),
+        (SettingsSection::Performance, 14, 8),
         (SettingsSection::Editor, 5, 0),
         (SettingsSection::Viewport, 4, 0),
         (SettingsSection::Electronics, 2, 0),

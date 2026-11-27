@@ -135,6 +135,18 @@ impl GraphicsMemoryBudget {
         }
     }
 
+    /// Largest single resident workload one packet upload may carry.
+    ///
+    /// A scene/UI packet is encoded once, uploaded once, and then retained. Its
+    /// transient staging copy legitimately exceeds the per-frame patch staging
+    /// ceiling: a city authored at Detailed quality can pack ~90 MiB of RGBA
+    /// textures into one upload while still fitting the accounting budget.
+    /// Half of the accounting budget leaves room for the presentation target
+    /// and the replacement packet that stays resident during an upload.
+    pub const fn packet_upload_bytes(&self) -> u64 {
+        self.gpu_bytes / 2
+    }
+
     /// Split `gpu_bytes` into one hard budget per resource family.
     ///
     /// The order matches [`GraphicsResourceFamily::ALL`] so callers can index
@@ -231,6 +243,23 @@ mod tests {
             GraphicsCapabilities::cpu().backend,
             GraphicsBackendId::CpuSoftware
         );
+    }
+
+    #[test]
+    fn packet_upload_ceiling_covers_detailed_city_packets() {
+        // Observed on the city project at Detailed quality: 25 authored
+        // textures packed into one retained scene packet.
+        const DETAILED_CITY_PACKET: u64 = 88_342_616;
+        for budget in [
+            GraphicsMemoryBudget::potato(),
+            GraphicsMemoryBudget::desktop(),
+        ] {
+            assert!(budget.packet_upload_bytes() >= DETAILED_CITY_PACKET);
+            assert!(
+                budget.packet_upload_bytes() > budget.staging_bytes,
+                "a whole-packet upload must not be capped by patch staging"
+            );
+        }
     }
 
     #[test]

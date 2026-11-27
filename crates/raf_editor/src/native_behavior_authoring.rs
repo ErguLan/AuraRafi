@@ -232,6 +232,7 @@ mod tests {
         let mut context = crate::commands::script::ScriptCommandContext {
             scene: &mut scene,
             assets_root: None,
+            editor_view: None,
         };
         assert!(crate::commands::behavior::execute(&command, &mut context, false).changed);
         assert!(raf_core::agent_context::scene_diff(
@@ -257,6 +258,7 @@ mod tests {
         let mut context = crate::commands::script::ScriptCommandContext {
             scene: &mut scene,
             assets_root: None,
+            editor_view: None,
         };
         assert!(!crate::commands::behavior::execute(&command, &mut context, false).changed);
         assert_eq!(ron::to_string(&scene).unwrap(), before);

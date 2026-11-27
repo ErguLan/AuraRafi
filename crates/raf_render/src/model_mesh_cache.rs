@@ -3,22 +3,38 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use glam::Vec3;
 use raf_core::scene::MeshAssetRef;
 
+use crate::bounded_cache::BoundedCache;
 use crate::geometry::mesh_data::MeshData;
 
 const MAX_CACHED_MODELS: usize = 64;
+const MAX_CACHED_MODEL_FAILURES: usize = 128;
+/// Missing or malformed model sources are re-probed after this delay instead
+/// of issuing a filesystem read for every visible frame.
+const MODEL_FAILURE_RETRY_COOLDOWN: Duration = Duration::from_secs(5);
 
-#[derive(Default)]
 pub struct ModelMeshCache {
-    entries: HashMap<String, Option<Arc<MeshData>>>,
+    entries: BoundedCache<String, Arc<MeshData>>,
+    failures: HashMap<String, (String, Instant)>,
+}
+
+impl Default for ModelMeshCache {
+    fn default() -> Self {
+        Self {
+            entries: BoundedCache::new(MAX_CACHED_MODELS),
+            failures: HashMap::new(),
+        }
+    }
 }
 
 impl ModelMeshCache {
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.failures.clear();
     }
 
     pub fn get(
@@ -35,19 +51,33 @@ impl ModelMeshCache {
             reference.import_scale.to_bits()
         );
         if let Some(cached) = self.entries.get(&key) {
-            return cached
-                .clone()
-                .ok_or_else(|| "Model could not be decoded.".to_string());
+            return Ok(Arc::clone(cached));
         }
-        if self.entries.len() >= MAX_CACHED_MODELS {
-            self.entries.clear();
+        if let Some((message, failed_at)) = self.failures.get(&key) {
+            if failed_at.elapsed() < MODEL_FAILURE_RETRY_COOLDOWN {
+                return Err(message.clone());
+            }
         }
         let result = match asset_root {
             Some(root) => load_model(root, reference),
             None => Err("No project asset root is configured.".to_string()),
         };
-        if let Ok(mesh) = &result {
-            self.entries.insert(key, Some(Arc::clone(mesh)));
+        match &result {
+            Ok(mesh) => {
+                self.failures.remove(&key);
+                self.entries.insert(key, Arc::clone(mesh));
+            }
+            Err(message) => {
+                if self.failures.len() >= MAX_CACHED_MODEL_FAILURES {
+                    self.failures.retain(|_, (_, failed_at)| {
+                        failed_at.elapsed() < MODEL_FAILURE_RETRY_COOLDOWN
+                    });
+                    if self.failures.len() >= MAX_CACHED_MODEL_FAILURES {
+                        self.failures.clear();
+                    }
+                }
+                self.failures.insert(key, (message.clone(), Instant::now()));
+            }
         }
         result
     }
@@ -64,9 +94,8 @@ fn load_model(root: &Path, reference: &MeshAssetRef) -> Result<Arc<MeshData>, St
     {
         let base = mesh.positions.len() as u32;
         for position in &source.positions {
-            mesh.positions.push(
-                Vec3::from_array(*position) * reference.import_scale.max(f32::EPSILON),
-            );
+            mesh.positions
+                .push(Vec3::from_array(*position) * reference.import_scale.max(f32::EPSILON));
         }
         for normal in &source.normals {
             mesh.normals
@@ -75,7 +104,8 @@ fn load_model(root: &Path, reference: &MeshAssetRef) -> Result<Arc<MeshData>, St
         for uv in &source.uvs {
             mesh.uvs.push(*uv);
         }
-        mesh.indices.extend(source.indices.iter().map(|index| base + *index));
+        mesh.indices
+            .extend(source.indices.iter().map(|index| base + *index));
     }
     if mesh.indices.is_empty() || mesh.positions.is_empty() {
         return Err("The selected model node contains no renderable triangles.".to_string());

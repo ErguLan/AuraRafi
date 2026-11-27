@@ -8,6 +8,9 @@ mod paint_style;
 mod paint_updates;
 pub mod startup;
 
+/// One resident in a layered composition. Re-exported here because `device` is
+/// an implementation module; backends and hosts compose through `product`.
+pub use crate::device::Layer;
 pub use contract::*;
 pub use coverage::{Coverage, Feature, CAD_COVERAGE, COVERAGE};
 pub use paint_style::{
@@ -15,9 +18,6 @@ pub use paint_style::{
     MAX_DECLARED_CLIPS, MAX_ROUNDED_CLIPS,
 };
 pub use paint_updates::TexturePatch;
-/// One resident in a layered composition. Re-exported here because `device` is
-/// an implementation module; backends and hosts compose through `product`.
-pub use crate::device::Layer;
 
 use std::{
     collections::HashMap,
@@ -27,8 +27,10 @@ use std::{
 
 use crate::{
     capabilities::GraphicsMemoryBudget, handles::MeshHandle, AdapterInfo, Backend, Device, Error,
-    FrameMetrics, Output, ResourcePatch, Result,
+    FrameMetrics, Instance, Output, ResourcePatch, Result,
 };
+
+use self::encode::InstanceStyle;
 
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 
@@ -55,6 +57,7 @@ struct Entry {
     clear: [f32; 4],
     meshes: HashMap<(u32, bool), MeshSpan>,
     instances: HashMap<usize, Range<u32>>,
+    instance_styles: HashMap<usize, InstanceStyle>,
 }
 
 /// Device-scoped cache. Callers retain the source of truth and can replay it
@@ -103,6 +106,12 @@ impl<B: Backend> ProductDevice<B> {
         self.device.supports_layers()
     }
 
+    /// True when the executor accepts per-frame instance patches on a retained
+    /// packet. Upper layers keep the full-packet fingerprint when false.
+    pub fn supports_frame_instance_patches(&self) -> bool {
+        self.device.supports_frame_instance_patches()
+    }
+
     pub fn ledger(&self) -> crate::memory_ledger::GraphicsLedgerSnapshot {
         self.device.ledger()
     }
@@ -142,9 +151,89 @@ impl<B: Backend> ProductDevice<B> {
                 clear: encoded.clear,
                 meshes: encoded.meshes,
                 instances: encoded.instances,
+                instance_styles: encoded.instance_styles,
             },
         );
         Ok(self.handle(key, native))
+    }
+
+    /// Updates only per-frame instance transforms and tints on a retained
+    /// packet. Packet topology, meshes, textures and the device revision stay
+    /// untouched, so a moving object never re-uploads the static world.
+    ///
+    /// `patches` pairs the packet command ordinal with the new instance list.
+    /// The list length must match the encoded instance range. The executor
+    /// reapplies the stored pipeline/shadow flags and material tint.
+    pub fn patch_frame_instances(
+        &mut self,
+        handle: PacketHandle,
+        patches: &[(usize, &[Instance])],
+    ) -> Result<()> {
+        let mut prepared = Vec::with_capacity(patches.len());
+        {
+            let entry = self.entry(handle)?;
+            for (command, instances) in patches {
+                let range = entry
+                    .instances
+                    .get(command)
+                    .cloned()
+                    .ok_or(Error::Invalid("instance patch on an unknown command"))?;
+                if range.len() != instances.len() {
+                    return Err(Error::Invalid(
+                        "instance patch length does not match the retained command",
+                    ));
+                }
+                let style = entry
+                    .instance_styles
+                    .get(command)
+                    .copied()
+                    .ok_or(Error::Invalid("instance patch has no retained style"))?;
+                let mut data = Vec::with_capacity(instances.len());
+                for instance in instances.iter().copied() {
+                    let mut instance = instance;
+                    if !instance
+                        .transform
+                        .as_flattened()
+                        .iter()
+                        .chain(instance.tint.iter())
+                        .all(|value| value.is_finite())
+                    {
+                        return Err(Error::Invalid("instance patch contains a non-finite value"));
+                    }
+                    instance.raster_kind = style.raster_kind;
+                    encode::multiply(&mut instance.tint, style.tint);
+                    data.push(instance);
+                }
+                prepared.push((range.start, data));
+            }
+        }
+        // Commands usually append their instances in packet order, so several
+        // moving objects sit in one contiguous range. Coalescing avoids one
+        // staging upload and one executor wait per object on backends whose
+        // patch path fences the previous submission.
+        prepared.sort_unstable_by_key(|(first, _)| *first);
+        let mut merged: Vec<(u32, Vec<Instance>)> = Vec::with_capacity(prepared.len());
+        for (first, data) in prepared {
+            if let Some((last_first, last_data)) = merged.last_mut() {
+                let contiguous =
+                    (*last_first as usize).saturating_add(last_data.len()) == first as usize;
+                if contiguous {
+                    last_data.extend_from_slice(&data);
+                    continue;
+                }
+            }
+            merged.push((first, data));
+        }
+        for (first, data) in &merged {
+            self.device.patch(
+                handle.native,
+                ResourcePatch::Instances {
+                    first: *first,
+                    data: data.as_slice(),
+                },
+            )?;
+        }
+        Ok(())
     }
 
     /// Locates a source mesh in the prepared native streams. A mesh used by

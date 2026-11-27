@@ -204,6 +204,7 @@ impl Swapchain {
                 *image,
                 format.format,
                 vk::ImageAspectFlags::COLOR,
+                1,
             )?);
             chain.rendered.push(
                 unsafe {

@@ -13,6 +13,7 @@
 //! or compatibility data; they are not an alternate UI host.
 
 // === NEW RENDERER ARCHITECTURE ===
+mod bounded_cache;
 pub mod bridge;
 mod engine_time;
 pub mod entity_lights_frame;

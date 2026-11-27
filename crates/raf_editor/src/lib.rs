@@ -55,6 +55,7 @@ pub(crate) mod native_attached_executor;
 pub(crate) mod native_behavior_authoring;
 pub(crate) mod native_editor_commands;
 pub mod native_editor_runtime;
+pub mod performance_telemetry;
 pub mod native_electronics;
 pub mod native_game_runtime;
 pub mod native_input;

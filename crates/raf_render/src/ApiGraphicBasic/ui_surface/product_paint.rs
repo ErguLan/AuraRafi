@@ -23,7 +23,7 @@ use raf_ui::UiRect;
 
 use super::effects::UiPaintKey;
 use super::images::{canonical_builtin_icon_uri, UiSurfaceImageStore};
-use super::{UiSurfaceDrawList, UiSurfacePaintCommand, UiTextAtlas};
+use super::{UiSurfaceDrawList, UiSurfacePaintCommand, UiTextAtlas, UiTextAtlasRect};
 use style::{
     build_paint_style, image_uv, rgba, style_has_visible_paint, PaintKind, PaintRef, StyleRequest,
     TargetMap,
@@ -166,7 +166,11 @@ impl PaintContext<'_, '_> {
             return Ok(());
         }
         if !valid_rect(stroke.clip_rect)
-            || !stroke.start.iter().chain(stroke.end.iter()).all(|v| v.is_finite())
+            || !stroke
+                .start
+                .iter()
+                .chain(stroke.end.iter())
+                .all(|v| v.is_finite())
             || !stroke.width.is_finite()
         {
             return Err(self
@@ -304,7 +308,14 @@ impl PaintContext<'_, '_> {
             None => {
                 let texture = self.cache.image(&source, size, revision, pixels).clone();
                 let bytes = texture.rgba.len() as u64;
-                let index = push_texture(&mut *self.packet, &key, texture, &mut self.textures)?;
+                let texture_id = image_texture_id(&source, revision);
+                let index = push_texture(
+                    &mut *self.packet,
+                    &key,
+                    texture,
+                    texture_id,
+                    &mut self.textures,
+                )?;
                 self.metrics.image_bytes = self.metrics.image_bytes.saturating_add(bytes);
                 index
             }
@@ -325,16 +336,30 @@ impl PaintContext<'_, '_> {
 
     fn text_atlas_texture(&mut self, atlas_size: [u16; 2]) -> Result<u32, String> {
         let key = UiTextureKey::Atlas {
-            revision: self.atlas.revision(),
             size: [u32::from(atlas_size[0]), u32::from(atlas_size[1])],
             height: self.atlas_height,
         };
         if let Some(index) = self.textures.get(&key) {
             return Ok(*index);
         }
-        let texture = self.cache.atlas(self.atlas, self.atlas_height).clone();
+        let (texture, updated) = {
+            let (texture, updated) =
+                self.cache
+                    .atlas(self.atlas, self.atlas_height);
+            (texture.clone(), updated)
+        };
         let bytes = texture.rgba.len() as u64;
-        let index = push_texture(&mut *self.packet, &key, texture, &mut self.textures)?;
+        let texture_id = atlas_texture_id(self.surface, atlas_size, self.atlas_height);
+        let index = push_texture(
+            &mut *self.packet,
+            &key,
+            texture.clone(),
+            texture_id,
+            &mut self.textures,
+        )?;
+        if let Some(rect) = updated {
+            push_texture_update(self.packet, index, &texture, rect);
+        }
         self.metrics.atlas_bytes = self.metrics.atlas_bytes.saturating_add(bytes);
         Ok(index)
     }
@@ -371,26 +396,85 @@ fn push_texture(
     packet: &mut ProductPacket,
     key: &UiTextureKey,
     texture: Texture,
+    texture_id: u64,
     textures: &mut HashMap<UiTextureKey, u32>,
 ) -> Result<u32, String> {
-    let index = u32::try_from(packet.textures.len())
-        .map_err(|_| "RafUI paint needs more textures than ApiGraphicBasic can index".to_string())?;
+    let index = u32::try_from(packet.textures.len()).map_err(|_| {
+        "RafUI paint needs more textures than ApiGraphicBasic can index".to_string()
+    })?;
+    if packet.texture_ids.len() < packet.textures.len() {
+        packet.texture_ids.resize(packet.textures.len(), 0);
+    }
     packet.textures.push(texture);
+    packet.texture_ids.push(texture_id);
     textures.insert(key.clone(), index);
     Ok(index)
 }
 
+/// Queues the rectangle a retained atlas refreshed since its last append.
+/// Executors that reuse the stable texture identity upload only this region.
+fn push_texture_update(
+    packet: &mut ProductPacket,
+    texture: u32,
+    source: &Texture,
+    rect: UiTextAtlasRect,
+) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let stride = source.size[0] as usize;
+    let width = usize::from(rect.width);
+    let height = usize::from(rect.height);
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    for row in usize::from(rect.y)..usize::from(rect.y) + height {
+        let start = (row * stride + usize::from(rect.x)) * 4;
+        let end = start + width * 4;
+        if end > source.rgba.len() {
+            return;
+        }
+        rgba.extend_from_slice(&source.rgba[start..end]);
+    }
+    packet.texture_updates.push(raf_agb::TextureUpdate {
+        texture,
+        origin: [u32::from(rect.x), u32::from(rect.y)],
+        size: [u32::from(rect.width), u32::from(rect.height)],
+        rgba,
+    });
+}
+
+fn mix_texture_id(hash: u64, value: u64) -> u64 {
+    (hash ^ value).wrapping_mul(0x0000_0100_0000_01b3)
+}
+
+fn atlas_texture_id(surface: &str, size: [u16; 2], height: u32) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    hash = mix_texture_id(hash, 1);
+    for byte in surface.as_bytes() {
+        hash = mix_texture_id(hash, u64::from(*byte));
+    }
+    hash = mix_texture_id(hash, u64::from(size[0]));
+    hash = mix_texture_id(hash, u64::from(size[1]));
+    mix_texture_id(hash, u64::from(height))
+}
+
+fn image_texture_id(source: &str, revision: u64) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    hash = mix_texture_id(hash, 2);
+    for byte in source.as_bytes() {
+        hash = mix_texture_id(hash, u64::from(*byte));
+    }
+    mix_texture_id(hash, revision)
+}
+
 fn rounded_shapes(style: &PaintStyle) -> u32 {
-    let own = style
-        .radii
-        .iter()
-        .flatten()
-        .any(|radius| *radius > 0.0);
+    let own = style.radii.iter().flatten().any(|radius| *radius > 0.0);
     let declared = u32::try_from(style.clips.len()).unwrap_or(u32::MAX);
     declared.saturating_add(u32::from(own))
 }
 
 fn active_atlas_height(list: &UiSurfaceDrawList, atlas: &UiTextAtlas) -> u32 {
+    const PAGE_GRANULARITY: u32 = 512;
+    let atlas_height = u32::from(atlas.size()[1].max(1));
     let used = list
         .text
         .iter()
@@ -399,7 +483,15 @@ fn active_atlas_height(list: &UiSurfaceDrawList, atlas: &UiTextAtlas) -> u32 {
         .fold(0.0_f32, f32::max)
         .ceil()
         .max(0.0) as u32;
-    used.min(u32::from(atlas.size()[1].max(1))).max(1)
+    let used = used.min(atlas_height).max(1);
+    if atlas_height <= PAGE_GRANULARITY {
+        return atlas_height;
+    }
+    // One extra status line must not create a new atlas texture identity and
+    // a full page copy. Rows above the used area are zero and never sampled.
+    used.div_ceil(PAGE_GRANULARITY)
+        .saturating_mul(PAGE_GRANULARITY)
+        .min(atlas_height)
 }
 
 fn valid_rect(rect: UiRect) -> bool {

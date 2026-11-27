@@ -10,6 +10,7 @@
 //! There is no blit chain, no intermediate GPU texture, and no second renderer.
 
 use std::sync::{Arc, Once};
+use std::time::Instant;
 
 use raf_agb::product::{
     Command, FrameUniforms, PacketHandle, PacketKey, ProductDevice, ProductPacket,
@@ -17,6 +18,7 @@ use raf_agb::product::{
 use raf_agb::Backend;
 
 use crate::api_graphic_basic::canvas_presenter::{append_cpu_output, CanvasTargetRect};
+use crate::api_graphic_basic::command_list::GraphicCommand;
 use crate::api_graphic_basic::device::SceneFrameOutput;
 use crate::api_graphic_basic::product_composition::{
     linear_rgba, prepare_product_packet, prepare_product_scene, scene_frame_uniforms,
@@ -40,6 +42,7 @@ pub struct NativeEditorCompositor {
     scene_builder: ProductFrameBuilder,
     scene_revision: u64,
     scene_fingerprint: Option<SceneFingerprint>,
+    scene_instance_hash: Option<u64>,
     scene_handle: Option<PacketHandle>,
     ui_builder: ProductFrameBuilder,
     ui_revision: u64,
@@ -48,6 +51,8 @@ pub struct NativeEditorCompositor {
     layered: Option<bool>,
     clear_color: [u8; 4],
     metrics: EditorCompositorMetrics,
+    /// Opt-in profiler state: command debug strings from the last scene frame.
+    last_scene_command_debug: Vec<String>,
 }
 
 impl NativeEditorCompositor {
@@ -67,6 +72,7 @@ impl NativeEditorCompositor {
             scene_builder: ProductFrameBuilder::default(),
             scene_revision: 0,
             scene_fingerprint: None,
+            scene_instance_hash: None,
             scene_handle: None,
             ui_builder: ProductFrameBuilder::new(UI_PACKET_KEY),
             ui_revision: 0,
@@ -75,6 +81,7 @@ impl NativeEditorCompositor {
             layered: None,
             clear_color,
             metrics: EditorCompositorMetrics::default(),
+            last_scene_command_debug: Vec::new(),
         }
     }
 
@@ -85,8 +92,10 @@ impl NativeEditorCompositor {
         self.handle = None;
         self.builder.clear();
         self.scene_fingerprint = None;
+        self.scene_instance_hash = None;
         self.scene_handle = None;
         self.scene_builder.clear();
+        self.last_scene_command_debug.clear();
         self.ui_fingerprint = None;
         self.ui_handle = None;
         self.ui_builder.clear();
@@ -159,8 +168,10 @@ impl NativeEditorCompositor {
         self.handle = None;
         self.builder.clear();
         self.scene_fingerprint = None;
+        self.scene_instance_hash = None;
         self.scene_handle = None;
         self.scene_builder.clear();
+        self.last_scene_command_debug.clear();
         self.ui_fingerprint = None;
         self.ui_handle = None;
         self.ui_builder.clear();
@@ -182,8 +193,13 @@ impl NativeEditorCompositor {
         self.metrics.begin_frame();
         self.metrics.layered = false;
         let clear = linear_clear(self.clear_color);
-        let fingerprint = CompositionFingerprint::new(&canvas_layer, &ui_layers[..], target_size);
-        let changed = self.fingerprint != Some(fingerprint) || self.handle.is_none();
+        let patchable = device.supports_frame_instance_patches();
+        for layer in ui_layers.iter_mut() {
+            layer.host.refresh_paint_revision();
+        }
+        let fingerprint =
+            CompositionFingerprint::new(&canvas_layer, &ui_layers[..], target_size, patchable);
+        let mut changed = self.fingerprint != Some(fingerprint) || self.handle.is_none();
 
         // Camera and viewport come from the canvas regardless of whether this
         // frame reprepares the packet; an idle frame still has to draw with the
@@ -199,9 +215,38 @@ impl NativeEditorCompositor {
         );
         let mut canvas_layers = 0;
 
+        if !changed {
+            if let (Some(handle), Some(layer)) = (self.handle, canvas_layer.as_ref()) {
+                if let SceneFrameOutput::Scene(frame) = layer.output.as_ref() {
+                    let instance_hash = frame.commands.instance_state_hash();
+                    if self.scene_instance_hash != Some(instance_hash) {
+                        match self.builder.dynamic_instance_patches(frame) {
+                            Ok(Some(patches)) if !patches.is_empty() => {
+                                let patches = patches
+                                    .iter()
+                                    .map(|patch| {
+                                        (patch.product_command, patch.instances.as_slice())
+                                    })
+                                    .collect::<Vec<_>>();
+                                if device.patch_frame_instances(handle, &patches).is_ok() {
+                                    self.scene_instance_hash = Some(instance_hash);
+                                } else {
+                                    changed = true;
+                                }
+                            }
+                            Ok(Some(_)) => {
+                                self.scene_instance_hash = Some(instance_hash);
+                            }
+                            _ => changed = true,
+                        }
+                    }
+                }
+            }
+        }
+
         if changed {
             self.revision = self.revision.wrapping_add(1).max(1);
-            self.builder.clear();
+            self.builder.clear_geometry_keep_textures();
             match canvas_layer.as_ref() {
                 Some(layer) => match layer.output.as_ref() {
                     SceneFrameOutput::Scene(frame) => {
@@ -234,6 +279,13 @@ impl NativeEditorCompositor {
                 },
                 None => self.builder.append_empty(clear, self.revision)?,
             }
+            self.scene_instance_hash = canvas_layer.as_ref().and_then(|layer| {
+                if let SceneFrameOutput::Scene(frame) = layer.output.as_ref() {
+                    Some(frame.commands.instance_state_hash())
+                } else {
+                    None
+                }
+            });
 
             let mut ui_frames = Vec::with_capacity(ui_layers.len());
             for layer in ui_layers.iter_mut() {
@@ -259,7 +311,16 @@ impl NativeEditorCompositor {
             }
             let handle = prepare_product_scene(device, &mut self.builder)?;
             self.handle = Some(handle);
-            self.fingerprint = Some(fingerprint);
+            // Appending retained UI can advance its paint revision when the
+            // text atlas or an image enters the packet. Fingerprint the state
+            // after that work; storing the pre-append value made the next
+            // otherwise idle frame rebuild and re-upload the whole scene.
+            self.fingerprint = Some(CompositionFingerprint::new(
+                &canvas_layer,
+                &ui_layers[..],
+                target_size,
+                patchable,
+            ));
             self.metrics.canvas_layers = canvas_layers;
             self.metrics.ui_layers = ui_frames.len() as u32;
             self.metrics.scene_packet_revision = self.revision;
@@ -318,6 +379,17 @@ impl NativeEditorCompositor {
         B: Backend,
         F: FnMut(&str) -> String,
     {
+        let profile = scene_profile_enabled();
+        let profile_started = Instant::now();
+        let mut profile_ui_ms = 0.0;
+        let mut profile_prepare_ms = 0.0;
+        let mut profile_draw_ms = 0.0;
+        let profile_paint_revisions = profile.then(|| {
+            ui_layers
+                .iter()
+                .map(|layer| layer.host.paint_revision())
+                .collect::<Vec<_>>()
+        });
         self.metrics.begin_frame();
         self.metrics.layered = true;
         let clear = linear_clear(self.clear_color);
@@ -331,18 +403,136 @@ impl NativeEditorCompositor {
             device.info().backend,
         );
 
-        let scene_fingerprint = SceneFingerprint::new(&canvas_layer, target_size);
+        let patchable = device.supports_frame_instance_patches();
+        for layer in ui_layers.iter_mut() {
+            layer.host.refresh_paint_revision();
+        }
+        let scene_fingerprint = SceneFingerprint::new(&canvas_layer, patchable);
         let ui_fingerprint = UiFingerprint::new(&ui_layers[..], target_size);
-        let scene_changed = canvas_layer.is_some()
+        let mut scene_changed = canvas_layer.is_some()
             && (self.scene_fingerprint != Some(scene_fingerprint) || self.scene_handle.is_none());
         let ui_changed = self.ui_fingerprint != Some(ui_fingerprint) || self.ui_handle.is_none();
+
+        if scene_changed && scene_profile_enabled() {
+            if let Some(layer) = canvas_layer.as_ref() {
+                if let SceneFrameOutput::Scene(frame) = layer.output.as_ref() {
+                    tracing::info!(
+                        previous = ?self.scene_fingerprint,
+                        current = ?scene_fingerprint,
+                        structure = frame.commands.structure_hash(),
+                        content = frame.commands.content_hash(),
+                        commands = frame.commands.commands().len(),
+                        meshes = frame.commands.mesh_count(),
+                        textures = frame.commands.texture_count(),
+                        batch_instances = frame.commands.batched_instance_count(),
+                        lines = frame
+                            .commands
+                            .commands()
+                            .iter()
+                            .filter(|command| matches!(
+                                command,
+                                GraphicCommand::DrawLine { .. }
+                                    | GraphicCommand::DrawLineBatch { .. }
+                            ))
+                            .count(),
+                        screen_triangles = frame
+                            .commands
+                            .commands()
+                            .iter()
+                            .map(|command| match command {
+                                GraphicCommand::DrawScreenTriangleBatch { triangles } => {
+                                    triangles.len()
+                                }
+                                _ => 0,
+                            })
+                            .sum::<usize>(),
+                        environment = ?frame.commands.environment.as_ref().map(|environment| (
+                            environment.sun_direction.to_array(),
+                            environment.sun.to_array(),
+                            environment.ambient.to_array(),
+                            environment.sky_top.to_array(),
+                            environment.halo_strength,
+                        )),
+                        shadow_casters = ?frame.commands.shadows.as_ref().map(|shadow| {
+                            shadow
+                                .geometry
+                                .casters
+                                .iter()
+                                .map(|caster| Arc::as_ptr(&caster.mesh) as usize as u64)
+                                .collect::<Vec<_>>()
+                        }),
+                        packet_reuse = frame.commands.packet_reuse,
+                        patchable,
+                        "scene packet fingerprint changed"
+                    );
+                    let summaries = frame.commands.debug_command_summaries();
+                    if !self.last_scene_command_debug.is_empty() {
+                        if self.last_scene_command_debug.len() != summaries.len() {
+                            tracing::info!(
+                                previous = self.last_scene_command_debug.len(),
+                                current = summaries.len(),
+                                "scene command count changed"
+                            );
+                        }
+                        for (index, (before, after)) in self
+                            .last_scene_command_debug
+                            .iter()
+                            .zip(summaries.iter())
+                            .enumerate()
+                        {
+                            if before != after {
+                                tracing::info!(
+                                    index,
+                                    before = %before,
+                                    after = %after,
+                                    "scene command changed"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    self.last_scene_command_debug = summaries;
+                }
+            }
+        }
 
         self.metrics.canvas_layers = canvas_layer_count(canvas_layer.as_ref(), target_size);
         self.metrics.ui_layers = ui_layers.len() as u32;
 
+        if !scene_changed {
+            if let (Some(handle), Some(layer)) = (self.scene_handle, canvas_layer.as_ref()) {
+                if let SceneFrameOutput::Scene(frame) = layer.output.as_ref() {
+                    let instance_hash = frame.commands.instance_state_hash();
+                    if self.scene_instance_hash != Some(instance_hash) {
+                        match self.scene_builder.dynamic_instance_patches(frame) {
+                            Ok(Some(patches)) if !patches.is_empty() => {
+                                let patches = patches
+                                    .iter()
+                                    .map(|patch| {
+                                        (patch.product_command, patch.instances.as_slice())
+                                    })
+                                    .collect::<Vec<_>>();
+                                if device.patch_frame_instances(handle, &patches).is_ok() {
+                                    self.scene_instance_hash = Some(instance_hash);
+                                } else {
+                                    // A rejected patch must not leave stale
+                                    // instances visible. Rebuild this frame.
+                                    scene_changed = true;
+                                }
+                            }
+                            Ok(Some(_)) => {
+                                self.scene_instance_hash = Some(instance_hash);
+                            }
+                            _ => scene_changed = true,
+                        }
+                    }
+                }
+            }
+        }
+
         if scene_changed {
             self.scene_revision = self.scene_revision.wrapping_add(1).max(1);
-            self.scene_builder.clear();
+            self.scene_builder.clear_geometry_keep_textures();
             let layer = canvas_layer
                 .as_ref()
                 .expect("a scene fingerprint change requires a canvas layer");
@@ -377,15 +567,25 @@ impl NativeEditorCompositor {
             if trace_enabled() {
                 trace_packet("scene", self.scene_builder.packet());
             }
+            let prepare_started = Instant::now();
             let handle = prepare_product_scene(device, &mut self.scene_builder)?;
+            profile_prepare_ms += prepare_started.elapsed().as_secs_f64() * 1000.0;
             self.scene_handle = Some(handle);
             self.scene_fingerprint = Some(scene_fingerprint);
             self.metrics.scene_packet_revision = self.scene_revision;
             self.metrics.scene_packet_rebuilds = 1;
+            self.scene_instance_hash = canvas_layer.as_ref().and_then(|layer| {
+                if let SceneFrameOutput::Scene(frame) = layer.output.as_ref() {
+                    Some(frame.commands.instance_state_hash())
+                } else {
+                    None
+                }
+            });
         }
 
         let mut ui_frames = Vec::new();
         if ui_changed {
+            let ui_started = Instant::now();
             self.ui_revision = self.ui_revision.wrapping_add(1).max(1);
             self.ui_builder.clear();
             // The retained UI packet is one clear plus the paint commands; the
@@ -412,7 +612,10 @@ impl NativeEditorCompositor {
             if trace_enabled() {
                 trace_packet("ui", self.ui_builder.packet());
             }
+            let prepare_started = Instant::now();
             let handle = prepare_product_packet(device, &mut self.ui_builder, "UI")?;
+            profile_prepare_ms += prepare_started.elapsed().as_secs_f64() * 1000.0;
+            profile_ui_ms += ui_started.elapsed().as_secs_f64() * 1000.0;
             self.ui_handle = Some(handle);
             // Freeze the fingerprint after the append: atlas or image residency
             // can advance the host revision while the packet is produced, and
@@ -447,10 +650,25 @@ impl NativeEditorCompositor {
             );
         }
 
+        let draw_started = Instant::now();
         let draw = device
             .draw_layers(&handles, &uniforms)
             .map_err(|error| format!("product draw failed: {error}"))?;
+        profile_draw_ms += draw_started.elapsed().as_secs_f64() * 1000.0;
         self.metrics.record_draw(draw);
+        if profile {
+            tracing::info!(
+                scene_changed,
+                ui_changed,
+                ui_ms = profile_ui_ms,
+                prepare_ms = profile_prepare_ms,
+                draw_ms = profile_draw_ms,
+                total_ms = profile_started.elapsed().as_secs_f64() * 1000.0,
+                paint_revisions = ?profile_paint_revisions,
+                scene_fingerprint = ?scene_fingerprint,
+                "layered compose profile"
+            );
+        }
 
         Ok(EditorComposedFrame {
             ui_layers: ui_frames,
@@ -649,27 +867,27 @@ impl CompositionFingerprint {
         canvas: &Option<EditorCanvasLayer>,
         ui_layers: &[EditorUiLayer<'_>],
         target_size: [u32; 2],
+        patchable: bool,
     ) -> Self {
         Self {
-            scene: SceneFingerprint::new(canvas, target_size),
+            scene: SceneFingerprint::new(canvas, patchable),
             ui: UiFingerprint::new(ui_layers, target_size),
         }
     }
 }
 
-/// Scene identity: a new canvas Arc, kind, source size, placement or target
-/// size. Camera-only changes never advance it.
+/// Scene identity: a new canvas Arc, kind or placement. Camera, target size and
+/// resolution-scale changes never advance it: the scene packet is authored in
+/// its own geometry and the viewport travels in frame uniforms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SceneFingerprint {
-    target_size: [u32; 2],
     canvas: CanvasFingerprint,
 }
 
 impl SceneFingerprint {
-    fn new(canvas: &Option<EditorCanvasLayer>, target_size: [u32; 2]) -> Self {
+    fn new(canvas: &Option<EditorCanvasLayer>, patchable: bool) -> Self {
         Self {
-            target_size,
-            canvas: CanvasFingerprint::new(canvas),
+            canvas: CanvasFingerprint::new(canvas, patchable),
         }
     }
 }
@@ -680,7 +898,6 @@ enum CanvasFingerprint {
     Scene {
         content: u64,
         rect: [u32; 4],
-        source_size: [u32; 2],
     },
     Cpu {
         ptr: usize,
@@ -691,7 +908,7 @@ enum CanvasFingerprint {
 }
 
 impl CanvasFingerprint {
-    fn new(canvas: &Option<EditorCanvasLayer>) -> Self {
+    fn new(canvas: &Option<EditorCanvasLayer>, patchable: bool) -> Self {
         let Some(layer) = canvas else {
             return Self::None;
         };
@@ -703,9 +920,12 @@ impl CanvasFingerprint {
         ];
         match layer.output.as_ref() {
             SceneFrameOutput::Scene(frame) => Self::Scene {
-                content: frame.commands.content_hash(),
+                content: if frame.commands.packet_reuse && patchable {
+                    frame.commands.structure_hash()
+                } else {
+                    frame.commands.content_hash()
+                },
                 rect,
-                source_size: [frame.width, frame.height],
             },
             SceneFrameOutput::CpuPixels(pixels) => Self::Cpu {
                 ptr: Arc::as_ptr(&layer.output) as *const () as usize,
@@ -744,6 +964,13 @@ impl UiFingerprint {
 
 fn fnv(hash: u64, value: u64) -> u64 {
     (hash ^ value).wrapping_mul(0x0000_0100_0000_01b3)
+}
+
+/// Opt-in composition profiling. The environment is read once so the hot path
+/// does not touch the process environment on every frame.
+fn scene_profile_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RAF_SCENE_PROFILE").is_some())
 }
 
 #[cfg(test)]
@@ -793,6 +1020,10 @@ mod tests {
             self.layered
         }
 
+        fn supports_frame_instance_patches(&self) -> bool {
+            true
+        }
+
         fn configure(&mut self, _: &FramePlan) -> AgbResult<()> {
             Ok(())
         }
@@ -804,13 +1035,24 @@ mod tests {
             Ok(state.next)
         }
 
+        unsafe fn patch(&mut self, _: &mut u32, _: raf_agb::ResourcePatch<'_>) -> AgbResult<()> {
+            Ok(())
+        }
+
         fn draw(
             &mut self,
             resident: &u32,
             plan: &FramePlan,
             frame: &Frame,
         ) -> AgbResult<FrameMetrics> {
-            self.draw_layers(&[Layer { resident, scene: true }], plan, frame)
+            self.draw_layers(
+                &[Layer {
+                    resident,
+                    scene: true,
+                }],
+                plan,
+                frame,
+            )
         }
 
         fn draw_layers(
@@ -867,6 +1109,14 @@ mod tests {
     }
 
     fn retained_canvas_with_clear(size: [u32; 2], clear: [u8; 4]) -> Arc<SceneFrameOutput> {
+        retained_canvas_with_clear_at(size, clear, Vec3::ZERO)
+    }
+
+    fn retained_canvas_with_clear_at(
+        size: [u32; 2],
+        clear: [u8; 4],
+        translation: Vec3,
+    ) -> Arc<SceneFrameOutput> {
         let mut commands = BasicCommandList::new();
         commands.clear(clear);
         let mesh = Arc::new(BasicMesh::new(
@@ -891,7 +1141,11 @@ mod tests {
         ));
         let mesh_id = commands.register_mesh(mesh);
         commands.set_pipeline(BasicPipelineKind::FlatColor);
-        commands.draw_mesh(mesh_id, Mat4::IDENTITY, [200, 40, 30, 255]);
+        commands.draw_mesh(
+            mesh_id,
+            Mat4::from_translation(translation),
+            [200, 40, 30, 255],
+        );
         Arc::new(SceneFrameOutput::Scene(Arc::new(SceneRenderFrame {
             commands,
             view_proj: Mat4::IDENTITY,
@@ -931,13 +1185,9 @@ mod tests {
             raster_scale: 1.0,
         }];
         compositor
-            .compose_layers(
-                device,
-                size,
-                canvas_layer,
-                &mut layers,
-                |key| key.to_string(),
-            )
+            .compose_layers(device, size, canvas_layer, &mut layers, |key| {
+                key.to_string()
+            })
             .expect("composition")
     }
 
@@ -1033,13 +1283,7 @@ mod tests {
         let mut compositor = NativeEditorCompositor::empty([9, 9, 10, 255]);
         let size = [320, 200];
         let canvas = retained_canvas(size);
-        compose(
-            &mut compositor,
-            &mut device,
-            Some(canvas),
-            &mut ui,
-            size,
-        );
+        compose(&mut compositor, &mut device, Some(canvas), &mut ui, size);
         let ui_resident = state.borrow().draws.last().unwrap()[1];
 
         let ui_only = compose(&mut compositor, &mut device, None, &mut ui, size);
@@ -1104,7 +1348,13 @@ mod tests {
         assert_eq!(state.borrow().draws.last().unwrap().len(), 1);
 
         ui.surface_mut();
-        let second = compose(&mut compositor, &mut device, Some(canvas), &mut ui, size);
+        let second = compose(
+            &mut compositor,
+            &mut device,
+            Some(canvas.clone()),
+            &mut ui,
+            size,
+        );
         assert_eq!(second.metrics.layer_count, 1);
         assert_eq!(
             state.borrow().uploads,
@@ -1113,6 +1363,58 @@ mod tests {
         );
         assert_eq!(second.metrics.scene_packet_rebuilds, 1);
         assert_eq!(second.metrics.ui_packet_rebuilds, 1);
+
+        let settled = compose(&mut compositor, &mut device, Some(canvas), &mut ui, size);
+        assert_eq!(settled.metrics.scene_packet_rebuilds, 0);
+        assert_eq!(settled.metrics.ui_packet_rebuilds, 0);
+        assert_eq!(
+            state.borrow().uploads,
+            2,
+            "the frame after a UI change must not rebuild again"
+        );
+    }
+
+    #[test]
+    fn single_packet_path_patches_moving_instances_without_reuploading_the_world() {
+        let (mut device, state) = open_probe(false);
+        let mut ui = ui_host();
+        let mut compositor = NativeEditorCompositor::empty([9, 9, 10, 255]);
+        let size = [320, 200];
+
+        let first = compose(
+            &mut compositor,
+            &mut device,
+            Some(retained_canvas_with_clear_at(
+                size,
+                [12, 18, 24, 255],
+                Vec3::ZERO,
+            )),
+            &mut ui,
+            size,
+        );
+        assert_eq!(first.metrics.scene_packet_rebuilds, 1);
+        assert_eq!(state.borrow().uploads, 1);
+
+        let moved = compose(
+            &mut compositor,
+            &mut device,
+            Some(retained_canvas_with_clear_at(
+                size,
+                [12, 18, 24, 255],
+                Vec3::X,
+            )),
+            &mut ui,
+            size,
+        );
+        assert_eq!(
+            (
+                moved.metrics.scene_packet_rebuilds,
+                moved.metrics.ui_packet_rebuilds,
+                state.borrow().uploads
+            ),
+            (0, 0, 1),
+            "a moving instance must patch the combined packet, not rebuild it"
+        );
     }
 
     fn shadow_uniforms() -> raf_agb::product::ShadowUniforms {

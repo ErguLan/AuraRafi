@@ -1,5 +1,6 @@
 //! Hub composition, top bar, create form and primary chrome actions.
 
+use raf_core::project::EditorViewMode;
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiAlign, UiCompactMode, UiEventBinding, UiEventKind, UiFlow, UiImage,
     UiImageFit, UiImageSource, UiJustify, UiLayout, UiNode, UiNodeKind, UiOverflow,
@@ -321,7 +322,7 @@ pub(crate) fn hub_create_surface(palette: StudioUiPalette, model: &HubSurfaceMod
                     flow: UiFlow::Row,
                     align_items: UiAlign::Center,
                     gap: 12.0,
-                    ..UiLayout::fixed(0.0, 52.0)
+                    ..UiLayout::fixed(0.0, HUB_CREATE_ROW_HEIGHT)
                 })
                 .with_style(UiStyle::transparent())
                 .with_child(hub_create_name_input(
@@ -338,6 +339,12 @@ pub(crate) fn hub_create_surface(palette: StudioUiPalette, model: &HubSurfaceMod
                 .with_child(hub_agent_toggle(palette, model.create_with_agent))
                 .with_child(hub_create_submit(palette, model.create_path_is_project)),
         );
+    if !model.create_path_is_project {
+        panel = panel.with_child(hub_create_advanced_toggle(palette, model));
+        if model.create_advanced_open {
+            panel = panel.with_child(hub_create_advanced_panel(palette, model));
+        }
+    }
 
     if model.create_error.is_some() {
         panel = panel.with_child(
@@ -345,17 +352,146 @@ pub(crate) fn hub_create_surface(palette: StudioUiPalette, model: &HubSurfaceMod
                 .with_class("hub-create-error")
                 .with_text_key("hub.create.error")
                 .with_text_style(UiTextStyle::body(tokens.danger))
-                .with_layout(UiLayout::fixed(0.0, 44.0)),
+                .with_layout(UiLayout::fixed(0.0, HUB_CREATE_STATUS_HEIGHT)),
         );
     } else if model.create_path_is_project {
         panel = panel.with_child(
             UiNode::new("hub.create-open-hint", UiNodeKind::Label)
                 .with_text_key("app.hub_open_existing")
                 .with_text_style(UiTextStyle::body(tokens.text_muted))
-                .with_layout(UiLayout::fixed(0.0, 44.0)),
+                .with_layout(UiLayout::fixed(0.0, HUB_CREATE_STATUS_HEIGHT)),
         );
     }
     panel
+}
+
+fn hub_create_advanced_toggle(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNode {
+    let tokens = palette.tokens();
+    let open = model.create_advanced_open;
+    UiNode::new("hub.create.advanced-toggle", UiNodeKind::Button)
+        .with_class("hub-create-advanced-toggle")
+        .with_layout(UiLayout::fixed(168.0, HUB_ADVANCED_TOGGLE_HEIGHT))
+        .with_icon(
+            UiIcon::new(if open {
+                UiIconId::ChevronDown
+            } else {
+                UiIconId::ChevronRight
+            })
+            .with_size(UiIconSize::Small)
+            .with_tint(tokens.accent),
+        )
+        .with_text_key("hub.create.advanced")
+        .with_text_style(UiTextStyle {
+            inherit_color: true,
+            ..UiTextStyle::button(tokens.accent)
+        })
+        .with_accessibility_label_key("hub.create.advanced")
+        .with_accessibility_role(raf_ui::UiAccessibilityRole::Button)
+        .with_accessibility_expanded(open)
+        .focusable()
+        .with_event(UiEventBinding::command(
+            UiEventKind::Click,
+            "hub.create.advanced-toggle",
+        ))
+}
+
+fn hub_create_advanced_panel(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNode {
+    let tokens = palette.tokens();
+    let mut panel = UiNode::new("hub.create.advanced", UiNodeKind::Panel)
+        .with_class("hub-create-advanced")
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 4.0,
+            ..UiLayout::fixed(
+                0.0,
+                if model.create_project_type == ProjectType::Game {
+                    HUB_ADVANCED_VIEW_HEIGHT
+                } else {
+                    HUB_ADVANCED_NOTE_HEIGHT
+                },
+            )
+            .with_width_mode(UiSizeMode::Fill)
+        })
+        .with_style(UiStyle::transparent());
+    if model.create_project_type != ProjectType::Game {
+        return panel.with_child(
+            UiNode::new("hub.create.advanced.game-only", UiNodeKind::Label)
+                .with_text_key("hub.create.advanced.game_only")
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fixed(0.0, 18.0).with_width_mode(UiSizeMode::Fill)),
+        );
+    }
+    let mut row = UiNode::new("hub.create.advanced.view-row", UiNodeKind::Panel)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 10.0,
+            ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_style(UiStyle::transparent())
+        .with_child(
+            UiNode::new("hub.create.advanced.view-label", UiNodeKind::Label)
+                .with_text_key("hub.create.advanced.initial_view")
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fit_content()),
+        );
+    let mut picker = UiNode::new("hub.create.advanced.view-picker", UiNodeKind::Panel)
+        .with_class("hub-create-view-picker")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 2.0,
+            padding: UiSpacing::xy(2.0, 0.0),
+            ..UiLayout::fixed(100.0, 26.0)
+        });
+    for (mode, slug) in [
+        (EditorViewMode::View2d, "2d"),
+        (EditorViewMode::View3d, "3d"),
+    ] {
+        let selected = model.create_initial_view == mode;
+        picker = picker.with_child(
+            UiNode::new(
+                format!("hub.create.advanced.view.{slug}"),
+                UiNodeKind::Button,
+            )
+            .with_class(if selected {
+                "hub-create-view-option-selected"
+            } else {
+                "hub-create-view-option"
+            })
+            .with_layout(UiLayout::fixed(47.0, 24.0))
+            .with_text_key(if mode.is_2d() {
+                "app.viewport_2d_short"
+            } else {
+                "app.viewport_3d_short"
+            })
+            .with_text_style(UiTextStyle::button(if selected {
+                tokens.accent
+            } else {
+                tokens.text_muted
+            }))
+            .with_accessibility_label_key(if mode.is_2d() {
+                "app.viewport_2d_short"
+            } else {
+                "app.viewport_3d_short"
+            })
+            .with_accessibility_role(raf_ui::UiAccessibilityRole::Button)
+            .with_accessibility_selected(selected)
+            .focusable()
+            .with_event(UiEventBinding::command(
+                UiEventKind::Click,
+                format!("hub.create.advanced.view.{slug}"),
+            )),
+        );
+    }
+    row = row.with_child(picker);
+    panel.with_child(row).with_child(
+        UiNode::new("hub.create.advanced.help", UiNodeKind::Label)
+            .with_text_key("hub.create.advanced.view_help")
+            .with_text_style(UiTextStyle::body(tokens.text_muted))
+            .with_text_overflow(raf_ui::UiTextOverflow::Ellipsis)
+            .with_layout(UiLayout::fixed(0.0, 18.0).with_width_mode(UiSizeMode::Fill)),
+    )
 }
 
 pub(crate) fn hub_create_name_input(

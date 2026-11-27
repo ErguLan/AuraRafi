@@ -98,14 +98,51 @@ impl SceneGraph {
         for root in &self.roots {
             mix_render_fingerprint(&mut hash, root.0 as u64);
         }
+        for (index, node) in self.nodes.iter().enumerate() {
+            mix_node_render_fingerprint(&mut hash, index, node);
+        }
+        self.render_cache.set(Some(hash));
+        hash
+    }
 
+    /// Visual fingerprint of one node. Retained editor surfaces use this for
+    /// the selected inspector only, so animation of unselected objects no
+    /// longer invalidates the whole workbench document.
+    pub fn node_render_fingerprint(&self, id: SceneNodeId) -> u64 {
+        let Some(node) = self.nodes.get(id.0) else {
+            return 0;
+        };
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        mix_node_render_fingerprint(&mut hash, id.0, node);
+        hash
+    }
+
+    /// Fingerprint of hierarchy/authoring structure without animation fields.
+    ///
+    /// Position, rotation, scale, color, surface and mesh topology are excluded
+    /// on purpose: scripts that move vehicles every tick must not rebuild the
+    /// editor hierarchy, inspector and its GPU texture table every frame.
+    pub fn hierarchy_fingerprint(&self) -> u64 {
+        let revision = self.document_revision.get();
+        let (cached_revision, cached_hash) = self.hierarchy_cache.get();
+        if cached_revision == revision && cached_hash != 0 {
+            return cached_hash;
+        }
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        mix_render_fingerprint(&mut hash, self.nodes.len() as u64);
+        mix_render_fingerprint(&mut hash, self.roots.len() as u64);
+        for root in &self.roots {
+            mix_render_fingerprint(&mut hash, root.0 as u64);
+        }
         for (index, node) in self.nodes.iter().enumerate() {
             mix_render_fingerprint(&mut hash, index as u64);
-            mix_render_fingerprint(&mut hash, (!node.name.is_empty()) as u64);
+            mix_render_fingerprint(&mut hash, node.name.len() as u64);
+            for byte in node.name.as_bytes() {
+                mix_render_fingerprint(&mut hash, u64::from(*byte));
+            }
             mix_render_fingerprint(&mut hash, node.visible as u64);
-            mix_render_fingerprint(&mut hash, node.casts_shadows as u64);
-            mix_render_fingerprint(&mut hash, node.receives_shadows as u64);
             mix_render_fingerprint(&mut hash, node.is_folder as u64);
+            mix_render_fingerprint(&mut hash, node.locked as u64);
             mix_render_fingerprint(&mut hash, primitive_fingerprint(node.primitive));
             mix_render_fingerprint(
                 &mut hash,
@@ -115,48 +152,19 @@ impl SceneGraph {
             for child in &node.children {
                 mix_render_fingerprint(&mut hash, child.0 as u64);
             }
-            for value in [
-                node.position.x,
-                node.position.y,
-                node.position.z,
-                node.rotation.x,
-                node.rotation.y,
-                node.rotation.z,
-                node.scale.x,
-                node.scale.y,
-                node.scale.z,
-            ] {
-                mix_render_fingerprint(&mut hash, value.to_bits() as u64);
-            }
-            for channel in [node.color.r, node.color.g, node.color.b, node.color.a] {
-                mix_render_fingerprint(&mut hash, channel as u64);
-            }
-            if let Some(texture) = node.base_color_texture.as_deref() {
-                mix_render_fingerprint(&mut hash, texture.len() as u64);
-                for byte in texture.as_bytes() {
+            mix_render_fingerprint(
+                &mut hash,
+                node.entity_index.map(u64::from).unwrap_or(u64::MAX),
+            );
+            for script in &node.scripts {
+                mix_render_fingerprint(&mut hash, script.len() as u64);
+                for byte in script.as_bytes() {
                     mix_render_fingerprint(&mut hash, u64::from(*byte));
                 }
-            } else {
-                mix_render_fingerprint(&mut hash, u64::MAX);
             }
-            match &node.light {
-                Some(light) => {
-                    mix_render_fingerprint(&mut hash, 1);
-                    mix_render_fingerprint(&mut hash, light.kind as u64);
-                    mix_render_fingerprint(&mut hash, light.enabled as u64);
-                    mix_render_fingerprint(&mut hash, light.intensity.to_bits() as u64);
-                    mix_render_fingerprint(&mut hash, light.range.to_bits() as u64);
-                    mix_render_fingerprint(&mut hash, light.inner_cone_degrees.to_bits() as u64);
-                    mix_render_fingerprint(&mut hash, light.outer_cone_degrees.to_bits() as u64);
-                    for channel in light.color {
-                        mix_render_fingerprint(&mut hash, channel as u64);
-                    }
-                }
-                None => mix_render_fingerprint(&mut hash, 0),
-            }
+            mix_render_fingerprint(&mut hash, u64::from(!node.scripts.is_empty()));
             if let Some(mesh) = &node.mesh_asset {
                 mix_render_fingerprint(&mut hash, 1);
-                mix_render_fingerprint(&mut hash, mesh.import_scale.to_bits() as u64);
                 mix_render_fingerprint(
                     &mut hash,
                     mesh.node.map(|node| node as u64).unwrap_or(u64::MAX),
@@ -167,35 +175,28 @@ impl SceneGraph {
             } else {
                 mix_render_fingerprint(&mut hash, 0);
             }
-            match &node.editable_mesh {
-                Some(mesh) => {
-                    mix_render_fingerprint(&mut hash, 1);
-                    mix_render_fingerprint(&mut hash, mesh.revision);
-                    mix_render_fingerprint(&mut hash, mesh.vertices.len() as u64);
-                    mix_render_fingerprint(&mut hash, mesh.indices.len() as u64);
-                    if let Some((min, max)) = mesh.bounds() {
-                        for value in [min.x, min.y, min.z, max.x, max.y, max.z] {
-                            mix_render_fingerprint(&mut hash, value.to_bits() as u64);
-                        }
-                    }
-                }
-                None => mix_render_fingerprint(&mut hash, 0),
+            if let Some(mesh) = &node.editable_mesh {
+                mix_render_fingerprint(&mut hash, 1);
+                mix_render_fingerprint(&mut hash, mesh.revision);
+            } else {
+                mix_render_fingerprint(&mut hash, 0);
             }
-            mix_render_fingerprint(&mut hash, node.surface.texture_tiling[0].to_bits() as u64);
-            mix_render_fingerprint(&mut hash, node.surface.texture_tiling[1].to_bits() as u64);
-            mix_render_fingerprint(&mut hash, node.surface.unlit as u64);
-            mix_render_fingerprint(&mut hash, node.surface.double_sided as u64);
-            mix_render_fingerprint(
-                &mut hash,
-                match node.pivot {
-                    crate::scene::PivotMode::Center => 0,
-                    crate::scene::PivotMode::Base => 1,
-                    crate::scene::PivotMode::Corner => 2,
-                },
-            );
+            mix_render_fingerprint(&mut hash, u64::from(node.game_camera.is_some()));
+            mix_render_fingerprint(&mut hash, u64::from(node.light.is_some()));
+            mix_render_fingerprint(&mut hash, u64::from(node.skin.is_some()));
+            mix_render_fingerprint(&mut hash, u64::from(node.animation.is_some()));
+            mix_render_fingerprint(&mut hash, u64::from(node.particle_system.is_some()));
+            mix_render_fingerprint(&mut hash, u64::from(node.audio_source.enabled));
+            mix_render_fingerprint(&mut hash, u64::from(node.spawn_marker.is_some()));
+            mix_render_fingerprint(&mut hash, u64::from(node.linked_assembly.is_some()));
+            if let Some(asset) = node.source_asset.as_deref() {
+                mix_render_fingerprint(&mut hash, asset.len() as u64);
+                for byte in asset.as_bytes() {
+                    mix_render_fingerprint(&mut hash, u64::from(*byte));
+                }
+            }
         }
-
-        self.render_cache.set(Some(hash));
+        self.hierarchy_cache.set((revision, hash));
         hash
     }
 
@@ -231,6 +232,102 @@ impl SceneGraph {
             .map(|(index, _)| SceneNodeId(index))
             .collect()
     }
+}
+
+fn mix_node_render_fingerprint(hash: &mut u64, index: usize, node: &SceneNode) {
+    mix_render_fingerprint(hash, index as u64);
+    mix_render_fingerprint(hash, (!node.name.is_empty()) as u64);
+    mix_render_fingerprint(hash, node.visible as u64);
+    mix_render_fingerprint(hash, node.casts_shadows as u64);
+    mix_render_fingerprint(hash, node.receives_shadows as u64);
+    mix_render_fingerprint(hash, node.is_folder as u64);
+    mix_render_fingerprint(hash, primitive_fingerprint(node.primitive));
+    mix_render_fingerprint(
+        hash,
+        node.parent.map(|id| id.0 as u64).unwrap_or(u64::MAX),
+    );
+    mix_render_fingerprint(hash, node.children.len() as u64);
+    for child in &node.children {
+        mix_render_fingerprint(hash, child.0 as u64);
+    }
+    for value in [
+        node.position.x,
+        node.position.y,
+        node.position.z,
+        node.rotation.x,
+        node.rotation.y,
+        node.rotation.z,
+        node.scale.x,
+        node.scale.y,
+        node.scale.z,
+    ] {
+        mix_render_fingerprint(hash, value.to_bits() as u64);
+    }
+    for channel in [node.color.r, node.color.g, node.color.b, node.color.a] {
+        mix_render_fingerprint(hash, channel as u64);
+    }
+    if let Some(texture) = node.base_color_texture.as_deref() {
+        mix_render_fingerprint(hash, texture.len() as u64);
+        for byte in texture.as_bytes() {
+            mix_render_fingerprint(hash, u64::from(*byte));
+        }
+    } else {
+        mix_render_fingerprint(hash, u64::MAX);
+    }
+    match &node.light {
+        Some(light) => {
+            mix_render_fingerprint(hash, 1);
+            mix_render_fingerprint(hash, light.kind as u64);
+            mix_render_fingerprint(hash, light.enabled as u64);
+            mix_render_fingerprint(hash, light.intensity.to_bits() as u64);
+            mix_render_fingerprint(hash, light.range.to_bits() as u64);
+            mix_render_fingerprint(hash, light.inner_cone_degrees.to_bits() as u64);
+            mix_render_fingerprint(hash, light.outer_cone_degrees.to_bits() as u64);
+            for channel in light.color {
+                mix_render_fingerprint(hash, channel as u64);
+            }
+        }
+        None => mix_render_fingerprint(hash, 0),
+    }
+    if let Some(mesh) = &node.mesh_asset {
+        mix_render_fingerprint(hash, 1);
+        mix_render_fingerprint(hash, mesh.import_scale.to_bits() as u64);
+        mix_render_fingerprint(
+            hash,
+            mesh.node.map(|node| node as u64).unwrap_or(u64::MAX),
+        );
+        for byte in mesh.path.as_bytes() {
+            mix_render_fingerprint(hash, u64::from(*byte));
+        }
+    } else {
+        mix_render_fingerprint(hash, 0);
+    }
+    match &node.editable_mesh {
+        Some(mesh) => {
+            mix_render_fingerprint(hash, 1);
+            mix_render_fingerprint(hash, mesh.revision);
+            mix_render_fingerprint(hash, mesh.vertices.len() as u64);
+            mix_render_fingerprint(hash, mesh.indices.len() as u64);
+            if let Some((min, max)) = mesh.bounds() {
+                for value in [min.x, min.y, min.z, max.x, max.y, max.z] {
+                    mix_render_fingerprint(hash, value.to_bits() as u64);
+                }
+            }
+        }
+        None => mix_render_fingerprint(hash, 0),
+    }
+    mix_render_fingerprint(hash, node.surface.texture_tiling[0].to_bits() as u64);
+    mix_render_fingerprint(hash, node.surface.texture_tiling[1].to_bits() as u64);
+    mix_render_fingerprint(hash, node.surface.unlit as u64);
+    mix_render_fingerprint(hash, node.surface.double_sided as u64);
+    mix_render_fingerprint(
+        hash,
+        match node.pivot {
+            crate::scene::PivotMode::Center => 0,
+            crate::scene::PivotMode::Base => 1,
+            crate::scene::PivotMode::Corner => 2,
+        },
+    );
 }
 
 fn mix_render_fingerprint(hash: &mut u64, value: u64) {

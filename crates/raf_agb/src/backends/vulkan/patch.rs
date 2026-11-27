@@ -13,6 +13,13 @@ pub(super) fn update(
         ResourcePatch::Instances { data, .. } => bytemuck::cast_slice(data),
         ResourcePatch::Texture { rgba, .. } => rgba,
     };
+    if let ResourcePatch::Texture { index, .. } = patch {
+        if let Some(key) = resident.texture_keys.get(index as usize).copied() {
+            // The cached pixels no longer match the bytes that were hashed.
+            // A later packet with the old content must upload a fresh image.
+            backend.invalidate_texture_cache(key);
+        }
+    }
     let mut staging = Buffer::host(
         &backend.gpu,
         bytes.len() as u64,

@@ -122,6 +122,10 @@ macro_rules! native_executors {
                 match &self.0 { $($(#[$cfg])* Executor::$api(backend) => backend.supports_layers(),)+ }
             }
 
+            fn supports_frame_instance_patches(&self) -> bool {
+                match &self.0 { $($(#[$cfg])* Executor::$api(backend) => backend.supports_frame_instance_patches(),)+ }
+            }
+
             fn filter_bytes(&self) -> u64 {
                 match &self.0 { $($(#[$cfg])* Executor::$api(backend) => backend.filter_bytes(),)+ }
             }

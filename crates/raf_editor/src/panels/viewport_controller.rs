@@ -6,7 +6,7 @@
 
 use glam::{Mat4, Quat, Vec3};
 use raf_core::config::EngineSettings;
-use raf_core::project::{GeometryDetailMode, ProjectSettings, TextureQualityMode};
+use raf_core::project::{EditorViewMode, GeometryDetailMode, ProjectSettings, TextureQualityMode};
 use raf_core::scene::{SceneGraph, SceneNodeId};
 use raf_core::{InputKey, InputOwner, InputRouter, InputSnapshot, PointerButton};
 use raf_render::api_graphic_basic::command_list::BasicScreenTriangle;
@@ -61,6 +61,24 @@ pub enum NativeViewportMode {
     View2d,
     #[default]
     View3d,
+}
+
+impl NativeViewportMode {
+    pub const fn editor_view(self) -> EditorViewMode {
+        match self {
+            Self::View2d => EditorViewMode::View2d,
+            Self::View3d => EditorViewMode::View3d,
+        }
+    }
+}
+
+impl From<EditorViewMode> for NativeViewportMode {
+    fn from(mode: EditorViewMode) -> Self {
+        match mode {
+            EditorViewMode::View2d => Self::View2d,
+            EditorViewMode::View3d => Self::View3d,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -156,6 +174,10 @@ pub struct NativeGameViewportController {
     /// overlays whose screen geometry depends on the camera are suppressed for
     /// these frames so the retained AGB scene packet can be reused.
     pub camera_navigation_active: bool,
+    /// Keeps navigation sticky through brief input gaps (key repeat, focus
+    /// reconciliation) so gizmos/helpers do not flicker and force a full scene
+    /// packet rebuild in the middle of a gesture.
+    navigation_grace_seconds: f32,
     /// Project building style: quantized, collision-aware authoring.
     pub building_organized: bool,
     /// Fixed metric quantum used by the organized style (meters).
@@ -163,6 +185,7 @@ pub struct NativeGameViewportController {
     render_config: RenderConfig,
     geometry_detail: GeometryDetailMode,
     texture_quality: TextureQualityMode,
+    scene_packet_reuse: bool,
     world_stream_config: WorldStreamConfig,
     bridge: ViewportBridge,
     free_drag: Option<FreeDragGesture>,
@@ -222,8 +245,10 @@ impl Default for NativeGameViewportController {
             particle_preview: Default::default(),
             last_frame_seconds: 1.0 / 60.0,
             camera_navigation_active: false,
+            navigation_grace_seconds: 0.0,
             geometry_detail: GeometryDetailMode::Adaptive,
             texture_quality: TextureQualityMode::Adaptive,
+            scene_packet_reuse: true,
             world_stream_config: WorldStreamConfig::default(),
             bridge: ViewportBridge::default(),
             free_drag: None,
@@ -250,6 +275,18 @@ impl NativeGameViewportController {
         self.bridge.set_project_asset_root(project_root);
     }
 
+    /// Decodes the visible project textures on worker threads before the first
+    /// textured viewport frame. Loading used to decode each 1024px image on the
+    /// UI thread as it became visible, which produced a burst of hitches while
+    /// the gray scene filled in.
+    pub fn prewarm_scene_textures(
+        &mut self,
+        scene: &raf_core::scene::graph::SceneGraph,
+        quality: raf_core::project::TextureQualityMode,
+    ) {
+        self.bridge.prewarm_scene_textures(scene, quality);
+    }
+
     pub fn bridge(&self) -> &ViewportBridge {
         &self.bridge
     }
@@ -260,6 +297,22 @@ impl NativeGameViewportController {
 
     pub fn set_active(&mut self, active: bool) {
         self.viewport_active = active;
+    }
+
+    /// Applies the authored editor camera view without changing scene data.
+    /// The 2D path keeps the fixed orthographic orientation and its own pan/zoom.
+    pub fn set_editor_view_mode(&mut self, mode: EditorViewMode) {
+        let next = NativeViewportMode::from(mode);
+        if self.mode == next {
+            return;
+        }
+        self.mode = next;
+        self.bridge
+            .update_camera(next == NativeViewportMode::View2d);
+    }
+
+    pub fn editor_view_mode(&self) -> EditorViewMode {
+        self.mode.editor_view()
     }
 
     /// Render through an entity camera while keeping the editor orbit camera
@@ -333,6 +386,8 @@ impl NativeGameViewportController {
         self.multi_select_gizmo_enabled = settings.multi_select_gizmo_enabled;
         self.gizmo_growth_scale = settings.gizmo_growth_scale.clamp(0.0, 100.0);
         self.particle_preview = settings.particle_preview.clone();
+        self.texture_quality = settings.texture_quality;
+        self.scene_packet_reuse = settings.scene_packet_reuse;
     }
 
     /// Applies project-local runtime/render policy after the global engine
@@ -349,7 +404,6 @@ impl NativeGameViewportController {
         // runtime use but do not switch viewport behavior yet.
         self.render_config = RenderConfig::editor_lightweight();
         self.geometry_detail = settings.geometry_detail;
-        self.texture_quality = settings.texture_quality;
         self.world_stream_config = WorldStreamConfig::from_project_settings(settings);
     }
 
@@ -1147,9 +1201,21 @@ impl NativeGameViewportController {
         let keyboard_camera_active = input.keyboard_enabled && fly != [0.0; 3];
         let scroll_camera_active =
             !input.modifiers.command_modifier() && input.scroll_delta != [0.0; 2];
+        let input_active = pointer_camera_active || keyboard_camera_active || scroll_camera_active;
+        if input_active {
+            self.navigation_grace_seconds = 0.30;
+        } else {
+            self.navigation_grace_seconds =
+                (self.navigation_grace_seconds - input.delta_seconds.max(1.0 / 240.0)).max(0.0);
+        }
         let was_navigating = self.camera_navigation_active;
-        self.camera_navigation_active =
-            pointer_camera_active || keyboard_camera_active || scroll_camera_active;
+        self.camera_navigation_active = input_active || self.navigation_grace_seconds > 0.0;
+        if self.camera_navigation_active != was_navigating {
+            tracing::debug!(
+                active = self.camera_navigation_active,
+                "camera navigation state changed"
+            );
+        }
         self.bridge.handle_camera_input(
             ViewportPointerInput {
                 pointer_delta: if pointer_camera_active {
@@ -1969,7 +2035,8 @@ impl NativeGameViewportController {
             },
             particle_dt: self.last_frame_seconds,
             camera_navigation: self.camera_navigation_active,
-            stable_scene_packet: self.camera_navigation_active,
+            stable_scene_packet: self.camera_navigation_active || self.scene_packet_reuse,
+            scene_packet_reuse: self.scene_packet_reuse,
             focus_node: if self.edit_mode == NativeViewportEditMode::Mesh {
                 self.selected.first().map(|id| id.0 as u64)
             } else {

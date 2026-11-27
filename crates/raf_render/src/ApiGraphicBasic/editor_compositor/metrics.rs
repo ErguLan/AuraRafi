@@ -5,6 +5,8 @@ use crate::api_graphic_basic::ui_surface::DirectUiSurfaceFrame;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EditorCompositorMetrics {
     pub command_submits: u32,
+    pub draw_calls: u32,
+    pub upload_bytes: u64,
     pub canvas_layers: u32,
     pub ui_layers: u32,
     pub presents: u32,
@@ -32,12 +34,16 @@ impl EditorCompositorMetrics {
     /// revisions, layer counts and shadow residency stay as the latest truth.
     pub(super) fn begin_frame(&mut self) {
         self.command_submits = 0;
+        self.draw_calls = 0;
+        self.upload_bytes = 0;
         self.scene_packet_rebuilds = 0;
         self.ui_packet_rebuilds = 0;
     }
 
     pub(super) fn record_draw(&mut self, draw: raf_agb::FrameMetrics) {
         self.command_submits = draw.submits;
+        self.draw_calls = draw.draw_calls;
+        self.upload_bytes = draw.upload_bytes;
         self.shadow_resolution = draw.shadow_resolution;
         self.shadow_resident_bytes = draw.shadow_resident_bytes;
         self.shadow_draw_calls = draw.shadow_draw_calls;

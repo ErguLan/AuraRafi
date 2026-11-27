@@ -135,6 +135,7 @@ impl NativeGameWorkbench {
             drag_motion: UiTween::new(0.0, UiMotionSpec::dock()),
             agent_motion: UiTween::new(1.0, UiMotionSpec::dock()),
             last_sync_time_seconds: 0.0,
+            performance_initialized: false,
             presented_fps: 0.0,
             estimated_capacity_fps: 0,
             viewport_fps: 0.0,
@@ -157,8 +158,9 @@ impl NativeGameWorkbench {
             presentation_label: "Present",
             last_status_text: String::new(),
             last_status_refresh_seconds: 0.0,
-            last_scene_fingerprint: 0,
+            last_environment_fingerprint: 0,
             last_hierarchy_fingerprint: u64::MAX,
+            last_selected_fingerprint: 0,
             last_selection: Vec::new(),
             last_layout: None,
             last_history_state: (false, false, false),
@@ -217,7 +219,6 @@ impl NativeGameWorkbench {
         }
         self.toolbar_state.grid_visible = self.agent_settings.grid_visible;
         self.toolbar_state.labels_visible = self.agent_settings.show_viewport_labels;
-        self.toolbar_state.render_style = ViewportRenderStyle::Solid;
         let mut environment = UiEnvironment::new(
             self.rect.width.max(1.0).round() as u32,
             self.rect.height.max(1.0).round() as u32,

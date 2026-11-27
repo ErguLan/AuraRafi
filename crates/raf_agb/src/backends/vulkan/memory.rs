@@ -95,17 +95,30 @@ pub(super) struct Image {
     gpu: Rc<Gpu>,
     pub raw: vk::Image,
     pub view: vk::ImageView,
+    pub mip_levels: u32,
     memory: vk::DeviceMemory,
 }
 
 impl Image {
     pub fn new(
         gpu: &Rc<Gpu>,
-        [width, height]: [u32; 2],
+        size: [u32; 2],
         format: vk::Format,
         usage: vk::ImageUsageFlags,
         aspect: vk::ImageAspectFlags,
     ) -> Result<Self> {
+        Self::with_levels(gpu, size, format, usage, aspect, 1)
+    }
+
+    pub fn with_levels(
+        gpu: &Rc<Gpu>,
+        [width, height]: [u32; 2],
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        aspect: vk::ImageAspectFlags,
+        mip_levels: u32,
+    ) -> Result<Self> {
+        let mip_levels = mip_levels.max(1);
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -114,7 +127,7 @@ impl Image {
                 height,
                 depth: 1,
             })
-            .mip_levels(1)
+            .mip_levels(mip_levels)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
@@ -124,12 +137,13 @@ impl Image {
             gpu: Rc::clone(gpu),
             raw,
             view: vk::ImageView::null(),
+            mip_levels,
             memory: vk::DeviceMemory::null(),
         };
         let requirements = unsafe { gpu.device.get_image_memory_requirements(raw) };
         image.memory = allocate(gpu, requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
         unsafe { gpu.device.bind_image_memory(raw, image.memory, 0) }.map_err(vk_error)?;
-        image.view = image_view(&gpu.device, raw, format, aspect)?;
+        image.view = image_view(&gpu.device, raw, format, aspect, mip_levels)?;
         Ok(image)
     }
 }
@@ -171,6 +185,7 @@ pub(super) fn image_view(
     image: vk::Image,
     format: vk::Format,
     aspect: vk::ImageAspectFlags,
+    mip_levels: u32,
 ) -> Result<vk::ImageView> {
     unsafe {
         device.create_image_view(
@@ -178,26 +193,35 @@ pub(super) fn image_view(
                 .image(image)
                 .view_type(vk::ImageViewType::TYPE_2D)
                 .format(format)
-                .subresource_range(range(aspect)),
+                .subresource_range(range(aspect, mip_levels)),
             None,
         )
     }
     .map_err(vk_error)
 }
 
-fn range(aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceRange {
+fn range(aspect: vk::ImageAspectFlags, mip_levels: u32) -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange::default()
         .aspect_mask(aspect)
         .layer_count(1)
-        .level_count(1)
+        .level_count(mip_levels.max(1))
 }
 
 pub(super) fn copy_region(offset: u64, [width, height]: [u32; 2]) -> vk::BufferImageCopy {
+    copy_region_level(offset, [width, height], 0)
+}
+
+pub(super) fn copy_region_level(
+    offset: u64,
+    [width, height]: [u32; 2],
+    mip_level: u32,
+) -> vk::BufferImageCopy {
     vk::BufferImageCopy::default()
         .buffer_offset(offset)
         .image_subresource(
             vk::ImageSubresourceLayers::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .mip_level(mip_level)
                 .layer_count(1),
         )
         .image_extent(vk::Extent3D {
@@ -222,6 +246,16 @@ pub(super) unsafe fn transition(
     cmd: vk::CommandBuffer,
     image: vk::Image,
     mode: LayoutTransition,
+) {
+    unsafe { transition_levels(device, cmd, image, mode, 1) };
+}
+
+pub(super) unsafe fn transition_levels(
+    device: &ash::Device,
+    cmd: vk::CommandBuffer,
+    image: vk::Image,
+    mode: LayoutTransition,
+    mip_levels: u32,
 ) {
     use vk::{AccessFlags as A, ImageLayout as L, PipelineStageFlags as S};
     let (from, to, source_layout, target_layout, source, target) = match mode {
@@ -290,7 +324,7 @@ pub(super) unsafe fn transition(
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .image(image)
-        .subresource_range(range(vk::ImageAspectFlags::COLOR));
+        .subresource_range(range(vk::ImageAspectFlags::COLOR, mip_levels));
     unsafe {
         device.cmd_pipeline_barrier(
             cmd,
@@ -304,22 +338,58 @@ pub(super) unsafe fn transition(
     }
 }
 
-pub(super) unsafe fn upload_image(
+pub(super) unsafe fn upload_texture(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
     source: vk::Buffer,
-    offset: u64,
+    base_offset: u64,
     dest: vk::Image,
-    size: [u32; 2],
+    levels: &[([u32; 2], u64)],
+    mip_levels: u32,
 ) {
     unsafe {
-        transition(device, cmd, dest, LayoutTransition::Upload);
+        transition_levels(device, cmd, dest, LayoutTransition::Upload, mip_levels);
+        let copies = levels
+            .iter()
+            .enumerate()
+            .map(|(level, (size, offset))| {
+                copy_region_level(base_offset + *offset, *size, level as u32)
+            })
+            .collect::<Vec<_>>();
         device.cmd_copy_buffer_to_image(
             cmd,
             source,
             dest,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &[copy_region(offset, size)],
+            &copies,
+        );
+        transition_levels(device, cmd, dest, LayoutTransition::Texture, mip_levels);
+    }
+}
+
+/// Refreshes one rectangle of an already uploaded image. The image must be
+/// sampled with a single level; retained UI pages never generate mips.
+pub(super) unsafe fn upload_texture_region(
+    device: &ash::Device,
+    cmd: vk::CommandBuffer,
+    source: vk::Buffer,
+    offset: u64,
+    dest: vk::Image,
+    origin: [u32; 2],
+    size: [u32; 2],
+) {
+    unsafe {
+        transition(device, cmd, dest, LayoutTransition::PatchTexture);
+        device.cmd_copy_buffer_to_image(
+            cmd,
+            source,
+            dest,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &[copy_region(offset, size).image_offset(vk::Offset3D {
+                x: origin[0] as i32,
+                y: origin[1] as i32,
+                z: 0,
+            })],
         );
         transition(device, cmd, dest, LayoutTransition::Texture);
     }

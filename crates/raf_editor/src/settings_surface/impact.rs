@@ -92,6 +92,12 @@ pub(super) fn setting_impact(row_id: &str) -> Option<SettingImpact> {
         // Performance: editor profile and frame pacing.
         "settings.quality" => SettingImpact::performance(High, LowersCost).with_visual(High),
         "settings.render_execution_policy" => SettingImpact::performance(High, Tradeoff),
+        "settings.texture_quality" => {
+            SettingImpact::performance(High, LowersCost).with_visual(High)
+        }
+        "settings.scene-packet-reuse" => {
+            SettingImpact::performance(High, RaisesBenefit).with_visual(Low)
+        }
         "settings.vsync" => SettingImpact::performance(Low, LowersCost).with_visual(Low),
         "settings.multithreading" => SettingImpact::performance(High, RaisesBenefit),
         "settings.show-fps-counter" => SettingImpact::performance(Low, LowersCost),

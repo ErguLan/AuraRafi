@@ -136,6 +136,11 @@ pub struct RuntimeViewState {
     pub character_defaults: Option<[f32; 3]>,
     pub game_ui: raf_ui::game_ui::UiGameRuntime,
     pub active_camera: Option<Uuid>,
+    /// Editor view available only to scripts executed by the editor console.
+    /// Runtime Play scripts leave this unset and cannot move the authoring camera.
+    pub editor_view: Option<raf_core::project::EditorViewMode>,
+    /// One-shot request produced by `set_viewport_view_mode` for the editor host.
+    pub requested_editor_view: Option<raf_core::project::EditorViewMode>,
     pub role: ScriptRole,
     pub services: crate::services::RuntimeServices,
     pub quality_base: RuntimeQuality,
@@ -152,6 +157,15 @@ pub struct RuntimeViewState {
     >,
 }
 impl RuntimeViewState {
+    pub fn set_editor_view_context(&mut self, mode: raf_core::project::EditorViewMode) {
+        self.editor_view = Some(mode);
+        self.requested_editor_view = None;
+    }
+
+    pub fn take_editor_view_request(&mut self) -> Option<raf_core::project::EditorViewMode> {
+        self.requested_editor_view.take()
+    }
+
     pub fn environment_revision(&self) -> u64 {
         self.environment_revision
     }

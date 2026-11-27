@@ -4,10 +4,8 @@
 //! the lifecycle coordinator from becoming a second domain monolith.
 
 use crate::panels::inspector_surface::{InspectorSection, InspectorViewState};
-use crate::panels::viewport_toolbar_surface::{
-    ViewportRenderStyle, ViewportTool, ViewportToolbarState, ViewportViewMode,
-};
-use raf_core::project::BuildingStyle;
+use crate::panels::viewport_toolbar_surface::{ViewportTool, ViewportToolbarState};
+use raf_core::project::{BuildingStyle, EditorViewMode};
 use raf_core::scene::{SceneGraph, SceneNodeId};
 use raf_core::session::ProjectSessionRegistry;
 
@@ -37,13 +35,10 @@ pub(crate) fn default_toolbar_state() -> ViewportToolbarState {
     ViewportToolbarState {
         select_mode: true,
         tool: ViewportTool::Select,
-        render_style: ViewportRenderStyle::Solid,
         polygons_visible: false,
         grid_visible: true,
         labels_visible: true,
-        view_mode: ViewportViewMode::View3d,
-        view_menu_open: false,
-        shading_menu_open: false,
+        view_mode: EditorViewMode::View3d,
         primitive_menu_open: false,
         building_style: BuildingStyle::Free,
         building_menu_open: false,

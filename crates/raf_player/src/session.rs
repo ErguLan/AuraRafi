@@ -15,7 +15,8 @@ use raf_render::api_graphic_basic::ui_surface::{
     DirectUiSurfaceHost, NativeUiInputBridge, NativeUiWindowHost, StudioUiPalette, UiAction,
 };
 use raf_render::api_graphic_basic::{
-    CanvasTargetRect, EditorCanvasLayer, EditorUiLayer, NativeEditorCompositor,
+    CanvasTargetRect, EditorCanvasLayer, EditorCompositorMetrics, EditorUiLayer,
+    NativeEditorCompositor,
 };
 use raf_render::{
     camera::{Camera, CameraMode},
@@ -38,6 +39,10 @@ use uuid::Uuid;
 /// Preparation itself is a real worker; this is a channel wait, not a frame
 /// pacing sleep.
 const PREPARATION_WAIT_SLICE: Duration = Duration::from_millis(100);
+/// Frames excluded from the rolling diagnostics window. The first frames of a
+/// session include asset decode, pipeline creation, and the world's first
+/// script tick; averaging them into steady-state numbers hides real progress.
+const DIAGNOSTIC_WARMUP_FRAMES: u32 = 10;
 #[derive(Clone)]
 pub enum PlayerSource {
     Snapshot(Box<RuntimeManifest>),
@@ -125,6 +130,29 @@ pub struct PlayerSession {
     retry_source: Option<PlayerSource>,
     loading: PreparationLoading,
     loading_surface_key: Option<LoadingSurfaceKey>,
+    diagnostic_frames: u32,
+    diagnostic_step_ms: f64,
+    diagnostic_render_ms: f64,
+    diagnostic_world_ms: f64,
+    diagnostic_ui_sync_ms: f64,
+    diagnostic_scene_build_ms: f64,
+    diagnostic_scene_rebuilds: u32,
+    diagnostic_ui_rebuilds: u32,
+    diagnostic_uploads: u64,
+    diagnostic_warmup_left: u32,
+    diagnostic_max_step_ms: f64,
+    diagnostic_slow_frames: u32,
+    last_compositor_metrics: EditorCompositorMetrics,
+    last_scene_stats: raf_render::scene_renderer::FrameStats,
+}
+
+impl PlayerSession {
+    fn scene_renderer_stats(&self) -> (u32, u32) {
+        (
+            self.last_scene_stats.total_entities,
+            self.last_scene_stats.visible_entities,
+        )
+    }
 }
 impl PlayerSession {
     pub fn new(
@@ -190,6 +218,20 @@ impl PlayerSession {
             retry_source: None,
             loading,
             loading_surface_key: None,
+            diagnostic_frames: 0,
+            diagnostic_step_ms: 0.0,
+            diagnostic_render_ms: 0.0,
+            diagnostic_world_ms: 0.0,
+            diagnostic_ui_sync_ms: 0.0,
+            diagnostic_scene_build_ms: 0.0,
+            diagnostic_scene_rebuilds: 0,
+            diagnostic_ui_rebuilds: 0,
+            diagnostic_uploads: 0,
+            diagnostic_warmup_left: DIAGNOSTIC_WARMUP_FRAMES,
+            diagnostic_max_step_ms: 0.0,
+            diagnostic_slow_frames: 0,
+            last_compositor_metrics: EditorCompositorMetrics::default(),
+            last_scene_stats: raf_render::scene_renderer::FrameStats::default(),
         }
     }
     pub fn status(&self) -> &RuntimeStatus {
@@ -484,6 +526,11 @@ impl PlayerSession {
                 self.router.cancel_all();
                 let mut renderer = SceneRenderer::new(1, 1);
                 renderer.set_asset_root(Some(root.join("assets")));
+                // Decode the visible city textures while the loading surface is
+                // still on screen. The first frame then reuses the residency
+                // cache instead of paying PNG decode on the transition.
+                let quality = world.presentation_quality();
+                renderer.prewarm_scene_textures(&world.scene, quality.texture_quality);
                 self.renderer = Some(renderer);
                 // A CpuOnly policy resolves to the CPU recovery rasterizer;
                 // the window itself still presents through the AGB host.
@@ -707,7 +754,76 @@ impl PlayerSession {
         if self.should_close() {
             return Ok(());
         }
-        self.step_inner(host, compositor, input, snapshot, dt, view)
+        let started = Instant::now();
+        let result = self.step_inner(host, compositor, input, snapshot, dt, view);
+        self.record_diagnostic_frame(started.elapsed(), compositor.metrics());
+        result
+    }
+
+    fn record_diagnostic_frame(&mut self, elapsed: Duration, metrics: EditorCompositorMetrics) {
+        self.last_compositor_metrics = metrics;
+        if !self.settings.runtime.diagnostics {
+            return;
+        }
+        if self.diagnostic_warmup_left > 0 {
+            self.diagnostic_warmup_left -= 1;
+            return;
+        }
+        let step_ms = elapsed.as_secs_f64() * 1000.0;
+        self.diagnostic_frames = self.diagnostic_frames.saturating_add(1);
+        self.diagnostic_step_ms += step_ms;
+        self.diagnostic_max_step_ms = self.diagnostic_max_step_ms.max(step_ms);
+        if step_ms > 50.0 {
+            self.diagnostic_slow_frames = self.diagnostic_slow_frames.saturating_add(1);
+        }
+        self.diagnostic_render_ms += self.last_render_ms;
+        self.diagnostic_scene_rebuilds += metrics.scene_packet_rebuilds;
+        self.diagnostic_ui_rebuilds += metrics.ui_packet_rebuilds;
+        self.diagnostic_uploads = self.diagnostic_uploads.saturating_add(metrics.upload_bytes);
+        if self.diagnostic_frames < 120 {
+            return;
+        }
+        let frames = f64::from(self.diagnostic_frames);
+        let textures = self
+            .renderer
+            .as_ref()
+            .map(SceneRenderer::texture_ingress_metrics)
+            .unwrap_or_default();
+        let scene_metrics = self.scene_renderer_stats();
+        tracing::info!(
+            frames = self.diagnostic_frames,
+            total_entities = scene_metrics.0,
+            visible_entities = scene_metrics.1,
+            texture_misses = textures.misses,
+            texture_hits = textures.hits,
+            texture_evictions = textures.evictions,
+            texture_entries = textures.entries,
+            texture_bytes = textures.resident_bytes,
+            step_ms = self.diagnostic_step_ms / frames,
+            max_step_ms = self.diagnostic_max_step_ms,
+            slow_frames = self.diagnostic_slow_frames,
+            render_ms = self.diagnostic_render_ms / frames,
+            world_ms = self.diagnostic_world_ms / frames,
+            ui_sync_ms = self.diagnostic_ui_sync_ms / frames,
+            scene_build_ms = self.diagnostic_scene_build_ms / frames,
+            presented_fps = 1000.0 / (self.diagnostic_step_ms / frames).max(0.001),
+            scene_rebuilds = self.diagnostic_scene_rebuilds,
+            ui_rebuilds = self.diagnostic_ui_rebuilds,
+            upload_bytes = self.diagnostic_uploads,
+            draw_calls = metrics.draw_calls,
+            "runtime frame diagnostics"
+        );
+        self.diagnostic_frames = 0;
+        self.diagnostic_step_ms = 0.0;
+        self.diagnostic_max_step_ms = 0.0;
+        self.diagnostic_slow_frames = 0;
+        self.diagnostic_render_ms = 0.0;
+        self.diagnostic_world_ms = 0.0;
+        self.diagnostic_ui_sync_ms = 0.0;
+        self.diagnostic_scene_build_ms = 0.0;
+        self.diagnostic_scene_rebuilds = 0;
+        self.diagnostic_ui_rebuilds = 0;
+        self.diagnostic_uploads = 0;
     }
 
     /// Resolves the physical target into logical layout, environment state, and
@@ -1052,8 +1168,10 @@ impl PlayerSession {
         );
         environment.viewport_size = [game_rect.width, game_rect.height];
         if let Some((world, root)) = self.world.as_mut().zip(self.root.as_ref()) {
+            let ui_sync_started = Instant::now();
             self.game_ui
                 .sync(host, world, root, self.settings.theme, environment);
+            self.diagnostic_ui_sync_ms += ui_sync_started.elapsed().as_secs_f64() * 1000.0;
             let game_ui_input = self.game_ui.input(
                 input,
                 &mut self.router,
@@ -1130,7 +1248,9 @@ impl PlayerSession {
             }
         }
         if let Some(world) = &mut self.world {
+            let world_started = Instant::now();
             world.advance(dt, &game_input);
+            self.diagnostic_world_ms += world_started.elapsed().as_secs_f64() * 1000.0;
             let intent = if self.focused
                 && !self.cursor_suspended
                 && world.status().phase == RuntimePhase::Running
@@ -1322,10 +1442,19 @@ impl PlayerSession {
                 wind: world.project_settings().particle_runtime.wind,
             },
             particle_dt: dt.clamp(1.0 / 240.0, 0.1),
-            stable_scene_packet: world.scene.len() <= 4096,
+            // World streaming decides which regions are resident. Camera
+            // frustum culling must not change packet topology: rebuilding and
+            // re-uploading the whole city while driving is far more expensive
+            // than submitting the resident static instances.
+            stable_scene_packet: true,
+            // Play always retains the prepared scene topology. The project
+            // toggle is a renderer diagnostic, not a reason to rebuild and
+            // re-upload every mesh/texture when a script moves a wheel.
+            scene_packet_reuse: true,
             ..RenderOptions::default()
         };
         let render_started = Instant::now();
+        let build_started = Instant::now();
         let mut frame = self.renderer.as_mut()?.build_frame(
             &world.scene,
             &camera,
@@ -1337,6 +1466,8 @@ impl PlayerSession {
             options,
             None,
         );
+        self.diagnostic_scene_build_ms += build_started.elapsed().as_secs_f64() * 1000.0;
+        self.last_scene_stats = frame.stats.clone();
         self.game_ui
             .world_commands(&mut frame, self.settings.language);
         crate::physics_debug::append(&mut frame.commands, world);

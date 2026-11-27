@@ -51,34 +51,8 @@ impl NativeGameWorkbench {
             self.open_menu = None;
         }
         match name.as_str() {
-            "viewport.dropdown.view.toggle" => {
-                self.toolbar_state.view_menu_open = !self.toolbar_state.view_menu_open;
-                self.toolbar_state.shading_menu_open = false;
-                self.toolbar_state.primitive_menu_open = false;
-                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
-                return true;
-            }
-            "viewport.dropdown.view.cancel" => {
-                self.toolbar_state.view_menu_open = false;
-                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
-                return true;
-            }
-            "viewport.dropdown.shading.toggle" => {
-                self.toolbar_state.shading_menu_open = !self.toolbar_state.shading_menu_open;
-                self.toolbar_state.view_menu_open = false;
-                self.toolbar_state.primitive_menu_open = false;
-                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
-                return true;
-            }
-            "viewport.dropdown.shading.cancel" => {
-                self.toolbar_state.shading_menu_open = false;
-                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
-                return true;
-            }
             "viewport.create-primitive.toggle" => {
                 self.toolbar_state.primitive_menu_open = !self.toolbar_state.primitive_menu_open;
-                self.toolbar_state.view_menu_open = false;
-                self.toolbar_state.shading_menu_open = false;
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 return true;
             }
@@ -89,8 +63,6 @@ impl NativeGameWorkbench {
             }
             "viewport.dropdown.building.toggle" => {
                 self.toolbar_state.building_menu_open = !self.toolbar_state.building_menu_open;
-                self.toolbar_state.view_menu_open = false;
-                self.toolbar_state.shading_menu_open = false;
                 self.toolbar_state.primitive_menu_open = false;
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 return true;
@@ -178,8 +150,6 @@ impl NativeGameWorkbench {
             self.nodes_host.close_context_menu();
             self.assets_surface.close_menus();
             self.assets_surface.close_modals();
-            self.toolbar_state.view_menu_open = false;
-            self.toolbar_state.shading_menu_open = false;
             self.toolbar_state.primitive_menu_open = false;
             self.toolbar_state.building_menu_open = false;
             self.inspector_view.dropdown = None;
@@ -323,8 +293,6 @@ impl NativeGameWorkbench {
         let inside_toolbar_popup = snapshot.pointer_position.is_some_and(|point| {
             [
                 "viewport.toolbar.primitive-menu",
-                "viewport.toolbar.view-menu",
-                "viewport.toolbar.shading-menu",
                 "viewport.toolbar.building-menu",
             ]
             .iter()
@@ -336,10 +304,7 @@ impl NativeGameWorkbench {
         });
         if snapshot.button_pressed(raf_core::PointerButton::Primary)
             && !inside_toolbar_popup
-            && (self.toolbar_state.view_menu_open
-                || self.toolbar_state.shading_menu_open
-                || self.toolbar_state.primitive_menu_open
-                || self.toolbar_state.building_menu_open)
+            && (self.toolbar_state.primitive_menu_open || self.toolbar_state.building_menu_open)
             && !self
                 .host
                 .session()
@@ -353,8 +318,6 @@ impl NativeGameWorkbench {
                         || target.starts_with("viewport.building-option.")
                 })
         {
-            self.toolbar_state.view_menu_open = false;
-            self.toolbar_state.shading_menu_open = false;
             self.toolbar_state.primitive_menu_open = false;
             self.toolbar_state.building_menu_open = false;
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);

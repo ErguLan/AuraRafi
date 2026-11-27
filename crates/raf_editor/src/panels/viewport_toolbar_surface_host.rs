@@ -152,8 +152,6 @@ impl ViewportToolbarSurfaceHost {
             "viewport.toolbar.actions.more.menu" | "viewport.toolbar.actions.more.trigger" => {
                 Some(&mut self.overflow_open)
             }
-            "viewport.toolbar.view-mode.menu" => Some(&mut self.state.view_menu_open),
-            "viewport.toolbar.shading.menu" => Some(&mut self.state.shading_menu_open),
             "viewport.toolbar.building-menu" => Some(&mut self.state.building_menu_open),
             _ => None,
         };
@@ -202,13 +200,10 @@ fn default_toolbar_state() -> ViewportToolbarState {
     ViewportToolbarState {
         select_mode: true,
         tool: super::viewport_toolbar_surface::ViewportTool::Select,
-        render_style: super::viewport_toolbar_surface::ViewportRenderStyle::Solid,
         polygons_visible: false,
         grid_visible: true,
         labels_visible: true,
-        view_mode: super::viewport_toolbar_surface::ViewportViewMode::View3d,
-        view_menu_open: false,
-        shading_menu_open: false,
+        view_mode: raf_core::project::EditorViewMode::View3d,
         primitive_menu_open: false,
         building_style: raf_core::project::BuildingStyle::Free,
         building_menu_open: false,

@@ -1,5 +1,7 @@
 //! Viewport toolbar actions and runtime toolbar projection.
 
+use raf_core::project::EditorViewMode;
+
 use super::*;
 
 impl NativeGameWorkbench {
@@ -41,35 +43,26 @@ impl NativeGameWorkbench {
                 state.select_mode = false;
                 state.tool = ViewportTool::Scale;
             }
-            ViewportToolbarAction::Solid => {
-                state.render_style = ViewportRenderStyle::Solid;
-                state.shading_menu_open = false;
-            }
+            ViewportToolbarAction::Solid => {}
             ViewportToolbarAction::TogglePolygons => {
                 state.polygons_visible = !state.polygons_visible
             }
             ViewportToolbarAction::ToggleGrid => state.grid_visible = !state.grid_visible,
             ViewportToolbarAction::ToggleLabels => state.labels_visible = !state.labels_visible,
             ViewportToolbarAction::View2d => {
-                state.view_mode = ViewportViewMode::View2d;
-                state.view_menu_open = false;
+                state.view_mode = EditorViewMode::View2d;
             }
             ViewportToolbarAction::View3d => {
-                state.view_mode = ViewportViewMode::View3d;
-                state.view_menu_open = false;
+                state.view_mode = EditorViewMode::View3d;
             }
             ViewportToolbarAction::Focus
             | ViewportToolbarAction::ResetView
             | ViewportToolbarAction::CreatePrimitive(_) => {
-                state.view_menu_open = false;
-                state.shading_menu_open = false;
                 state.primitive_menu_open = false;
             }
             ViewportToolbarAction::SetBuildingStyle(style) => {
                 state.building_style = style;
                 state.building_menu_open = false;
-                state.view_menu_open = false;
-                state.shading_menu_open = false;
                 state.primitive_menu_open = false;
             }
         }

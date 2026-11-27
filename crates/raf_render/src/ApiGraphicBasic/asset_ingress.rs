@@ -1,17 +1,24 @@
 //! Render-facing texture ingress: path confinement, decode policy, residency
-//! budget, LRU eviction, and bounded thumbnails.
+//! budget, LRU eviction, bounded thumbnails, and offscreen prefetch.
 //!
 //! `raf_assets` owns source validation and RGBA8 decoding. This module owns the
 //! renderer-facing lifetime of every decoded texture and sits behind the
 //! ApiGraphicBasic boundary. GPU upload remains in the device executor, which
 //! consumes the returned [`CpuTexture`] exactly as before.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use raf_assets::image_output_dimensions;
-use raf_assets::ingress::{decode_texture, TextureDecodeLimits};
+use raf_assets::ingress::{decode_texture, DecodedTexture, TextureDecodeLimits};
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
 use crate::texture::CpuTexture;
 
@@ -22,8 +29,127 @@ pub const TEXTURE_THUMBNAIL_MAX_DIMENSION: u32 = raf_assets::ingress::MAX_THUMBN
 
 const MAX_RESIDENT_TEXTURE_ENTRIES: usize = 512;
 const MAX_REJECTED_TEXTURE_PATHS: usize = 256;
+/// Frames before a failed path is probed again. A missing or corrupt texture
+/// used by a visible mesh must not cause a filesystem read every frame.
+const REJECTED_TEXTURE_RETRY_FRAMES: u64 = 120;
+/// Speculative decodes allowed in flight. Four bounded 1024px textures keep
+/// the transient CPU charge proportional to the smallest quality profile.
+const MAX_PREFETCH_IN_FLIGHT: usize = 4;
+const PREFETCH_REQUEST_QUEUE: usize = 4;
+const PREFETCH_COMPLETION_QUEUE: usize = 2;
 const FRAME_BUDGET_REJECTION: &str = "texture exceeds the remaining frame texture budget";
 const RESIDENCY_BUDGET_REJECTION: &str = "texture is larger than the entire texture budget";
+
+#[cfg(not(target_arch = "wasm32"))]
+struct PrefetchRequest {
+    key: TextureIngressKey,
+    path: Arc<Path>,
+    limits: TextureDecodeLimits,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct PrefetchCompletion {
+    key: TextureIngressKey,
+    result: Result<raf_assets::ingress::DecodedTexture, String>,
+}
+
+/// One named worker that decodes textures which are outside the current
+/// frustum. Visible misses keep the synchronous path, so presentation never
+/// has to wait for a placeholder or a speculative job.
+#[cfg(not(target_arch = "wasm32"))]
+struct PrefetchWorker {
+    requests: SyncSender<PrefetchRequest>,
+    completions: Receiver<PrefetchCompletion>,
+    cancelled: Arc<AtomicBool>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PrefetchWorker {
+    fn spawn() -> Result<Self, String> {
+        let (requests, request_receiver): (SyncSender<PrefetchRequest>, Receiver<PrefetchRequest>) =
+            mpsc::sync_channel(PREFETCH_REQUEST_QUEUE);
+        let (completion_sender, completions): (
+            SyncSender<PrefetchCompletion>,
+            Receiver<PrefetchCompletion>,
+        ) = mpsc::sync_channel(PREFETCH_COMPLETION_QUEUE);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        std::thread::Builder::new()
+            .name("raf-texture-prefetch".into())
+            .spawn(move || {
+                while !worker_cancelled.load(Ordering::Acquire) {
+                    let request = match request_receiver.recv_timeout(Duration::from_millis(50)) {
+                        Ok(request) => request,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    };
+                    if worker_cancelled.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        decode_texture(request.path.as_ref(), &request.limits)
+                            .map_err(|error| error.to_string())
+                    }))
+                    .unwrap_or_else(|_| Err("texture prefetch panicked".to_string()));
+                    if worker_cancelled.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if completion_sender
+                        .send(PrefetchCompletion {
+                            key: request.key,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| format!("Unable to start texture prefetch worker: {error}"))?;
+        Ok(Self {
+            requests,
+            completions,
+            cancelled,
+        })
+    }
+
+    fn try_queue(&self, request: PrefetchRequest) -> PrefetchQueue {
+        match self.requests.try_send(request) {
+            Ok(()) => PrefetchQueue::Queued,
+            Err(TrySendError::Full(_)) => PrefetchQueue::Full,
+            Err(TrySendError::Disconnected(_)) => PrefetchQueue::Disconnected,
+        }
+    }
+
+    fn try_completion(&self) -> PrefetchPoll {
+        match self.completions.try_recv() {
+            Ok(completion) => PrefetchPoll::Completion(completion),
+            Err(TryRecvError::Empty) => PrefetchPoll::Empty,
+            Err(TryRecvError::Disconnected) => PrefetchPoll::Disconnected,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum PrefetchQueue {
+    Queued,
+    Full,
+    Disconnected,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum PrefetchPoll {
+    Completion(PrefetchCompletion),
+    Empty,
+    Disconnected,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for PrefetchWorker {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
 
 /// Identity of one resident texture variant.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -49,6 +175,8 @@ pub struct TextureIngressMetrics {
     pub evictions: u64,
     /// Path, decode, or budget rejections observed by the ingress.
     pub rejected: u64,
+    /// Speculative decodes admitted before the texture became visible.
+    pub prefetched: u64,
 }
 
 /// One resident texture and its optional bounded thumbnail.
@@ -112,6 +240,12 @@ pub struct TextureIngress {
     frame_budget_bytes: u64,
     frame_admitted_bytes: u64,
     admitted_frame: u64,
+    /// Speculative decode identities already requested or resident.
+    pending_prefetch: HashSet<TextureIngressKey>,
+    /// Paths whose speculative decode failed, with their retry frame.
+    prefetch_failed: HashMap<PathBuf, u64>,
+    #[cfg(not(target_arch = "wasm32"))]
+    prefetch: Option<PrefetchWorker>,
     metrics: TextureIngressMetrics,
 }
 
@@ -130,6 +264,10 @@ impl TextureIngress {
             frame_budget_bytes: u64::MAX,
             frame_admitted_bytes: 0,
             admitted_frame: 0,
+            pending_prefetch: HashSet::new(),
+            prefetch_failed: HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            prefetch: None,
             metrics: TextureIngressMetrics::default(),
         }
     }
@@ -164,8 +302,9 @@ impl TextureIngress {
         frame: u64,
     ) -> Result<Arc<CpuTexture>, String> {
         self.begin_frame(frame);
-        if self.was_rejected_this_frame(path, frame) {
-            return Err("texture was already rejected in this frame".to_string());
+        self.poll_prefetch(frame);
+        if self.was_recently_rejected(path, frame) {
+            return Err("texture is waiting for its rejection retry window".to_string());
         }
         if let Err(error) = limits.validate() {
             return Err(self.reject(path, frame, &error.to_string()));
@@ -174,7 +313,10 @@ impl TextureIngress {
         let cached_canonical = self.resolutions.get(path).map(Arc::clone);
         if let Some(canonical) = cached_canonical.as_ref() {
             match self.lookup_resident(canonical.as_ref(), limits.max_dimension, frame) {
-                ResidentLookup::Hit(texture) => return Ok(texture),
+                ResidentLookup::Hit(texture) => {
+                    self.rejected_paths.remove(path);
+                    return Ok(texture);
+                }
                 ResidentLookup::Missing => {}
             }
         }
@@ -184,7 +326,10 @@ impl TextureIngress {
             Err(message) => return Err(self.reject(path, frame, &message)),
         };
         match self.lookup_resident(canonical.as_ref(), limits.max_dimension, frame) {
-            ResidentLookup::Hit(texture) => return Ok(texture),
+            ResidentLookup::Hit(texture) => {
+                self.rejected_paths.remove(path);
+                return Ok(texture);
+            }
             ResidentLookup::Missing => {}
         }
 
@@ -205,6 +350,7 @@ impl TextureIngress {
             return Err(self.reject(path, frame, FRAME_BUDGET_REJECTION));
         }
 
+        let decode_started = std::time::Instant::now();
         let decoded = match decode_texture(canonical.as_ref(), &limits) {
             Ok(decoded) => decoded,
             Err(error) => {
@@ -217,6 +363,19 @@ impl TextureIngress {
             }
         };
         let bytes = decoded.rgba8.len() as u64;
+        if bytes > 0 {
+            let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
+            if decode_ms >= 100.0 {
+                tracing::info!(
+                    path = %canonical.display(),
+                    width = decoded.width,
+                    height = decoded.height,
+                    bytes,
+                    decode_ms,
+                    "slow renderer texture decode"
+                );
+            }
+        }
         if bytes == 0 {
             return Err(self.reject(path, frame, "texture decoded to an empty pixel buffer"));
         }
@@ -235,6 +394,60 @@ impl TextureIngress {
         });
         self.frame_admitted_bytes = self.frame_admitted_bytes.saturating_add(bytes);
         self.metrics.misses = self.metrics.misses.saturating_add(1);
+        self.rejected_paths.remove(path);
+        self.rejected_paths.remove(canonical.as_ref());
+        self.insert_resident(
+            Arc::clone(&canonical),
+            limits.max_dimension,
+            Arc::clone(&texture),
+            bytes,
+            frame,
+        );
+        Ok(texture)
+    }
+
+    /// Admits a texture that was decoded ahead of the first visible frame.
+    ///
+    /// Loading-time warmup decodes the project textures on worker threads so
+    /// the first city frame does not pay for them. Admission still enforces the
+    /// residency budget and canonical path confinement.
+    pub fn admit_decoded(
+        &mut self,
+        path: &Path,
+        asset_root: &Path,
+        limits: TextureDecodeLimits,
+        decoded: DecodedTexture,
+        frame: u64,
+    ) -> Result<Arc<CpuTexture>, String> {
+        self.begin_frame(frame);
+        if let Err(error) = limits.validate() {
+            return Err(self.reject(path, frame, &error.to_string()));
+        }
+        let canonical = match self.canonicalize_texture_path(path, asset_root) {
+            Ok(canonical) => canonical,
+            Err(message) => return Err(self.reject(path, frame, &message)),
+        };
+        if let ResidentLookup::Hit(texture) =
+            self.lookup_resident(canonical.as_ref(), limits.max_dimension, frame)
+        {
+            return Ok(texture);
+        }
+        let bytes = decoded.rgba8.len() as u64;
+        if bytes == 0 {
+            return Err(self.reject(path, frame, "texture decoded to an empty pixel buffer"));
+        }
+        if bytes > self.budget_bytes {
+            return Err(self.reject(path, frame, RESIDENCY_BUDGET_REJECTION));
+        }
+        let texture = Arc::new(CpuTexture {
+            data: decoded.rgba8,
+            width: decoded.width,
+            height: decoded.height,
+            source: canonical.to_path_buf(),
+        });
+        self.metrics.misses = self.metrics.misses.saturating_add(1);
+        self.rejected_paths.remove(path);
+        self.rejected_paths.remove(canonical.as_ref());
         self.insert_resident(
             Arc::clone(&canonical),
             limits.max_dimension,
@@ -278,6 +491,179 @@ impl TextureIngress {
         Ok(texture)
     }
 
+    /// Speculatively decode a texture that is not yet visible.
+    ///
+    /// Visible frames keep the synchronous path, so this never substitutes a
+    /// placeholder. A prefetched entry is admitted only when it fits the
+    /// remaining residency budget without evicting a texture already in use.
+    pub fn prefetch(
+        &mut self,
+        path: &Path,
+        asset_root: &Path,
+        limits: TextureDecodeLimits,
+        frame: u64,
+    ) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (path, asset_root, limits, frame);
+            false
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if limits.validate().is_err() || self.pending_prefetch.len() >= MAX_PREFETCH_IN_FLIGHT {
+                return false;
+            }
+            if self
+                .prefetch_failed
+                .get(path)
+                .is_some_and(|retry_at| *retry_at >= frame)
+            {
+                return false;
+            }
+            let cached_canonical = self.resolutions.get(path).map(Arc::clone);
+            let canonical = match cached_canonical {
+                Some(canonical) => canonical,
+                None => match self.canonicalize_texture_path(path, asset_root) {
+                    Ok(canonical) => canonical,
+                    Err(_) => {
+                        self.remember_prefetch_failure(path.to_path_buf(), frame);
+                        return false;
+                    }
+                },
+            };
+            if self.has_resident(canonical.as_ref(), limits.max_dimension) {
+                return false;
+            }
+            if self
+                .prefetch_failed
+                .get(canonical.as_ref())
+                .is_some_and(|retry_at| *retry_at >= frame)
+            {
+                return false;
+            }
+            let key = TextureIngressKey {
+                path: canonical.to_path_buf(),
+                max_dimension: limits.max_dimension,
+            };
+            if self.pending_prefetch.contains(&key) {
+                return false;
+            }
+            if self.prefetch.is_none() {
+                match PrefetchWorker::spawn() {
+                    Ok(worker) => self.prefetch = Some(worker),
+                    Err(error) => {
+                        tracing::warn!(%error, "Texture prefetch worker is unavailable");
+                        self.remember_prefetch_failure(canonical.to_path_buf(), frame);
+                        return false;
+                    }
+                }
+            }
+            let worker = self.prefetch.as_ref().expect("prefetch worker was created");
+            match worker.try_queue(PrefetchRequest {
+                key: key.clone(),
+                path: Arc::clone(&canonical),
+                limits,
+            }) {
+                PrefetchQueue::Queued => {
+                    self.pending_prefetch.insert(key);
+                    true
+                }
+                PrefetchQueue::Full => false,
+                PrefetchQueue::Disconnected => {
+                    self.prefetch = None;
+                    false
+                }
+            }
+        }
+    }
+
+    /// Admit completed speculative decodes. Call once per frame before the
+    /// visible texture lookups.
+    pub fn poll_prefetch(&mut self, frame: u64) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = frame;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            for _ in 0..PREFETCH_COMPLETION_QUEUE {
+                let poll = match self.prefetch.as_ref() {
+                    Some(worker) => worker.try_completion(),
+                    None => return,
+                };
+                match poll {
+                    PrefetchPoll::Completion(completion) => {
+                        self.admit_prefetch(completion, frame);
+                    }
+                    PrefetchPoll::Empty => break,
+                    PrefetchPoll::Disconnected => {
+                        self.prefetch = None;
+                        self.pending_prefetch.clear();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn admit_prefetch(&mut self, completion: PrefetchCompletion, frame: u64) {
+        if !self.pending_prefetch.remove(&completion.key) {
+            // Released or cleared while the worker was decoding.
+            return;
+        }
+        let decoded = match completion.result {
+            Ok(decoded) => decoded,
+            Err(_) => {
+                self.remember_prefetch_failure(completion.key.path, frame);
+                return;
+            }
+        };
+        let bytes = decoded.rgba8.len() as u64;
+        let fits = bytes > 0
+            && bytes <= self.budget_bytes
+            && self.resident_bytes.saturating_add(bytes) <= self.budget_bytes
+            && self.entry_count < MAX_RESIDENT_TEXTURE_ENTRIES;
+        if !fits || self.has_resident(&completion.key.path, completion.key.max_dimension) {
+            self.remember_prefetch_failure(completion.key.path, frame);
+            return;
+        }
+        let texture = Arc::new(CpuTexture {
+            data: decoded.rgba8,
+            width: decoded.width,
+            height: decoded.height,
+            source: completion.key.path.clone(),
+        });
+        let canonical: Arc<Path> = Arc::from(completion.key.path.clone().into_boxed_path());
+        self.prefetch_failed.remove(&completion.key.path);
+        self.metrics.prefetched = self.metrics.prefetched.saturating_add(1);
+        self.insert_resident(
+            canonical,
+            completion.key.max_dimension,
+            texture,
+            bytes,
+            frame,
+        );
+    }
+
+    fn remember_prefetch_failure(&mut self, path: PathBuf, frame: u64) {
+        if self.prefetch_failed.len() >= MAX_REJECTED_TEXTURE_PATHS {
+            self.prefetch_failed
+                .retain(|_, retry_at| *retry_at >= frame);
+            if self.prefetch_failed.len() >= MAX_REJECTED_TEXTURE_PATHS {
+                self.prefetch_failed.clear();
+            }
+        }
+        self.prefetch_failed
+            .insert(path, frame.saturating_add(REJECTED_TEXTURE_RETRY_FRAMES));
+    }
+
+    fn has_resident(&self, canonical: &Path, max_dimension: u32) -> bool {
+        self.entries
+            .get(canonical)
+            .is_some_and(|slots| slots.iter().any(|slot| slot.max_dimension == max_dimension))
+    }
+
     /// Drop every resident variant that resolves to `path`.
     pub fn release(&mut self, path: &Path) {
         let canonical = self.resolutions.get(path).map(Arc::clone);
@@ -287,6 +673,17 @@ impl TextureIngress {
         }
         self.resolutions.remove(path);
         self.rejected_paths.remove(path);
+        self.prefetch_failed.remove(path);
+        self.pending_prefetch.retain(|key| {
+            key.path.as_path() != path
+                && canonical
+                    .as_ref()
+                    .is_none_or(|canonical| key.path.as_path() != canonical.as_ref())
+        });
+        if let Some(canonical) = canonical.as_ref() {
+            self.rejected_paths.remove(canonical.as_ref());
+            self.prefetch_failed.remove(canonical.as_ref());
+        }
     }
 
     /// Release all textures and path-resolution memory.
@@ -298,6 +695,12 @@ impl TextureIngress {
         self.lru.clear();
         self.resolutions.clear();
         self.rejected_paths.clear();
+        self.pending_prefetch.clear();
+        self.prefetch_failed.clear();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.prefetch = None;
+        }
         self.canonical_root = None;
         self.resident_bytes = 0;
         self.entry_count = 0;
@@ -313,6 +716,7 @@ impl TextureIngress {
             misses: self.metrics.misses,
             evictions: self.metrics.evictions,
             rejected: self.metrics.rejected,
+            prefetched: self.metrics.prefetched,
         }
     }
 
@@ -323,21 +727,24 @@ impl TextureIngress {
         }
     }
 
-    fn was_rejected_this_frame(&self, path: &Path, frame: u64) -> bool {
+    fn was_recently_rejected(&self, path: &Path, frame: u64) -> bool {
         self.rejected_paths
             .get(path)
-            .is_some_and(|rejected| *rejected == frame)
+            .is_some_and(|retry_at| *retry_at >= frame)
     }
 
     fn reject(&mut self, path: &Path, frame: u64, message: &str) -> String {
         self.metrics.rejected = self.metrics.rejected.saturating_add(1);
         if self.rejected_paths.len() >= MAX_REJECTED_TEXTURE_PATHS {
-            self.rejected_paths.retain(|_, rejected| *rejected == frame);
+            self.rejected_paths.retain(|_, retry_at| *retry_at >= frame);
             if self.rejected_paths.len() >= MAX_REJECTED_TEXTURE_PATHS {
                 self.rejected_paths.clear();
             }
         }
-        self.rejected_paths.insert(path.to_path_buf(), frame);
+        self.rejected_paths.insert(
+            path.to_path_buf(),
+            frame.saturating_add(REJECTED_TEXTURE_RETRY_FRAMES),
+        );
         message.to_string()
     }
 
@@ -624,6 +1031,101 @@ mod tests {
         assert_eq!(metrics.entries, 0);
         assert_eq!(metrics.resident_bytes, 0);
         assert_eq!(metrics.rejected, 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn prefetched_textures_are_admitted_on_a_later_frame() {
+        let root = temporary_root("prefetch");
+        let path = write_texture(&root, "texture.png", 8, 8, [10, 20, 30, 255]);
+        let mut ingress = TextureIngress::new(1024 * 1024);
+        let limits = TextureDecodeLimits {
+            max_dimension: 64,
+            ..TextureDecodeLimits::default()
+        };
+
+        assert!(ingress.prefetch(&path, &root, limits, 1));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while ingress.metrics().prefetched == 0 && std::time::Instant::now() < deadline {
+            ingress.poll_prefetch(2);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(ingress.metrics().prefetched, 1);
+        let texture = ingress
+            .get_or_decode(&path, &root, limits, 3)
+            .expect("the prefetched texture is resident");
+        assert_eq!((texture.width, texture.height), (8, 8));
+        assert_eq!(ingress.metrics().misses, 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn decoded_textures_can_be_admitted_before_the_first_frame() {
+        let root = temporary_root("admit-decoded");
+        let path = write_texture(&root, "texture.png", 8, 8, [200, 10, 20, 255]);
+        let limits = TextureDecodeLimits::default();
+        let decoded = decode_texture(&path, &limits).expect("decode ahead of the first frame");
+        let mut ingress = TextureIngress::new(DEFAULT_TEXTURE_INGRESS_BUDGET_BYTES);
+
+        let admitted = ingress
+            .admit_decoded(&path, &root, limits, decoded, 1)
+            .expect("admit the predecoded texture");
+        assert_eq!((admitted.width, admitted.height), (8, 8));
+        assert_eq!(ingress.metrics().entries, 1);
+
+        // Overwriting the source must not be read while the admitted texture
+        // is resident; the first frame has to reuse the predecoded pixels.
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))
+            .save(&path)
+            .expect("overwrite the temporary texture");
+        let reused = ingress
+            .get_or_decode(&path, &root, limits, 2)
+            .expect("the predecoded texture is resident");
+        assert!(Arc::ptr_eq(&admitted, &reused));
+        assert_eq!(&reused.data[..4], &[200, 10, 20, 255]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn predecoded_textures_outside_the_root_are_rejected() {
+        let root = temporary_root("admit-root");
+        let outside = temporary_root("admit-outside");
+        let path = write_texture(&outside, "texture.png", 8, 8, [10, 20, 30, 255]);
+        let limits = TextureDecodeLimits::default();
+        let decoded = decode_texture(&path, &limits).expect("decode the outside texture");
+        let mut ingress = TextureIngress::new(DEFAULT_TEXTURE_INGRESS_BUDGET_BYTES);
+
+        let error = ingress
+            .admit_decoded(&path, &root, limits, decoded, 1)
+            .expect_err("predecoded textures outside the asset root must be rejected");
+
+        assert!(error.contains("escapes"));
+        assert_eq!(ingress.metrics().entries, 0);
+        assert_eq!(ingress.metrics().resident_bytes, 0);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn rejected_textures_wait_before_probing_the_source_again() {
+        let root = temporary_root("reject-cooldown");
+        let path = write_texture(&root, "texture.png", 8, 8, [10, 20, 30, 255]);
+        let mut ingress = TextureIngress::new(16);
+
+        ingress
+            .get_or_decode(&path, &root, TextureDecodeLimits::default(), 1)
+            .expect_err("oversized textures are rejected");
+        ingress
+            .get_or_decode(&path, &root, TextureDecodeLimits::default(), 2)
+            .expect_err("the rejection cooldown keeps the same error");
+        assert_eq!(ingress.metrics().rejected, 1);
+
+        ingress
+            .get_or_decode(&path, &root, TextureDecodeLimits::default(), 122)
+            .expect_err("the path is probed again after the cooldown");
+        assert_eq!(ingress.metrics().rejected, 2);
         let _ = fs::remove_dir_all(root);
     }
 

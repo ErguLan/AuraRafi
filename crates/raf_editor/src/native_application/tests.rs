@@ -1,7 +1,9 @@
 //! Unit tests for the native editor application boundary.
 
 use raf_core::config::{RenderQuality, ScriptLanguage};
-use raf_core::project::{GeometryDetailMode, ProjectSettings, ProjectType, ViewportResolutionMode};
+use raf_core::project::{
+    EditorViewMode, GeometryDetailMode, ProjectSettings, ProjectType, ViewportResolutionMode,
+};
 use raf_ui::UiResizeEdge;
 
 use super::layout::should_queue_eager_hierarchy_refresh;
@@ -155,6 +157,12 @@ fn project_setting_controls_mutate_persisted_values_and_runtime_policy() {
             .changed
     );
     assert_eq!(settings.geometry_detail, GeometryDetailMode::Detailed);
+
+    let default_view =
+        apply_project_setting_command(&mut settings, "project-settings.default-view.2d");
+    assert!(default_view.changed);
+    assert!(default_view.view_changed);
+    assert_eq!(settings.default_editor_view, EditorViewMode::View2d);
 
     assert!(
         apply_project_setting_toggle(&mut settings, "project-settings.language.cpp", true,).changed

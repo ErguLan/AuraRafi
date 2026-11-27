@@ -373,6 +373,12 @@ impl NativeRuntimeController {
         // Play presentation pacing belongs to the game. Window size, instances,
         // VSync and launch mode remain host preferences in the editor.
         safe_settings.runtime.fps_limit = project.settings.runtime.fps_limit.clamp(15, 120);
+        safe_settings.runtime.script_budget_ms = project.settings.runtime.script_budget_ms.clamp(1, 100);
+        safe_settings.runtime.script_operation_limit = project
+            .settings
+            .runtime
+            .script_operation_limit
+            .clamp(1_000, 1_000_000);
         let manifest = RuntimeManifest {
             project_id: project.id,
             session_id: Some(session.id.0),

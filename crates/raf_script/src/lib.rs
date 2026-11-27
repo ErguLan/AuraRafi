@@ -16,8 +16,8 @@
 
 pub mod backends;
 pub mod behavior_api;
-pub mod character_api;
 pub mod camera_api;
+pub mod character_api;
 pub mod environment_api;
 pub mod errors;
 pub mod host;
@@ -33,9 +33,10 @@ pub mod reference_analysis;
 pub mod references;
 pub mod runtime;
 pub mod services;
+pub mod ui_api;
 pub mod value;
 pub mod view;
-pub mod ui_api;
+pub mod viewport_api;
 
 pub use backends::{ExecutionResult, LoadedScript, ScriptTier};
 pub use errors::{ScriptError, ScriptResult};

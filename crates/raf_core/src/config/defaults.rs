@@ -23,6 +23,8 @@ impl Default for EngineSettings {
             fps_limit: 60,
             vsync: true,
             multithreading: true,
+            scene_packet_reuse: true,
+            texture_quality: crate::project::TextureQualityMode::Adaptive,
             particle_preview: crate::scene::ParticlePreviewSettings::default(),
             grid_visible: true,
             snap_to_grid: true,

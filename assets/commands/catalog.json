@@ -1639,6 +1639,82 @@
         {"name": "save", "kind": "bool", "required": false, "description_key": "commands.param.visual_save"}
       ],
       "examples": ["/scene.visual_diff before=.aura_rafi/agent_artifacts/before.png after=.aura_rafi/agent_artifacts/after.png"]
+    },
+    {
+      "name": "performance.stats",
+      "aliases": [],
+      "domain": "shared",
+      "category": "analysis",
+      "description_key": "performance.commands.stats",
+      "parameters": [
+        {"name": "window_seconds", "kind": "f32", "required": false, "default": "5", "description_key": "commands.param.window_seconds"}
+      ],
+      "examples": ["/performance.stats window_seconds=10"]
+    },
+    {
+      "name": "performance.benchmark.start",
+      "aliases": [],
+      "domain": "shared",
+      "category": "analysis",
+      "description_key": "performance.commands.benchmark.start",
+      "parameters": [
+        {"name": "seconds", "kind": "f32", "required": false, "default": "10", "description_key": "commands.param.seconds"},
+        {"name": "warmup_seconds", "kind": "f32", "required": false, "default": "2", "description_key": "commands.param.warmup_seconds"},
+        {"name": "label", "kind": "string", "required": false, "description_key": "commands.param.label"}
+      ],
+      "examples": ["/performance.benchmark.start seconds=10 warmup_seconds=2 label=night"]
+    },
+    {
+      "name": "performance.benchmark.status",
+      "aliases": [],
+      "domain": "shared",
+      "category": "analysis",
+      "description_key": "performance.commands.benchmark.status",
+      "parameters": [
+        {"name": "id", "kind": "string", "required": false, "description_key": "commands.param.id"}
+      ],
+      "examples": ["/performance.benchmark.status", "/performance.benchmark.status id=20261125-143012-night"]
+    },
+    {
+      "name": "performance.benchmark.stop",
+      "aliases": [],
+      "domain": "shared",
+      "category": "analysis",
+      "description_key": "performance.commands.benchmark.stop",
+      "parameters": [
+        {"name": "id", "kind": "string", "required": false, "description_key": "commands.param.id"}
+      ],
+      "examples": ["/performance.benchmark.stop"]
+    },
+    {
+      "name": "performance.benchmark.cancel",
+      "aliases": [],
+      "domain": "shared",
+      "category": "analysis",
+      "description_key": "performance.commands.benchmark.cancel",
+      "parameters": [],
+      "examples": ["/performance.benchmark.cancel"]
+    },
+    {
+      "name": "performance.benchmark.list",
+      "aliases": [],
+      "domain": "shared",
+      "category": "analysis",
+      "description_key": "performance.commands.benchmark.list",
+      "parameters": [],
+      "examples": ["/performance.benchmark.list"]
+    },
+    {
+      "name": "performance.benchmark.compare",
+      "aliases": [],
+      "domain": "shared",
+      "category": "analysis",
+      "description_key": "performance.commands.benchmark.compare",
+      "parameters": [
+        {"name": "a", "kind": "string", "required": true, "description_key": "commands.param.a"},
+        {"name": "b", "kind": "string", "required": true, "description_key": "commands.param.b"}
+      ],
+      "examples": ["/performance.benchmark.compare a=20261125-143012-baseline b=20261125-150000-night"]
     }
   ]
 }

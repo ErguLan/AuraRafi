@@ -536,6 +536,7 @@ name):**
 | `attached.rs` | connection listener + client | attach transport |
 | `electronics_assets.rs` | asset worker | electronics asset load |
 | `electronics_analysis.rs` | `raf-electronics-analysis` | DRC/analysis off UI thread |
+| `asset_ingress.rs` | `raf-texture-prefetch` | offscreen scene texture decode |
 | `native_studio.rs` | `raf-hub-discovery` | hub discovery |
 | `project_catalog.rs` | `raf-project-catalog` (x2) | catalog scan/open |
 | `raf_ai/agent_runtime.rs` | `agent-api-call` | remote agent call |
@@ -642,6 +643,28 @@ Code-true changes recorded for the September 14, 2026 pass (still
 - GPU image budget by bytes and entries, incremental LRU eviction, mipmaps, and
   protection for images used by the current frame.
 - Metrics for residency, uploads, evictions, cache hits, and budget overflow.
+
+Code-true additions from the November 25, 2026 pass (still
+**window-unverified** for visual acceptance and FPS deltas):
+
+- Retained scene packets patch instance transforms and tints through
+  `ProductDevice::patch_frame_instances`; a moving rigid object no longer
+  re-encodes or re-uploads the static world. Adjacent instance ranges coalesce
+  into one patch.
+- The single-packet fallback fingerprints the UI state **after** its first
+  paint append, so the frame following a UI change is idle instead of
+  rebuilding the combined scene packet again.
+- Scene texture ingress rejects missing/corrupt paths for a bounded cooldown
+  instead of probing the filesystem every frame, and decodes offscreen
+  base-color textures on a named `raf-texture-prefetch` worker. Visible misses
+  keep the synchronous path.
+- Imported-model failures share the same retry cooldown, so an invalid model
+  reference cannot issue a disk read per visible frame.
+- The RafUI text atlas reports a per-synchronization dirty rectangle and the
+  retained RGBA page patches only that rectangle. Atlas page identity is
+  bucketed by 64 rows so a small text change reuses the same texture.
+- The main WGSL scene shader is parsed and validated once per process instead
+  of once per device/surface creation.
 
 Code-true additions from the September 22, 2026 pass (Fase 2/Fase 3 alignment;
 still **window-unverified**):

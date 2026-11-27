@@ -48,12 +48,12 @@ fn screen([width, height]: [u32; 2], scale: f32) -> ProductPacket {
         quad.color = color;
         Command::Paint(Paint::Solid(quad))
     };
-    let dot = Texture {
-        size: [2, 2],
-        rgba: vec![
+    let dot = Texture::new(
+        [2, 2],
+        vec![
             73, 186, 167, 255, 135, 232, 202, 255, 135, 232, 202, 255, 73, 186, 167, 255,
         ],
-    };
+    );
     let mut atlas = vec![255; (ATLAS_SIZE[0] * ATLAS_SIZE[1] * 4) as usize];
     for (glyph, rows) in GLYPHS.iter().enumerate() {
         for (y, row) in rows.iter().enumerate() {
@@ -72,7 +72,8 @@ fn screen([width, height]: [u32; 2], scale: f32) -> ProductPacket {
         textures: vec![
             Texture {
                 size: ATLAS_SIZE,
-                rgba: atlas,
+                rgba: atlas.into(),
+                mipmaps: false,
             },
             dot,
         ],

@@ -134,6 +134,7 @@ impl NativeEditorApplication {
 
     pub(super) fn present_in_place_runtime(&mut self) {
         let mut finished = false;
+        let started = Instant::now();
         if let (Some(player), Some(host), Some(compositor)) = (
             self.game_runtime.in_place.as_mut(),
             self.window_host.as_mut(),
@@ -145,6 +146,22 @@ impl NativeEditorApplication {
             }
             finished = player.should_close();
             self.next_runtime_frame = Instant::now() + player.frame_interval();
+            let target_size = self
+                .window
+                .as_ref()
+                .map(|window| {
+                    let size = window.inner_size();
+                    [size.width, size.height]
+                })
+                .unwrap_or([0, 0]);
+            let metrics = compositor.metrics();
+            crate::performance_telemetry::record_runtime_frame(
+                started.elapsed().as_secs_f32() * 1000.0,
+                player.last_render_millis() as f32,
+                target_size,
+                metrics.draw_calls,
+                metrics.upload_bytes,
+            );
         }
         self.input.begin_frame();
         if finished {

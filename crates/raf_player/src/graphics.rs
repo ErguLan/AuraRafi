@@ -14,6 +14,11 @@ use raf_render::api_graphic_basic::ui_surface::NativeUiWindowConfig;
 /// presented composition, its prepared replacement, the retained scene
 /// handoff, and the capture readback.
 const RETAINED_TARGETS: u64 = 4;
+/// Authored city packets legitimately exceed the small default staging budget
+/// once every streamed model and facade is present. Failing that upload made
+/// the runtime drop or rebuild the entire scene every frame.
+const MIN_SCENE_STAGING_BYTES: u64 = 64 * 1024 * 1024;
+const MIN_SCENE_UPLOAD_BYTES: u64 = 48 * 1024 * 1024;
 
 /// Bytes of one tightly packed RGBA8 target of `size`.
 fn target_bytes(size: [u32; 2]) -> u64 {
@@ -34,8 +39,14 @@ pub fn memory_budget(policy: RenderExecutionPolicy, size: [u32; 2]) -> GraphicsM
     budget.gpu_bytes = budget
         .gpu_bytes
         .max(target.saturating_mul(RETAINED_TARGETS));
-    budget.staging_bytes = budget.staging_bytes.max(target);
-    budget.frame_upload_bytes = budget.frame_upload_bytes.max(target);
+    budget.staging_bytes = budget
+        .staging_bytes
+        .max(target)
+        .max(MIN_SCENE_STAGING_BYTES);
+    budget.frame_upload_bytes = budget
+        .frame_upload_bytes
+        .max(target)
+        .max(MIN_SCENE_UPLOAD_BYTES);
     budget
 }
 
@@ -71,7 +82,8 @@ mod tests {
         let large = memory_budget(RenderExecutionPolicy::Auto, [3840, 2160]);
         let target = 3840 * 2160 * 4;
         assert_eq!(small.gpu_bytes, base.gpu_bytes);
-        assert_eq!(small.staging_bytes, base.staging_bytes);
+        assert!(small.staging_bytes >= MIN_SCENE_STAGING_BYTES);
+        assert!(small.frame_upload_bytes >= MIN_SCENE_UPLOAD_BYTES);
         assert!(large.staging_bytes >= target);
         assert!(large.frame_upload_bytes >= target);
         assert!(large.gpu_bytes >= target * RETAINED_TARGETS);

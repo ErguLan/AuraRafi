@@ -344,13 +344,13 @@ impl NativeGameWorkbench {
                     [layout.canvas.width, layout.canvas.height],
                 )
             } else {
-                let compact = self.toolbar_state.compact || layout.canvas.width < 396.0;
+                let compact = self.toolbar_state.compact || layout.canvas.width < 232.0;
                 let toolbar_state = crate::panels::viewport_toolbar_surface::ViewportToolbarState {
                     compact,
                     ..self.toolbar_state
                 };
                 let toolbar_width =
-                    (if compact { 230.0_f32 } else { 396.0_f32 }).min(layout.canvas.width.max(0.0));
+                    (if compact { 196.0_f32 } else { 232.0_f32 }).min(layout.canvas.width.max(0.0));
                 let theme = self.host.surface().theme.metrics;
                 let text_scale = self.host.session().text_scale();
                 let text_style =

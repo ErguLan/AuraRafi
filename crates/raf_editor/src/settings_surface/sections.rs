@@ -146,6 +146,12 @@ impl SettingsSection {
                 "gpu",
                 "cpu",
                 "render",
+                "texture",
+                "textura",
+                "packet",
+                "paquete",
+                "upload",
+                "subida",
             ],
             Self::Editor => &[
                 "editor",

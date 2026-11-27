@@ -22,8 +22,14 @@ impl NativeEditorApplication {
                     name,
                     parent,
                     project_type,
+                    initial_view,
                     with_agent,
-                } => match Project::create(&name, project_type, &parent) {
+                } => match Project::create_with_initial_view(
+                    &name,
+                    project_type,
+                    &parent,
+                    initial_view,
+                ) {
                     Ok(project) => {
                         remember_project(&project);
                         if with_agent {

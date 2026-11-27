@@ -59,6 +59,9 @@ pub struct ProductFrameBuilder {
     packet: ProductPacket,
     mesh_ids: HashMap<MeshKey, u32>,
     texture_ids: HashMap<TextureKey, u32>,
+    /// Stable scene texture pixels. Rebuilding the packet reuses the Arc
+    /// instead of cloning the full RGBA payload for every mesh command.
+    texture_payloads: HashMap<TextureKey, Arc<Vec<u8>>>,
     material_ids: HashMap<Option<u32>, u32>,
     extent: [u32; 2],
     pixel_extent_used: bool,
@@ -68,6 +71,31 @@ pub struct ProductFrameBuilder {
     /// Retained source for reconstruction. The frame shares its mesh and
     /// texture handles, so keeping it does not copy pixels.
     source: Option<SceneRenderFrame>,
+    /// Packet command ordinals that own visible mesh instances.
+    instance_bindings: Vec<InstanceBinding>,
+    /// Packet command ordinals that own directional-shadow instances.
+    shadow_bindings: Vec<ShadowBinding>,
+}
+
+/// One dynamic instance update addressed by its retained packet command.
+#[derive(Clone, Debug)]
+pub struct DynamicInstanceBatch {
+    pub product_command: usize,
+    pub instances: Vec<Instance>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InstanceBinding {
+    source_command: usize,
+    product_command: usize,
+    count: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ShadowBinding {
+    product_command: usize,
+    mesh: usize,
+    count: usize,
 }
 
 impl Default for ProductFrameBuilder {
@@ -84,6 +112,7 @@ impl ProductFrameBuilder {
             packet: ProductPacket::default(),
             mesh_ids: HashMap::new(),
             texture_ids: HashMap::new(),
+            texture_payloads: HashMap::new(),
             material_ids: HashMap::new(),
             extent: [0, 0],
             pixel_extent_used: false,
@@ -91,6 +120,8 @@ impl ProductFrameBuilder {
             placement: None,
             materialized: false,
             source: None,
+            instance_bindings: Vec::new(),
+            shadow_bindings: Vec::new(),
         }
     }
 
@@ -162,6 +193,7 @@ impl ProductFrameBuilder {
         self.reset_packet();
         self.mesh_ids.clear();
         self.texture_ids.clear();
+        self.texture_payloads.clear();
         self.material_ids.clear();
         self.extent = [0, 0];
         self.pixel_extent_used = false;
@@ -169,6 +201,30 @@ impl ProductFrameBuilder {
         self.placement = None;
         self.materialized = false;
         self.source = None;
+        self.instance_bindings.clear();
+        self.shadow_bindings.clear();
+    }
+
+    /// Rebuilds scene geometry while retaining the shared texture payloads.
+    ///
+    /// A packet revision triggered by shadow membership, a moving light or a
+    /// structural edit still owns the same textures; dropping the payload cache
+    /// here made every rebuild copy the full RGBA page set (88 MiB in the city).
+    /// `clear()` remains the full reset used when the surface or device changes.
+    pub fn clear_geometry_keep_textures(&mut self) {
+        self.revision = 0;
+        self.reset_packet();
+        self.mesh_ids.clear();
+        self.texture_ids.clear();
+        self.material_ids.clear();
+        self.extent = [0, 0];
+        self.pixel_extent_used = false;
+        self.composed_clear = None;
+        self.placement = None;
+        self.materialized = false;
+        self.source = None;
+        self.instance_bindings.clear();
+        self.shadow_bindings.clear();
     }
 
     /// Replace the packet with a target clear and no scene geometry.
@@ -189,6 +245,7 @@ impl ProductFrameBuilder {
         self.reset_packet();
         self.mesh_ids.clear();
         self.texture_ids.clear();
+        self.texture_payloads.clear();
         self.material_ids.clear();
         self.revision = revision;
         self.composed_clear = Some(clear);
@@ -196,6 +253,8 @@ impl ProductFrameBuilder {
         self.extent = [0, 0];
         self.pixel_extent_used = false;
         self.source = None;
+        self.instance_bindings.clear();
+        self.shadow_bindings.clear();
         self.packet.commands.push(Command::Clear(clear));
         self.materialized = true;
         Ok(())
@@ -207,6 +266,7 @@ impl ProductFrameBuilder {
         self.packet.meshes.clear();
         self.packet.materials.clear();
         self.packet.textures.clear();
+        self.packet.texture_ids.clear();
     }
 
     /// Replace the scene half of the packet with this frame.
@@ -279,6 +339,75 @@ impl ProductFrameBuilder {
         Ok(self.metrics(frame, started, 1))
     }
 
+    /// Builds the per-frame instance payload for an already prepared packet.
+    ///
+    /// Returns `None` when the frame no longer matches the retained packet
+    /// topology. The compositor must rebuild in that case. A `Some` result,
+    /// including an empty one, is safe to apply through
+    /// `ProductDevice::patch_frame_instances`.
+    pub fn dynamic_instance_patches(
+        &self,
+        frame: &SceneRenderFrame,
+    ) -> Result<Option<Vec<DynamicInstanceBatch>>, String> {
+        if self.instance_bindings.is_empty() && self.shadow_bindings.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let mut by_source = HashMap::with_capacity(self.instance_bindings.len());
+        for binding in &self.instance_bindings {
+            by_source.insert(binding.source_command, *binding);
+        }
+        let mut patches = Vec::with_capacity(self.instance_bindings.len() + self.shadow_bindings.len());
+        let mut consumed = 0usize;
+        for (source_command, command) in frame.commands.commands().iter().enumerate() {
+            let Some(binding) = by_source.get(&source_command) else {
+                continue;
+            };
+            let instances = match command {
+                GraphicCommand::DrawMesh {
+                    mesh_id,
+                    transform,
+                    color,
+                    ..
+                } => vec![product_instance(*transform, *color, *mesh_id)?],
+                GraphicCommand::DrawMeshBatch {
+                    mesh_id, instances, ..
+                } => instances
+                    .iter()
+                    .map(|instance| {
+                        product_instance(instance.transform, instance.color, *mesh_id)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => return Ok(None),
+            };
+            if instances.len() != binding.count {
+                return Ok(None);
+            }
+            patches.push(DynamicInstanceBatch {
+                product_command: binding.product_command,
+                instances,
+            });
+            consumed += 1;
+        }
+        if consumed != self.instance_bindings.len() {
+            return Ok(None);
+        }
+
+        let shadow_groups = shadow_instance_groups(frame);
+        if shadow_groups.len() != self.shadow_bindings.len() {
+            return Ok(None);
+        }
+        for ((mesh, instances), binding) in shadow_groups.into_iter().zip(&self.shadow_bindings) {
+            if mesh != binding.mesh || instances.len() != binding.count {
+                return Ok(None);
+            }
+            patches.push(DynamicInstanceBatch {
+                product_command: binding.product_command,
+                instances,
+            });
+        }
+        Ok(Some(patches))
+    }
+
     fn rebuild(
         &mut self,
         frame: &SceneRenderFrame,
@@ -310,6 +439,8 @@ impl ProductFrameBuilder {
         self.mesh_ids.clear();
         self.texture_ids.clear();
         self.material_ids.clear();
+        self.instance_bindings.clear();
+        self.shadow_bindings.clear();
         self.revision = revision;
         self.composed_clear = clear;
         self.placement = placement;
@@ -370,10 +501,16 @@ impl ProductFrameBuilder {
                     let mesh = self.mesh_index(frame, *mesh_id)?;
                     let texture = self.texture_index(frame, *texture_id, *mesh_id)?;
                     let material = self.material_index(texture)?;
+                    let product_command = self.packet.commands.len();
                     self.packet.commands.push(Command::DrawMesh {
                         mesh,
                         material,
                         instance,
+                    });
+                    self.instance_bindings.push(InstanceBinding {
+                        source_command: index,
+                        product_command,
+                        count: 1,
                     });
                 }
                 GraphicCommand::DrawMeshBatch {
@@ -389,16 +526,23 @@ impl ProductFrameBuilder {
                     let mesh = self.mesh_index(frame, *mesh_id)?;
                     let texture = self.texture_index(frame, *texture_id, *mesh_id)?;
                     let material = self.material_index(texture)?;
+                    let count = instances.len();
                     let instances = instances
                         .iter()
                         .map(|instance| {
                             product_instance(instance.transform, instance.color, *mesh_id)
                         })
                         .collect::<Result<Vec<_>, _>>()?;
+                    let product_command = self.packet.commands.len();
                     self.packet.commands.push(Command::DrawMeshBatch {
                         mesh,
                         material,
                         instances,
+                    });
+                    self.instance_bindings.push(InstanceBinding {
+                        source_command: index,
+                        product_command,
+                        count,
                     });
                 }
                 GraphicCommand::DrawLine {
@@ -621,22 +765,29 @@ impl ProductFrameBuilder {
             return Ok(());
         };
         let material = self.material_index(None)?;
-        let mut batches = Vec::<(u32, Vec<Instance>)>::new();
+        let mut batches = Vec::<(u32, usize, Vec<Instance>)>::new();
         let mut batch_by_mesh = HashMap::new();
         for caster in &shadow.geometry.casters {
             let mesh = self.register_mesh(&caster.mesh, self.packet.meshes.len())?;
             let batch = *batch_by_mesh.entry(mesh).or_insert_with(|| {
                 let index = batches.len();
-                batches.push((mesh, Vec::new()));
+                batches.push((mesh, Arc::as_ptr(&caster.mesh) as usize, Vec::new()));
                 index
             });
-            batches[batch].1.push(Instance::new(caster.model, [1.; 4]));
+            batches[batch].2.push(Instance::new(caster.model, [1.; 4]));
         }
-        for (mesh, instances) in batches {
+        for (mesh, mesh_identity, instances) in batches {
+            let count = instances.len();
+            let product_command = self.packet.commands.len();
             self.packet.commands.push(Command::DrawShadowBatch {
                 mesh,
                 material,
                 instances,
+            });
+            self.shadow_bindings.push(ShadowBinding {
+                product_command,
+                mesh: mesh_identity,
+                count,
             });
         }
         Ok(())
@@ -681,10 +832,24 @@ impl ProductFrameBuilder {
             ));
         }
         let index = count_u32(self.packet.textures.len(), "texture")?;
-        self.packet.textures.push(Texture {
-            size: [texture.width, texture.height],
-            rgba: texture.data.clone(),
-        });
+        let gpu_id = Arc::as_ptr(texture) as *const () as usize as u64;
+        let payload = match self.texture_payloads.get(&key) {
+            Some(payload) => Arc::clone(payload),
+            None => {
+                // Convert once per unique texture identity. Packet rebuilds
+                // then share this Arc instead of copying the RGBA payload.
+                if self.texture_payloads.len() >= 256 {
+                    self.texture_payloads.clear();
+                }
+                let payload = Arc::new(texture.data.clone());
+                self.texture_payloads.insert(key, Arc::clone(&payload));
+                payload
+            }
+        };
+        self.packet
+            .textures
+            .push(Texture::from_shared([texture.width, texture.height], payload));
+        self.packet.texture_ids.push(gpu_id);
         self.texture_ids.insert(key, index);
         Ok(Some(index))
     }
@@ -784,10 +949,7 @@ pub fn append_cpu_canvas(
         return Err("CPU canvas target rect is invalid".to_string());
     }
     let texture = count_u32(packet.textures.len(), "texture")?;
-    packet.textures.push(Texture {
-        size,
-        rgba: pixels.to_vec(),
-    });
+    packet.textures.push(Texture::new(size, pixels.to_vec()));
     packet
         .commands
         .push(Command::Paint(raf_agb::product::Paint::Image {
@@ -800,6 +962,27 @@ pub fn append_cpu_canvas(
             texture,
         }));
     Ok(texture)
+}
+
+/// Shadow casters grouped exactly like [`ProductFrameBuilder::append_shadow_casters`].
+/// The pointer is the retained mesh identity; it remains stable while the
+/// renderer's shadow geometry is reused.
+fn shadow_instance_groups(frame: &SceneRenderFrame) -> Vec<(usize, Vec<Instance>)> {
+    let Some(shadow) = &frame.commands.shadows else {
+        return Vec::new();
+    };
+    let mut groups = Vec::<(usize, Vec<Instance>)>::new();
+    let mut group_by_mesh = HashMap::new();
+    for caster in &shadow.geometry.casters {
+        let mesh = Arc::as_ptr(&caster.mesh) as *const () as usize;
+        let index = *group_by_mesh.entry(mesh).or_insert_with(|| {
+            let index = groups.len();
+            groups.push((mesh, Vec::new()));
+            index
+        });
+        groups[index].1.push(Instance::new(caster.model, [1.; 4]));
+    }
+    groups
 }
 
 /// Camera, lighting, sky, and shadow state for the scene half of the frame.

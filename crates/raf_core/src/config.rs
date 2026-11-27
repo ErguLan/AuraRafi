@@ -117,6 +117,10 @@ fn default_agent_max_tool_calls() -> u32 {
     AGENT_MAX_TOOL_CALLS_DEFAULT
 }
 
+fn default_texture_quality() -> crate::project::TextureQualityMode {
+    crate::project::TextureQualityMode::Adaptive
+}
+
 // ---------------------------------------------------------------------------
 // Engine settings
 // ---------------------------------------------------------------------------
@@ -163,6 +167,14 @@ pub struct EngineSettings {
     pub fps_limit: u32,
     pub vsync: bool,
     pub multithreading: bool,
+    /// Retains static scene resources and patches only dynamic instances.
+    /// Disable it to diagnose packet reuse by forcing a full rebuild.
+    #[serde(default = "default_true")]
+    pub scene_packet_reuse: bool,
+    /// Editor viewport texture detail and residency policy. Project settings
+    /// may override this for a specific runtime target.
+    #[serde(default = "default_texture_quality")]
+    pub texture_quality: crate::project::TextureQualityMode,
     /// Editor-only particle preview controls. The game runtime uses the
     /// project's `particle_runtime` policy instead.
     #[serde(default)]

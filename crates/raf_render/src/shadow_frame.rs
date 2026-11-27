@@ -23,7 +23,14 @@ pub struct ShadowCaster {
 
 #[derive(Debug)]
 pub struct ShadowGeometry {
+    /// Per-frame identity: topology plus the fitted light projection. This
+    /// drives shadow-map invalidation and must change when the camera moves.
     pub key: u64,
+    /// Retained-packet identity: only caster topology and resolution. The
+    /// camera projection is a frame uniform, so it must never invalidate the
+    /// retained scene packet (that forced an 88 MiB rebuild every frame while
+    /// the camera moved).
+    pub content_key: u64,
     pub view_projection: Mat4,
     pub resolution: u32,
     pub casters: Vec<ShadowCaster>,
@@ -111,31 +118,44 @@ impl ShadowGeometry {
         self.normalized_pixel_extent / resolution.max(1) as f32
     }
     pub fn new(view_projection: Mat4, resolution: u32, casters: Vec<ShadowCaster>) -> Self {
-        let mut key = 0xcbf29ce484222325u64;
+        let content_key = Self::content_key(resolution, &casters);
+        let mut key = content_key;
         let mut mix = |v: u64| {
             key = (key ^ v).wrapping_mul(0x100000001b3);
         };
-        mix(resolution as u64);
         for n in view_projection.to_cols_array() {
             mix(n.to_bits() as u64);
-        }
-        for caster in &casters {
-            mix(Arc::as_ptr(&caster.mesh) as usize as u64);
-            for n in caster.model.to_cols_array() {
-                mix(n.to_bits() as u64);
-            }
         }
         let x = view_projection.row(0).truncate().length();
         let y = view_projection.row(1).truncate().length();
         let z = view_projection.row(2).truncate().length();
         Self {
             key,
+            content_key,
             view_projection,
             resolution,
             casters,
             normalized_pixel_extent: 2.0 * z / x.min(y).max(1e-6),
             cpu_depth: OnceLock::new(),
         }
+    }
+
+    /// Stable hash of the retained shadow topology. Deliberately excludes the
+    /// light projection so a moving camera can update the shadow uniform and
+    /// re-render the depth map without rebuilding the whole scene packet.
+    pub fn content_key(resolution: u32, casters: &[ShadowCaster]) -> u64 {
+        let mut key = 0xcbf29ce484222325u64;
+        let mut mix = |v: u64| {
+            key = (key ^ v).wrapping_mul(0x100000001b3);
+        };
+        mix(resolution as u64);
+        for caster in casters {
+            mix(Arc::as_ptr(&caster.mesh) as usize as u64);
+            for n in caster.model.to_cols_array() {
+                mix(n.to_bits() as u64);
+            }
+        }
+        key
     }
     pub fn cpu_ready(&self) -> bool {
         self.cpu_depth.get().is_some()
@@ -267,13 +287,14 @@ impl ShadowFrame {
 pub(crate) mod tests {
     use super::*;
     use crate::{
+        api_graphic_basic::command_list::BasicCommandList,
         camera::Camera,
         scene_renderer::{RenderOptions, SceneRenderer, SCENE_BACKGROUND, SCENE_LIGHT_DIRECTION},
     };
     use raf_core::{environment::EnvironmentMode, scene::Primitive, SceneGraph};
 
     #[test]
-    fn optimized_fitted_shadow_covers_receivers_and_reuses_unaffected_casters() {
+    fn fitted_shadow_covers_receivers_across_the_shadow_distance() {
         let camera = Camera::default();
         let inverse = camera.view_projection(128.0, 128.0).inverse();
         let sun = Vec3::new(0.4, 0.8, 0.3).normalize();
@@ -307,14 +328,58 @@ pub(crate) mod tests {
         let distant = scene.add_root_with_primitive("Outside shadow volume", Primitive::Cube);
         scene.get_mut(distant).unwrap().position = Vec3::splat(10000.0);
         let mut renderer = SceneRenderer::new(128, 128);
-        let initial = frame(&mut renderer, &scene).commands.shadows.unwrap();
-        scene.get_mut(distant).unwrap().position.x += 5.0;
-        let next = frame(&mut renderer, &scene).commands.shadows.unwrap();
-        assert!(Arc::ptr_eq(&initial.geometry, &next.geometry));
-        assert!(next.improved);
+        let camera_a = Camera::default();
+        let mut camera_b = Camera::default();
+        camera_b.position = Vec3::new(6.0, 2.0, -3.0);
+        let options = || RenderOptions {
+            show_grid_3d: false,
+            selection_outline: false,
+            ..Default::default()
+        };
+        let a = renderer
+            .build_frame(
+                &scene,
+                &camera_a,
+                128.0,
+                128.0,
+                &[],
+                SCENE_BACKGROUND,
+                SCENE_LIGHT_DIRECTION,
+                options(),
+                None,
+            )
+            .commands
+            .shadows
+            .unwrap();
+        let b = renderer
+            .build_frame(
+                &scene,
+                &camera_b,
+                128.0,
+                128.0,
+                &[],
+                SCENE_BACKGROUND,
+                SCENE_LIGHT_DIRECTION,
+                options(),
+                None,
+            )
+            .commands
+            .shadows
+            .unwrap();
+        // Moving the camera changes the fitted light projection (so the shadow
+        // map refreshes) but must not invalidate the retained scene packet.
+        assert_eq!(a.geometry.content_key, b.geometry.content_key);
+        assert_ne!(a.geometry.key, b.geometry.key);
+        assert_eq!(a.geometry.casters.len(), b.geometry.casters.len());
+        assert!(a.geometry.casters.len() >= 2);
+        let mut list = BasicCommandList::new();
+        list.shadows = Some(a.clone());
+        let stable_hash = list.content_hash();
+        list.shadows = Some(b.clone());
+        assert_eq!(stable_hash, list.content_hash());
         for x in -20..20 {
             assert!(
-                (0.0..=1.0).contains(&next.visibility(Vec3::new(x as f32 * 0.2, 0.0, 0.0), 0.7))
+                (0.0..=1.0).contains(&b.visibility(Vec3::new(x as f32 * 0.2, 0.0, 0.0), 0.7))
             );
         }
     }

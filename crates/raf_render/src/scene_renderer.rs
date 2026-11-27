@@ -27,6 +27,7 @@ use crate::api_graphic_basic::command_list::{BasicCommandList, BasicLine, Graphi
 use crate::api_graphic_basic::grid::{build_3d_grid, GridLineKind};
 use crate::api_graphic_basic::mesh::BasicMesh;
 use crate::api_graphic_basic::pipeline::BasicPipelineKind;
+use crate::bounded_cache::BoundedCache;
 use crate::camera::{Camera, CameraMode};
 use crate::geometry::mesh_data::MeshData;
 use crate::geometry::primitives;
@@ -41,7 +42,7 @@ use crate::scene_visibility::{
 };
 use crate::texture::CpuTexture;
 
-use raf_assets::ingress::TextureDecodeLimits;
+use raf_assets::ingress::{decode_texture, TextureDecodeLimits};
 use raf_core::project::{GeometryDetailMode, TextureQualityMode};
 use raf_core::scene::geometry::node_geometry_matrix;
 use raf_core::scene::graph::{Primitive, SceneGraph, SceneNodeId};
@@ -111,6 +112,9 @@ pub struct RenderOptions {
     /// frustum culling and camera-derived LOD are skipped so orbit/pan frames
     /// reuse the retained packet. Huge scenes keep per-frame culling.
     pub stable_scene_packet: bool,
+    /// Retains static scene resources across dynamic frames. When disabled,
+    /// the compositor rebuilds the full scene packet for diagnostics.
+    pub scene_packet_reuse: bool,
     /// Tab Mode focus: every other scene node is dimmed instead of hidden.
     pub focus_node: Option<u64>,
 }
@@ -140,6 +144,7 @@ impl Default for RenderOptions {
             particle_dt: 1.0 / 60.0,
             camera_navigation: false,
             stable_scene_packet: false,
+            scene_packet_reuse: true,
             focus_node: None,
         }
     }
@@ -245,13 +250,20 @@ pub struct SceneRenderer {
     shadow_geometry_revision: u64,
     model_mesh_cache: crate::model_mesh_cache::ModelMeshCache,
     skinning: skinning::SkinCache,
-    model_basic_cache: HashMap<String, Arc<BasicMesh>>,
+    model_basic_cache: BoundedCache<u64, Arc<BasicMesh>>,
+    /// Cached local-space bounds for imported/editable meshes. Imported nodes
+    /// normally carry import metadata bounds; this table covers editable and
+    /// legacy references without scanning every vertex each frame.
+    mesh_bounds_cache: BoundedCache<(usize, usize), (std::sync::Weak<MeshData>, (Vec3, Vec3))>,
+    /// Interned base-color texture paths for retained render jobs. The same
+    /// path must not allocate a new `String` for every visible node per frame.
+    texture_key_cache: BoundedCache<String, Arc<str>>,
     /// Bounded cache of primitives with tiled UVs, keyed by primitive, LOD and
     /// the authored tiling bits. Texture sampling stays per-instance; only the
     /// UV attribute is regenerated.
-    primitive_tiling_cache: HashMap<PrimitiveTilingKey, Arc<BasicMesh>>,
+    primitive_tiling_cache: BoundedCache<PrimitiveTilingKey, Arc<BasicMesh>>,
     /// Persisted Tab Mode topology compiled once per authored revision.
-    editable_meshes: HashMap<(uuid::Uuid, u32, u32), EditableMeshEntry>,
+    editable_meshes: BoundedCache<(uuid::Uuid, u32, u32), EditableMeshEntry>,
     editable_prune_revision: u64,
     /// Stats from the last frame.
     pub stats: FrameStats,
@@ -351,9 +363,11 @@ impl SceneRenderer {
             shadow_geometry_revision: 0,
             model_mesh_cache: Default::default(),
             skinning: Default::default(),
-            model_basic_cache: HashMap::new(),
-            primitive_tiling_cache: HashMap::new(),
-            editable_meshes: HashMap::new(),
+            model_basic_cache: BoundedCache::new(MAX_MODEL_BASIC_CACHE_ENTRIES),
+            mesh_bounds_cache: BoundedCache::new(MAX_MESH_BOUNDS_CACHE_ENTRIES),
+            texture_key_cache: BoundedCache::new(MAX_TEXTURE_KEY_CACHE_ENTRIES),
+            primitive_tiling_cache: BoundedCache::new(MAX_PRIMITIVE_TILING_CACHE_ENTRIES),
+            editable_meshes: BoundedCache::new(MAX_EDITABLE_MESH_CACHE_ENTRIES),
             editable_prune_revision: 0,
             stats: FrameStats::default(),
             particles: ParticleRenderer::new(),
@@ -368,7 +382,7 @@ impl SceneRenderer {
     /// Compile a persisted editable mesh to render geometry, reusing the
     /// compiled buffers until the authored revision or texture tiling changes.
     fn editable_geometry_in(
-        cache: &mut HashMap<(uuid::Uuid, u32, u32), EditableMeshEntry>,
+        cache: &mut BoundedCache<(uuid::Uuid, u32, u32), EditableMeshEntry>,
         node: &raf_core::scene::graph::SceneNode,
         tiling: [f32; 2],
     ) -> Option<(Arc<MeshData>, Arc<BasicMesh>, Arc<Vec<[Vec3; 2]>>)> {
@@ -395,9 +409,6 @@ impl SceneRenderer {
         // per-face render vertices, so the selection outline stays single.
         let edges = Arc::new(editable.wireframe_edges());
         let basic = Arc::new(mesh_to_basic(mesh.as_ref()));
-        if cache.len() >= MAX_EDITABLE_MESH_CACHE_ENTRIES {
-            cache.clear();
-        }
         cache.insert(
             key,
             EditableMeshEntry {
@@ -435,7 +446,97 @@ impl SceneRenderer {
             self.model_mesh_cache.clear();
             self.skinning = Default::default();
             self.model_basic_cache.clear();
+            self.mesh_bounds_cache.clear();
         }
+    }
+
+    /// Decodes every visible scene texture before the first frame.
+    ///
+    /// Called from the loading transition. Decoding runs on worker threads and
+    /// the results are admitted into the same residency cache the first frame
+    /// uses, so entering the city no longer stalls on PNG decode. Geometry
+    /// conversion and the first packet upload stay on the first frame.
+    pub fn prewarm_scene_textures(
+        &mut self,
+        scene: &SceneGraph,
+        quality: TextureQualityMode,
+    ) {
+        let max_dimension = quality.max_dimension();
+        // Keep the build/ingress configuration identical to the first frame so
+        // the warm cache is not cleared when the real quality arrives.
+        self.texture_max_dimension = max_dimension;
+        self.texture_ingress.set_budget(quality.cache_budget_bytes());
+        self.texture_ingress
+            .set_frame_budget(quality.cache_budget_bytes());
+        let Some(root) = self.asset_root.clone() else {
+            return;
+        };
+        let mut paths = Vec::new();
+        let mut seen = HashSet::new();
+        for (_, node) in scene.iter() {
+            if !node.visible {
+                continue;
+            }
+            let Some(reference) = node.base_color_texture.as_deref() else {
+                continue;
+            };
+            let Some(path) = resolve_texture_candidate(&root, reference) else {
+                continue;
+            };
+            if seen.insert(path.clone()) {
+                paths.push(path);
+            }
+        }
+        if paths.is_empty() {
+            return;
+        }
+        let limits = TextureDecodeLimits {
+            max_dimension,
+            ..TextureDecodeLimits::default()
+        };
+        let workers = std::thread::available_parallelism()
+            .map(|workers| workers.get())
+            .unwrap_or(4)
+            .clamp(1, 8)
+            .min(paths.len());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let results = std::sync::Mutex::new(Vec::with_capacity(paths.len()));
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(path) = paths.get(index) else {
+                        break;
+                    };
+                    let decoded = decode_texture(path, &limits).map_err(|error| error.to_string());
+                    results
+                        .lock()
+                        .expect("texture warmup result lock")
+                        .push((path.clone(), decoded));
+                });
+            }
+        });
+        let frame = self.texture_frame.wrapping_add(1).max(1);
+        let mut warmed = 0usize;
+        for (path, decoded) in results
+            .into_inner()
+            .expect("texture warmup result lock")
+        {
+            if let Ok(decoded) = decoded {
+                if self
+                    .texture_ingress
+                    .admit_decoded(&path, &root, limits, decoded, frame)
+                    .is_ok()
+                {
+                    warmed = warmed.saturating_add(1);
+                }
+            }
+        }
+        tracing::info!(
+            textures = warmed,
+            candidates = paths.len(),
+            "prewarmed scene textures for the first frame"
+        );
     }
 
     /// Resolve one authored texture path through the budgeted ingress.
@@ -471,6 +572,33 @@ impl SceneRenderer {
         &self,
     ) -> crate::api_graphic_basic::asset_ingress::TextureIngressMetrics {
         self.texture_ingress.metrics()
+    }
+
+    fn mesh_bounds(&mut self, mesh: &Arc<MeshData>) -> (Vec3, Vec3) {
+        let pointer = Arc::as_ptr(mesh) as *const () as usize;
+        let key = (pointer, mesh.positions.len());
+        if let Some((weak, bounds)) = self.mesh_bounds_cache.get(&key) {
+            if weak
+                .upgrade()
+                .is_some_and(|current| Arc::as_ptr(&current) as *const () as usize == pointer)
+            {
+                return *bounds;
+            }
+        }
+        let bounds = mesh.aabb();
+        self.mesh_bounds_cache
+            .insert(key, (Arc::downgrade(mesh), bounds));
+        bounds
+    }
+
+    fn intern_texture_key(&mut self, path: &str) -> Arc<str> {
+        if let Some(key) = self.texture_key_cache.get_borrowed(path) {
+            return Arc::clone(key);
+        }
+        let key: Arc<str> = Arc::from(path);
+        self.texture_key_cache
+            .insert(path.to_owned(), Arc::clone(&key));
+        key
     }
 
     fn local_bounds_for_primitive(&self, primitive: Primitive) -> (Vec3, Vec3) {
@@ -512,11 +640,11 @@ impl SceneRenderer {
         {
             self.world_transforms = Some((scene_revision, WorldTransformCache::build(scene)));
         }
-        let transforms = &self
+        let world_transforms = self
             .world_transforms
-            .as_ref()
-            .expect("world transforms were initialized for the scene")
-            .1;
+            .take()
+            .expect("world transforms were initialized for the scene");
+        let transforms = &world_transforms.1;
         let visibility = SceneVisibilityPolicy {
             world_stream: WorldStreamVisibility {
                 enabled: options.world_streaming_enabled,
@@ -605,9 +733,20 @@ impl SceneRenderer {
             // The pivot only compensates the drawn geometry. The authored node
             // transform, gizmos, scripts and children stay on the node origin.
             let geometry_model = node_geometry_matrix(model, node);
+            let custom_bounds = node
+                .mesh_asset
+                .as_ref()
+                .and_then(|reference| reference.bounds)
+                .map(|bounds| {
+                    (
+                        Vec3::new(bounds[0], bounds[1], bounds[2]),
+                        Vec3::new(bounds[3], bounds[4], bounds[5]),
+                    )
+                })
+                .or_else(|| custom_mesh.as_ref().map(|mesh| self.mesh_bounds(mesh)));
             let (local_min, local_max) = override_bounds
                 .and_then(|(override_id, bounds)| (override_id == id).then_some(bounds))
-                .or_else(|| custom_mesh.as_ref().map(|mesh| mesh.aabb()))
+                .or(custom_bounds)
                 .unwrap_or_else(|| self.local_bounds_for_primitive(node.primitive));
             let bounds = SceneObjectBounds::from_local_aabb(local_min, local_max, geometry_model);
 
@@ -639,6 +778,25 @@ impl SceneRenderer {
                 SceneVisibility::OutsideFrustum => {
                     if options.world_streaming_enabled {
                         self.stream_visible_ids.insert(id);
+                    }
+                    // Decode offscreen base-color textures ahead of the camera.
+                    // The visible path stays synchronous, so this only fills
+                    // unused residency and never changes what a frame draws.
+                    if let (Some(root), Some(texture)) =
+                        (asset_root.as_deref(), node.base_color_texture.as_deref())
+                    {
+                        if let Some(texture_path) = resolve_texture_candidate(root, texture) {
+                            let limits = TextureDecodeLimits {
+                                max_dimension: options.texture_quality.max_dimension(),
+                                ..TextureDecodeLimits::default()
+                            };
+                            self.texture_ingress.prefetch(
+                                &texture_path,
+                                root,
+                                limits,
+                                self.texture_frame.wrapping_add(1),
+                            );
+                        }
                     }
                     stats.frustum_culled_entities += 1;
                     continue;
@@ -711,27 +869,12 @@ impl SceneRenderer {
                         let key = node
                             .mesh_asset
                             .as_ref()
-                            .map(|reference| {
-                                format!(
-                                    "{}|{}|{}|{}|{}|{}",
-                                    reference.path,
-                                    reference.content_hash.as_deref().unwrap_or(""),
-                                    reference.node.map(|node| node as i64).unwrap_or(-1),
-                                    reference.import_scale.to_bits(),
-                                    tiling[0].to_bits(),
-                                    tiling[1].to_bits()
-                                )
-                            })
-                            .unwrap_or_else(|| {
-                                format!("{}|{}", tiling[0].to_bits(), tiling[1].to_bits())
-                            });
+                            .map(|reference| model_basic_key(reference, tiling))
+                            .unwrap_or_else(|| tiling_key(tiling));
                         if let Some(basic) = self.model_basic_cache.get(&key) {
                             Arc::clone(basic)
                         } else {
                             let basic = Arc::new(mesh_to_basic_with_tiling(mesh, tiling));
-                            if self.model_basic_cache.len() >= 64 {
-                                self.model_basic_cache.clear();
-                            }
                             self.model_basic_cache.insert(key, Arc::clone(&basic));
                             basic
                         }
@@ -746,7 +889,10 @@ impl SceneRenderer {
                 is_selected: self.selected_ids.contains(&id),
                 distance_squared: (center - camera_position).length_squared(),
                 is_transparent: base_color[3] < u8::MAX,
-                base_color_texture: node.base_color_texture.clone(),
+                base_color_texture: node
+                    .base_color_texture
+                    .as_deref()
+                    .map(|path| self.intern_texture_key(path)),
                 unlit: node.surface.unlit,
                 // Authored topology has no canonical "outside": a face moved
                 // through its own plane must stay visible instead of turning
@@ -790,6 +936,7 @@ impl SceneRenderer {
                 .then_with(|| a.id.0.cmp(&b.id.0))
         });
 
+        self.world_transforms = Some(world_transforms);
         (jobs, stats)
     }
 
@@ -868,32 +1015,6 @@ impl SceneRenderer {
                 node,
                 sanitized_surface_tiling(node.surface.texture_tiling),
             );
-            let bounds = mesh_override
-                .filter(|(i, _)| *i == id)
-                .map(|(_, m)| m.aabb())
-                .or_else(|| editable.as_ref().map(|(mesh, _, _)| mesh.aabb()))
-                .unwrap_or_else(|| self.local_bounds_for_primitive(node.primitive));
-            let mut min = Vec3::splat(f32::INFINITY);
-            let mut max = Vec3::splat(f32::NEG_INFINITY);
-            for x in [bounds.0.x, bounds.1.x] {
-                for y in [bounds.0.y, bounds.1.y] {
-                    for z in [bounds.0.z, bounds.1.z] {
-                        let p = (vp * model).transform_point3(Vec3::new(x, y, z));
-                        min = min.min(p);
-                        max = max.max(p);
-                    }
-                }
-            }
-            // Deliberately not camera-frustum culled: offscreen geometry casts visible shadows.
-            if min.x > 1.0
-                || max.x < -1.0
-                || min.y > 1.0
-                || max.y < -1.0
-                || min.z > 1.0
-                || max.z < 0.0
-            {
-                continue;
-            }
             let mesh = if let Some((_, m)) = mesh_override.filter(|(i, _)| *i == id) {
                 // Admission precedes copying editable geometry into a second frame mesh.
                 let bytes = m
@@ -1007,6 +1128,8 @@ impl SceneRenderer {
         options: RenderOptions,
         mesh_override: Option<(SceneNodeId, &MeshData)>,
     ) -> SceneRenderFrame {
+        let profile = scene_profile_enabled();
+        let profile_started = std::time::Instant::now();
         let w = (vp_w as u32).max(1);
         let h = (vp_h as u32).max(1);
 
@@ -1037,7 +1160,10 @@ impl SceneRenderer {
             options,
             mesh_override,
         );
+        let profile_collect_ms = profile_started.elapsed().as_secs_f64() * 1000.0;
+        let shadows_started = std::time::Instant::now();
         let shadows = self.build_shadows(scene, cam_eye, environment, mesh_override);
+        let profile_shadow_ms = shadows_started.elapsed().as_secs_f64() * 1000.0;
 
         // The residency cache uses the full project texture budget. The
         // per-frame admission cap only limits newly decoded bytes; resident
@@ -1047,8 +1173,12 @@ impl SceneRenderer {
         self.texture_frame = self.texture_frame.wrapping_add(1).max(1);
         let texture_frame = self.texture_frame;
         let texture_budget_bytes = options.texture_quality.cache_budget_bytes();
-        let texture_resident_budget = texture_budget_bytes.saturating_mul(3) / 4;
-        let texture_frame_budget = texture_budget_bytes.saturating_sub(texture_resident_budget);
+        // The full budget belongs to resident textures. The per-frame admission
+        // cap is additional transient headroom, not a slice taken away from the
+        // working set. Subtracting it made a city with ~27 facade textures
+        // evict and re-decode the same pages every frame.
+        let texture_resident_budget = texture_budget_bytes;
+        let texture_frame_budget = texture_budget_bytes / 4;
         let texture_max_dimension = options.texture_quality.max_dimension();
         if texture_max_dimension != self.texture_max_dimension {
             self.texture_max_dimension = texture_max_dimension;
@@ -1060,6 +1190,7 @@ impl SceneRenderer {
             max_dimension: texture_max_dimension,
             ..TextureDecodeLimits::default()
         };
+        self.texture_ingress.poll_prefetch(texture_frame);
 
         let cube_mesh = &self.cube_mesh;
         let cube_basic_mesh = Arc::clone(&self.cube_basic_mesh);
@@ -1081,6 +1212,7 @@ impl SceneRenderer {
             4 + usize::from(override_basic_mesh.is_some()),
         );
         commands.clear(bg_color);
+        commands.packet_reuse = options.scene_packet_reuse;
         commands.camera_eye = cam_eye;
         commands.environment = environment;
         commands.optimized_improved = options
@@ -1092,6 +1224,10 @@ impl SceneRenderer {
         commands.shadow_budget_exceeded = self.shadow_budget_exceeded;
         commands.entity_lights = crate::entity_lights_frame::collect_entity_lights(scene, cam_eye);
 
+        let commands_started = std::time::Instant::now();
+        let mut profile_texture_ms = 0.0;
+        let mut profile_draw_ms = 0.0;
+        let mut profile_edge_ms = 0.0;
         let use_tonality = options.solid_face_tonality;
         let mut grid_drawn = false;
         for job in &jobs {
@@ -1174,6 +1310,7 @@ impl SceneRenderer {
                 job.base_color
             };
 
+            let texture_started = std::time::Instant::now();
             let texture_id = match job.base_color_texture.as_deref() {
                 Some(path) => Self::resolve_base_color_texture(
                     self.asset_root.as_deref(),
@@ -1187,6 +1324,8 @@ impl SceneRenderer {
                 .map(|texture| commands.register_texture(texture)),
                 None => None,
             };
+            profile_texture_ms += texture_started.elapsed().as_secs_f64() * 1000.0;
+            let draw_started = std::time::Instant::now();
 
             let lit = use_tonality && !job.unlit;
             let two_sided =
@@ -1207,11 +1346,13 @@ impl SceneRenderer {
             }
             commands.draw_mesh_with_texture(mesh_id, job.model, color, texture_id);
             stats.triangles_rendered += mesh.triangle_count() as u32;
+            profile_draw_ms += draw_started.elapsed().as_secs_f64() * 1000.0;
         }
 
         // Edges are intentionally recorded after all mesh commands. Interleaving
         // one line command per object would split otherwise compatible mesh
         // runs and defeat instancing when surface edges are enabled.
+        let edges_started = std::time::Instant::now();
         for job in &jobs {
             let draw_surface_edges = options.solid_show_surface_edges;
             if draw_surface_edges || (options.selection_outline && job.is_selected) {
@@ -1248,6 +1389,7 @@ impl SceneRenderer {
                 record_wireframe_overlay(&mut commands, edges, &job.model, edge_color);
             }
         }
+        profile_edge_ms += edges_started.elapsed().as_secs_f64() * 1000.0;
 
         if !grid_drawn {
             if options.show_grid_3d && matches!(camera.mode, CameraMode::Perspective) {
@@ -1261,10 +1403,12 @@ impl SceneRenderer {
             }
         }
 
+        let profile_job_count = jobs.len();
         self.render_jobs = jobs;
         self.render_jobs.clear();
         self.stats = stats.clone();
 
+        let particles_started = std::time::Instant::now();
         self.particles.update_and_draw(
             scene,
             camera,
@@ -1273,6 +1417,21 @@ impl SceneRenderer {
             &mut commands,
             particle_dt,
         );
+        let profile_particles_ms = particles_started.elapsed().as_secs_f64() * 1000.0;
+        if profile {
+            tracing::info!(
+                collect_ms = profile_collect_ms,
+                shadow_ms = profile_shadow_ms,
+                texture_ms = profile_texture_ms,
+                draw_ms = profile_draw_ms,
+                edge_ms = profile_edge_ms,
+                particles_ms = profile_particles_ms,
+                commands_ms = commands_started.elapsed().as_secs_f64() * 1000.0,
+                total_ms = profile_started.elapsed().as_secs_f64() * 1000.0,
+                jobs = profile_job_count,
+                "scene build profile"
+            );
+        }
 
         SceneRenderFrame {
             commands,
@@ -1455,7 +1614,7 @@ struct RenderJob {
     is_selected: bool,
     distance_squared: f32,
     is_transparent: bool,
-    base_color_texture: Option<String>,
+    base_color_texture: Option<Arc<str>>,
     unlit: bool,
     double_sided: bool,
     tiling: [f32; 2],
@@ -1475,9 +1634,12 @@ struct PrimitiveTilingKey {
 }
 
 const MAX_PRIMITIVE_TILING_CACHE_ENTRIES: usize = 64;
-/// Hard cap for editable topology variants. A node can legitimately change
-/// tiling while editing; clearing the whole cache on overflow keeps memory
-/// bounded without per-frame eviction bookkeeping.
+const MAX_MODEL_BASIC_CACHE_ENTRIES: usize = 64;
+const MAX_MESH_BOUNDS_CACHE_ENTRIES: usize = 256;
+const MAX_TEXTURE_KEY_CACHE_ENTRIES: usize = 256;
+/// Hard cap for editable topology variants. The cache evicts only its least
+/// recently used entry; a large authored scene must not rescan every editable
+/// mesh whenever one new variant appears.
 const MAX_EDITABLE_MESH_CACHE_ENTRIES: usize = 256;
 
 const LOW_TO_MEDIUM_LOD_ENTER_RADIUS_PX: f32 = 18.0;
@@ -1579,6 +1741,39 @@ const fn primitive_batch_key(primitive: Primitive) -> u8 {
     }
 }
 
+/// Opt-in scene profiling. The environment is read once so the hot path does
+/// not touch the process environment on every frame.
+fn scene_profile_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RAF_SCENE_PROFILE").is_some())
+}
+
+fn model_basic_key(reference: &raf_core::scene::MeshAssetRef, tiling: [f32; 2]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in reference.path.as_bytes() {
+        hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    if let Some(content_hash) = reference.content_hash.as_deref() {
+        hash = (hash ^ 1).wrapping_mul(0x0000_0100_0000_01b3);
+        for byte in content_hash.as_bytes() {
+            hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash = (hash ^ reference.node.map_or(u64::MAX, |node| node as u64))
+        .wrapping_mul(0x0000_0100_0000_01b3);
+    hash = (hash ^ u64::from(reference.import_scale.to_bits())).wrapping_mul(0x0000_0100_0000_01b3);
+    tiling_key_with_seed(hash, tiling)
+}
+
+fn tiling_key(tiling: [f32; 2]) -> u64 {
+    tiling_key_with_seed(0xcbf2_9ce4_8422_2325_u64, tiling)
+}
+
+fn tiling_key_with_seed(mut hash: u64, tiling: [f32; 2]) -> u64 {
+    hash = (hash ^ u64::from(tiling[0].to_bits())).wrapping_mul(0x0000_0100_0000_01b3);
+    (hash ^ u64::from(tiling[1].to_bits())).wrapping_mul(0x0000_0100_0000_01b3)
+}
+
 fn mesh_to_basic(mesh: &MeshData) -> BasicMesh {
     BasicMesh::new(
         mesh.positions
@@ -1631,7 +1826,7 @@ fn sanitized_surface_tiling(tiling: [f32; 2]) -> [f32; 2] {
 }
 
 fn tiled_primitive_basic(
-    cache: &mut HashMap<PrimitiveTilingKey, Arc<BasicMesh>>,
+    cache: &mut BoundedCache<PrimitiveTilingKey, Arc<BasicMesh>>,
     key: PrimitiveTilingKey,
     base: &Arc<BasicMesh>,
     tiling: [f32; 2],
@@ -1648,9 +1843,6 @@ fn tiled_primitive_basic(
         vertex.uv[1] *= tiling[1];
     }
     let mesh = Arc::new(BasicMesh::new(vertices, base.indices.clone()));
-    if cache.len() >= MAX_PRIMITIVE_TILING_CACHE_ENTRIES {
-        cache.clear();
-    }
     cache.insert(key, Arc::clone(&mesh));
     mesh
 }
@@ -2740,7 +2932,7 @@ mod tests {
     fn primitive_tiling_cache_scales_uvs_and_stays_bounded() {
         let renderer = SceneRenderer::new(64, 64);
         let base = Arc::clone(&renderer.cube_basic_mesh);
-        let mut cache = HashMap::new();
+        let mut cache = BoundedCache::new(MAX_PRIMITIVE_TILING_CACHE_ENTRIES);
         let key = PrimitiveTilingKey {
             primitive: primitive_batch_key(Primitive::Cube),
             lod: 1,

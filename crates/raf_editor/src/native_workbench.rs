@@ -89,8 +89,8 @@ use crate::panels::viewport_compass::{
 };
 use crate::panels::viewport_toolbar_surface::{
     build_viewport_toolbar_surface, parse_viewport_toolbar_action,
-    parse_viewport_toolbar_select_action, ViewportRenderStyle, ViewportTool, ViewportToolbarAction,
-    ViewportToolbarState, ViewportViewMode,
+    parse_viewport_toolbar_select_action, ViewportTool, ViewportToolbarAction,
+    ViewportToolbarState,
 };
 use crate::performance_pressure::{self, PerformanceReadout};
 use crate::project_catalog::ProjectCatalog;
@@ -381,6 +381,7 @@ pub struct NativeGameWorkbench {
     drag_motion: UiTween,
     agent_motion: UiTween,
     last_sync_time_seconds: f64,
+    performance_initialized: bool,
     presented_fps: f32,
     estimated_capacity_fps: u32,
     viewport_fps: f32,
@@ -406,8 +407,9 @@ pub struct NativeGameWorkbench {
     presentation_label: &'static str,
     last_status_text: String,
     last_status_refresh_seconds: f64,
-    last_scene_fingerprint: u64,
+    last_environment_fingerprint: u64,
     last_hierarchy_fingerprint: u64,
+    last_selected_fingerprint: u64,
     last_selection: Vec<SceneNodeId>,
     last_layout: Option<EditorFrameLayout>,
     last_history_state: (bool, bool, bool),

@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,56 @@ impl Instance {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Texture {
+    pub size: [u32; 2],
+    /// Shared RGBA8 pixels. Packet rebuilds clone the Arc instead of copying
+    /// the whole page; the retained UI cache only clones when it patches a
+    /// page while a previous packet still holds it.
+    pub rgba: Arc<Vec<u8>>,
+    /// Whether the executor may generate a mip chain. Retained UI pages are
+    /// sampled one-to-one and refresh in place, so mips only add upload cost
+    /// and stale minified glyphs.
+    #[serde(default = "default_mipmaps")]
+    pub mipmaps: bool,
+}
+
+fn default_mipmaps() -> bool {
+    true
+}
+
+impl Texture {
+    pub fn new(size: [u32; 2], rgba: Vec<u8>) -> Self {
+        Self {
+            size,
+            rgba: Arc::new(rgba),
+            mipmaps: true,
+        }
+    }
+
+    /// Build a texture that shares pixels with a retained cache.
+    pub fn from_shared(size: [u32; 2], rgba: Arc<Vec<u8>>) -> Self {
+        Self {
+            size,
+            rgba,
+            mipmaps: true,
+        }
+    }
+
+    /// Marks a texture that is sampled at its authored resolution.
+    pub fn without_mipmaps(mut self) -> Self {
+        self.mipmaps = false;
+        self
+    }
+}
+
+/// One rectangular refresh of an already uploaded texture.
+///
+/// Retained pages (the RafUI text atlas) keep a stable GPU image and upload
+/// only the rectangle that changed. `texture` is a packet texture index,
+/// excluding the implicit white texture.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TextureUpdate {
+    pub texture: u32,
+    pub origin: [u32; 2],
     pub size: [u32; 2],
     pub rgba: Vec<u8>,
 }
@@ -87,6 +138,11 @@ pub struct Workload {
     pub indices: Vec<u32>,
     pub instances: Vec<Instance>,
     pub textures: Vec<Texture>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub texture_ids: Vec<u64>,
+    /// Rectangular refreshes for textures whose GPU image is retained.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub texture_updates: Vec<TextureUpdate>,
     pub batches: Vec<Batch>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shadow_batches: Vec<Batch>,
@@ -145,6 +201,12 @@ impl Workload {
                     .map(|t| t.rgba.len() as u64)
                     .sum::<u64>(),
             )
+            .saturating_add(
+                self.texture_updates
+                    .iter()
+                    .map(|update| update.rgba.len() as u64)
+                    .sum::<u64>(),
+            )
     }
 
     pub(crate) fn validate(&self, max_texture: u32, max_buffer: u64) -> Result<()> {
@@ -172,6 +234,24 @@ impl Workload {
                 || texture.rgba.len() % 4 != 0
             {
                 return Err(Error::Invalid("invalid RGBA texture"));
+            }
+        }
+        for update in &self.texture_updates {
+            let Some(texture) = self.textures.get(update.texture as usize) else {
+                return Err(Error::Invalid("texture update references a missing texture"));
+            };
+            let [x, y] = update.origin;
+            let [width, height] = update.size;
+            let right = u64::from(x) + u64::from(width);
+            let bottom = u64::from(y) + u64::from(height);
+            let expected = u64::from(width) * u64::from(height) * 4;
+            if width == 0
+                || height == 0
+                || right > u64::from(texture.size[0])
+                || bottom > u64::from(texture.size[1])
+                || update.rgba.len() as u64 != expected
+            {
+                return Err(Error::Invalid("invalid texture update"));
             }
         }
         let mut overlay = false;

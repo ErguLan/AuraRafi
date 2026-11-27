@@ -56,6 +56,15 @@ fn startup_project_argument() -> Option<std::path::PathBuf> {
 
 impl NativeEditorApplication {
     fn about_to_wait_native(&mut self, event_loop: &ActiveEventLoop) {
+        // Winit can miss a Focused event after a restore/alt-tab. Reconcile
+        // against the window's real focus before pacing the next frame so the
+        // editor does not stay stranded on the 5 FPS background ceiling.
+        if let (Some(window), Some(runtime)) = (self.window.as_ref(), self.runtime.as_mut()) {
+            let focused = window.has_focus();
+            if runtime.window_focused() != focused {
+                runtime.set_window_focused(focused);
+            }
+        }
         if let Some(view) = self.pending_lab_open.take() {
             self.open_agents(None);
             self.focus_mounted_laboratory();

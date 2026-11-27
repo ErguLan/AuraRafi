@@ -35,6 +35,11 @@ pub struct SceneGraph {
     /// serialized; every graph mutator invalidates it before changing nodes.
     #[serde(skip)]
     render_cache: Cell<Option<u64>>,
+    /// Cached hierarchy/authoring key. Unlike `render_cache`, this ignores
+    /// animation-only fields such as position, rotation and color so a moving
+    /// script object does not rebuild the editor hierarchy every tick.
+    #[serde(skip, default)]
+    hierarchy_cache: Cell<(u64, u64)>,
     /// Monotonic authoring revision used by editor surfaces to invalidate
     /// retained projections without serializing or re-hashing the full graph.
     /// It is runtime-local on purpose: persisted identity is still handled by
@@ -64,6 +69,7 @@ impl SceneGraph {
             environment_revision: Cell::new(next_document_revision()),
             roots: Vec::new(),
             render_cache: Cell::new(None),
+            hierarchy_cache: Cell::new((0, 0)),
             document_revision: Cell::new(next_document_revision()),
         }
     }

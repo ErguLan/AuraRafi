@@ -136,6 +136,10 @@ impl Backend for WebGpu {
         &self.info
     }
 
+    fn supports_frame_instance_patches(&self) -> bool {
+        true
+    }
+
     fn configure(&mut self, plan: &FramePlan) -> Result<()> {
         if plan.output != Output::Present {
             return Err(Error::Invalid("browser probe uses a canvas target"));

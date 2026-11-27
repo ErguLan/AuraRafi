@@ -4,6 +4,7 @@ use crate::host_api::ScriptContext;
 use crate::node_handle::NodeHandle;
 use crate::value::ScriptValue;
 use crate::{ScriptError, ScriptResult};
+use raf_core::project::EditorViewMode;
 use rhai::{Array, CallFnOptions, Dynamic, Engine, EvalAltResult, ImmutableString, Scope, INT};
 use std::cell::{Cell, RefCell};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -223,6 +224,20 @@ pub fn create_engine(max_operations: u64) -> Engine {
     engine.register_fn("self_node", || -> RhaiResult<NodeHandle> {
         with_ctx(|ctx| Ok(ctx.self_node().unwrap_or_else(NodeHandle::invalid)))
     });
+    engine.register_fn("viewport_view_mode", || -> RhaiResult<String> {
+        with_ctx(|ctx| Ok(ctx.viewport_view_mode()?.slug().to_string()))
+    });
+    engine.register_fn(
+        "set_viewport_view_mode",
+        |mode: ImmutableString| -> RhaiResult<()> {
+            with_ctx(|ctx| {
+                let mode = EditorViewMode::from_slug(mode.as_str()).ok_or_else(|| {
+                    ScriptError::InvalidArgument("viewport view mode must be '2d' or '3d'".into())
+                })?;
+                ctx.set_viewport_view_mode(mode)
+            })
+        },
+    );
     engine.register_fn(
         "emit_event",
         |name: ImmutableString, value: Dynamic| -> RhaiResult<()> {

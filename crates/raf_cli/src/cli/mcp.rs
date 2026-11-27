@@ -423,6 +423,7 @@ pub(super) fn handle_mcp_message<H: McpCommandHost>(engine: &mut H, message: &Va
                 {"uri": "raf://digest", "name": "Scene digest", "mimeType": "application/json"},
                 {"uri": "raf://context", "name": "Compact project context", "mimeType": "application/json"},
                 {"uri": "raf://workspace", "name": "Workspace summary", "mimeType": "application/json"},
+                {"uri": "raf://performance", "name": "Performance telemetry", "mimeType": "application/json"},
             ]}),
         )),
         "resources/read" => {
@@ -430,6 +431,26 @@ pub(super) fn handle_mcp_message<H: McpCommandHost>(engine: &mut H, message: &Va
                 .pointer("/params/uri")
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            if uri == "raf://performance" {
+                let request = EngineCommandRequest::new(
+                    "performance.stats",
+                    json!({"window_seconds": 10}),
+                    CommandSource::Mcp,
+                );
+                let response = engine.execute(request);
+                if !response.ok {
+                    let error = if response.lines.is_empty() {
+                        response.title
+                    } else {
+                        response.lines.join(" ")
+                    };
+                    return Some(jsonrpc_error(&id, -32602, error));
+                }
+                return Some(jsonrpc_result(
+                    &id,
+                    json!({"contents": [{"uri": uri, "mimeType": "application/json", "text": response.data.to_string()}]}),
+                ));
+            }
             match engine.resource(uri) {
                 Ok(value) => Some(jsonrpc_result(
                     &id,
@@ -828,6 +849,13 @@ pub(super) fn mcp_tool_command(name: &str) -> Option<&'static str> {
         "raf_scene_repair" => Some("game.repair"),
         "raf_scene_batch" => Some("game.batch"),
         "raf_diagnostics" => Some("project.health"),
+        "raf_performance" => Some("performance.stats"),
+        "raf_benchmark_start" => Some("performance.benchmark.start"),
+        "raf_benchmark_status" => Some("performance.benchmark.status"),
+        "raf_benchmark_stop" => Some("performance.benchmark.stop"),
+        "raf_benchmark_cancel" => Some("performance.benchmark.cancel"),
+        "raf_benchmark_list" => Some("performance.benchmark.list"),
+        "raf_benchmark_compare" => Some("performance.benchmark.compare"),
         "raf_doctor" => Some("engine.doctor"),
         "raf_capabilities" => Some("capabilities.list"),
         "raf_capabilities_search" => Some("capabilities.search"),
@@ -1080,6 +1108,8 @@ fn headless_mcp_tool_supported(name: &str) -> bool {
             | "raf_scripts_search"
             | "raf_project_health"
             | "raf_diagnostics"
+            | "raf_benchmark_list"
+            | "raf_benchmark_compare"
             | "raf_command"
     )
 }

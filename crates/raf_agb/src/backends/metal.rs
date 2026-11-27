@@ -114,6 +114,10 @@ impl Backend for Metal {
         &self.info
     }
 
+    fn supports_frame_instance_patches(&self) -> bool {
+        true
+    }
+
     fn configure(&mut self, plan: &FramePlan) -> Result<()> {
         if self.window.is_some() != (plan.output == Output::Present) {
             return Err(Error::Invalid("target output does not match Metal view"));

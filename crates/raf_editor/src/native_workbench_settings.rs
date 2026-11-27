@@ -18,6 +18,9 @@ pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, va
         "settings.auto_ui_scale" | "settings.auto-ui-scale" => settings.auto_ui_scale = value,
         "settings.vsync" => settings.vsync = value,
         "settings.multithreading" => settings.multithreading = value,
+        "settings.scene_packet_reuse" | "settings.scene-packet-reuse" => {
+            settings.scene_packet_reuse = value
+        }
         "settings.grid_visible" | "settings.show_grid" => settings.grid_visible = value,
         "settings.snap_to_grid" => settings.snap_to_grid = value,
         "settings.inspector_live_transform_updates" => {
@@ -191,6 +194,18 @@ pub(crate) fn apply_settings_command(settings: &mut EngineSettings, key: &str) -
         | "settings.units.metric"
         | "settings.units.imperial"
         | "settings.units.game" => apply_settings_toggle(settings, key, true),
+        "settings.texture-quality.efficient" => {
+            settings.texture_quality = raf_core::project::TextureQualityMode::Efficient;
+            true
+        }
+        "settings.texture-quality.adaptive" => {
+            settings.texture_quality = raf_core::project::TextureQualityMode::Adaptive;
+            true
+        }
+        "settings.texture-quality.detailed" => {
+            settings.texture_quality = raf_core::project::TextureQualityMode::Detailed;
+            true
+        }
         "settings.agent_mode.inspect" => {
             settings.agent_mode = raf_core::ai::AgentMode::Inspect;
             true
@@ -373,6 +388,14 @@ pub(crate) fn apply_settings_select(settings: &mut EngineSettings, key: &str, va
             settings.language = match value {
                 "english" => Language::English,
                 "spanish" => Language::Spanish,
+                _ => return false,
+            }
+        }
+        "settings.texture_quality" => {
+            settings.texture_quality = match value {
+                "efficient" => raf_core::project::TextureQualityMode::Efficient,
+                "adaptive" => raf_core::project::TextureQualityMode::Adaptive,
+                "detailed" => raf_core::project::TextureQualityMode::Detailed,
                 _ => return false,
             }
         }

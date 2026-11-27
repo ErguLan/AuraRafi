@@ -14,7 +14,7 @@ mod styles;
 mod tests;
 
 use raf_core::config::Theme;
-use raf_core::project::ProjectType;
+use raf_core::project::{EditorViewMode, ProjectType};
 use raf_render::api_graphic_basic::ui_surface::{StudioUiPalette, UiSurface};
 use std::path::PathBuf;
 
@@ -82,6 +82,8 @@ pub struct HubSurfaceModel {
     pub create_error: Option<HubProjectCreateError>,
     pub create_active: bool,
     pub create_type_menu_open: bool,
+    pub create_advanced_open: bool,
+    pub create_initial_view: EditorViewMode,
     pub create_with_agent: bool,
     /// True when `create_path` points at an existing project folder. The Hub
     /// reuses the create row as the "open existing project" entry point, so
@@ -172,6 +174,8 @@ impl Default for HubSurfaceModel {
             create_error: None,
             create_active: false,
             create_type_menu_open: false,
+            create_advanced_open: false,
+            create_initial_view: EditorViewMode::View3d,
             create_with_agent: false,
             create_path_is_project: false,
             create_name_focused: false,

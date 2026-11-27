@@ -113,6 +113,30 @@ fn assert_ambient(uniforms: &FrameUniforms, expected: Vec3) {
 }
 
 #[test]
+fn moved_mesh_emits_an_instance_patch_for_the_retained_packet() {
+    let mesh = triangle_mesh();
+    let build = |translate: Vec3| {
+        let mut commands = BasicCommandList::new();
+        commands.clear([0; 4]);
+        let mesh_id = commands.register_mesh(Arc::clone(&mesh));
+        commands.draw_mesh(mesh_id, Mat4::from_translation(translate), [255; 4]);
+        frame(64, 64, commands)
+    };
+    let first = build(Vec3::ZERO);
+    let moved = build(Vec3::X);
+    let mut builder = ProductFrameBuilder::default();
+    builder.append_scene(&first, 1).unwrap();
+
+    let patches = builder
+        .dynamic_instance_patches(&moved)
+        .expect("instance patch collection")
+        .expect("matching topology");
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].instances.len(), 1);
+    assert!((patches[0].instances[0].transform[3][0] - 1.0).abs() < 1e-6);
+}
+
+#[test]
 fn scene_commands_keep_painter_order_and_state() {
     let mut commands = BasicCommandList::new();
     commands.clear([10, 20, 30, 255]);

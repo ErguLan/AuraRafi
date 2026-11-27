@@ -38,6 +38,10 @@ impl Backend for Recorder {
         Ok(workload.batches.len() as u32)
     }
 
+    fn supports_frame_instance_patches(&self) -> bool {
+        true
+    }
+
     unsafe fn patch(&mut self, _: &mut u32, _: ResourcePatch<'_>) -> Result<()> {
         Ok(())
     }

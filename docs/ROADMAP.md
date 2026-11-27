@@ -91,6 +91,9 @@ Current source scope:
 - [ ] Mesh Assets, linked Prefab Instances, supported lights, cameras, audio
   emitters, trigger volumes, spawn markers, groups and shapes displayed from
   real registered capabilities. No placeholder types or fake Hierarchy nodes.
+- [ ] Review Solid/Lit shading modes. The one-option shading dropdown was
+  removed from the viewport toolbar; restore a compact selector only when the
+  renderer exposes real alternatives beyond the current Solid/Lit path.
 
 After 0.12: splines, lathe/sweep/loft and extensive procedural construction.
 Native DPI/input/recovery acceptance is distinct from compilation/offscreen tests.

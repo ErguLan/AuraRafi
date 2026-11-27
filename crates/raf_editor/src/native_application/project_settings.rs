@@ -2,7 +2,8 @@
 
 use raf_core::config::{ScriptExecutionMode, ScriptLanguage};
 use raf_core::project::{
-    BuildingStyle, GeometryDetailMode, ProjectSettings, TextureQualityMode, ViewportResolutionMode,
+    BuildingStyle, EditorViewMode, GeometryDetailMode, ProjectSettings, TextureQualityMode,
+    ViewportResolutionMode,
 };
 use raf_core::scene::ParticleQuality;
 
@@ -13,6 +14,7 @@ use super::NativeEditorApplication;
 pub(super) struct ProjectSettingsMutation {
     pub(super) changed: bool,
     pub(super) layout_changed: bool,
+    pub(super) view_changed: bool,
 }
 
 impl ProjectSettingsMutation {
@@ -20,6 +22,7 @@ impl ProjectSettingsMutation {
         Self {
             changed: true,
             layout_changed,
+            view_changed: false,
         }
     }
 
@@ -27,6 +30,15 @@ impl ProjectSettingsMutation {
         Self {
             changed,
             layout_changed: false,
+            view_changed: false,
+        }
+    }
+
+    const fn with_view(changed: bool) -> Self {
+        Self {
+            changed,
+            layout_changed: false,
+            view_changed: true,
         }
     }
 }
@@ -123,6 +135,11 @@ pub(super) fn apply_project_setting_toggle(
             settings.world_streaming_enabled = value;
             changed
         }
+        "project-settings.scene-packet-reuse" => {
+            let changed = settings.scene_packet_reuse != value;
+            settings.scene_packet_reuse = value;
+            changed
+        }
         "project-settings.particles-enabled" => {
             let changed = settings.particle_runtime.enabled != value;
             settings.particle_runtime.enabled = value;
@@ -165,6 +182,7 @@ pub(super) fn apply_project_setting_toggle(
     ProjectSettingsMutation {
         changed,
         layout_changed,
+        view_changed: false,
     }
 }
 
@@ -244,6 +262,18 @@ pub(super) fn apply_project_setting_range(
             let next = value.round().clamp(15.0, 120.0) as u32;
             let changed = next != settings.runtime.fps_limit;
             settings.runtime.fps_limit = next;
+            changed
+        }
+        "project-settings.runtime-script-budget" => {
+            let next = value.round().clamp(1.0, 100.0) as u32;
+            let changed = next != settings.runtime.script_budget_ms;
+            settings.runtime.script_budget_ms = next;
+            changed
+        }
+        "project-settings.runtime-script-operation-limit" => {
+            let next = value.round().clamp(1_000.0, 1_000_000.0) as u64;
+            let changed = next != settings.runtime.script_operation_limit;
+            settings.runtime.script_operation_limit = next;
             changed
         }
         "project-settings.runtime-max-entities" => {
@@ -350,6 +380,7 @@ pub(super) fn apply_project_setting_range(
     ProjectSettingsMutation {
         changed,
         layout_changed: false,
+        view_changed: false,
     }
 }
 
@@ -389,6 +420,16 @@ pub(super) fn apply_project_setting_command(
             let changed = settings.runtime.progress.location != location;
             settings.runtime.progress.location = location;
             ProjectSettingsMutation::without_layout(changed)
+        }
+        "project-settings.default-view.2d" => {
+            let changed = settings.default_editor_view != EditorViewMode::View2d;
+            settings.default_editor_view = EditorViewMode::View2d;
+            ProjectSettingsMutation::with_view(changed)
+        }
+        "project-settings.default-view.3d" => {
+            let changed = settings.default_editor_view != EditorViewMode::View3d;
+            settings.default_editor_view = EditorViewMode::View3d;
+            ProjectSettingsMutation::with_view(changed)
         }
         "project-settings.reset-panels" => {
             let changed = !settings.show_hierarchy_panel || !settings.show_properties_panel;
@@ -523,6 +564,16 @@ impl NativeEditorApplication {
             }
         }
         self.apply_live_project_settings();
+        if mutation.view_changed {
+            let mode = self
+                .project
+                .as_ref()
+                .filter(|project| project.project_type == raf_core::project::ProjectType::Game)
+                .map(|project| project.settings.default_editor_view);
+            if let (Some(mode), Some(runtime)) = (mode, self.runtime.as_mut()) {
+                runtime.set_editor_view_mode(mode);
+            }
+        }
     }
 
     pub(super) fn apply_project_setting_toggle_intent(&mut self, key: String, value: bool) {

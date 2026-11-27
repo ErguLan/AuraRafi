@@ -91,12 +91,18 @@ impl NativeGameWorkbench {
     pub(super) fn workbench_change_cause(
         &self,
         layout: EditorFrameLayout,
-        scene_revision: u64,
+        hierarchy_fingerprint: u64,
+        environment_fingerprint: u64,
+        selected_fingerprint: u64,
         selected: &[SceneNodeId],
     ) -> UiWorkCause {
         if self.last_layout != Some(layout) {
             UiWorkCause::Geometry
-        } else if self.last_scene_fingerprint != scene_revision || self.last_selection != selected {
+        } else if self.last_hierarchy_fingerprint != hierarchy_fingerprint
+            || self.last_environment_fingerprint != environment_fingerprint
+            || self.last_selected_fingerprint != selected_fingerprint
+            || self.last_selection != selected
+        {
             UiWorkCause::Document
         } else if self.has_active_ui_motion() {
             UiWorkCause::Animation

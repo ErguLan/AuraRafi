@@ -46,6 +46,11 @@ pub struct UiTextAtlas {
     row_height: u16,
     frame: u64,
     slots: HashMap<UiTextAtlasKey, UiTextAtlasSlot>,
+    /// Shelves freed by text that is no longer part of the retained frame.
+    /// Dynamic labels (clocks, counters, speed) change their value every
+    /// frame; allocating a fresh shelf for every value grew the atlas and
+    /// periodically forced a full repack. Freed shelves are reused first.
+    free_rects: Vec<UiTextAtlasRect>,
     pixels: Vec<u8>,
     dirty: bool,
     dirty_region: Option<UiTextAtlasRect>,
@@ -97,6 +102,7 @@ impl UiTextAtlas {
             row_height: 0,
             frame: 0,
             slots: HashMap::new(),
+            free_rects: Vec::new(),
             pixels: vec![0; usize::from(size[0]) * usize::from(size[1])],
             dirty: true,
             dirty_region: Some(UiTextAtlasRect {
@@ -127,6 +133,7 @@ impl UiTextAtlas {
         self.cursor = [0, 0];
         self.row_height = 0;
         self.slots.clear();
+        self.free_rects.clear();
         self.pixels.fill(0);
         self.dirty = true;
         self.dirty_region = Some(UiTextAtlasRect {
@@ -171,6 +178,12 @@ impl UiTextAtlas {
     where
         I: IntoIterator<Item = (&'a UiTextAtlasRequest, &'a str)>,
     {
+        // Presentation backends consume the dirty region produced by one
+        // synchronization pass. Keeping writes from every earlier frame made
+        // the rectangle grow to the whole page and prevented rectangular
+        // atlas uploads from ever becoming small again.
+        self.dirty = false;
+        self.dirty_region = None;
         let requests = requests.into_iter().collect::<Vec<_>>();
         self.frame = self.frame.wrapping_add(1);
         let frame = self.frame;
@@ -192,46 +205,45 @@ impl UiTextAtlas {
         stats
     }
 
-    /// Reclaims atlas space left by text that no longer belongs to the current
-    /// retained frame. Agent history virtualization changes a few large text
-    /// blocks at a time; keeping every previously visited block made the atlas
-    /// grow until scrolling itself became progressively more expensive.
-    ///
-    /// A small stale tail is intentionally preserved so a one-row scroll back
-    /// can reuse its glyphs. Repacking only begins once stale content is both
-    /// meaningful and large enough to justify one bounded rebuild.
+    /// Reclaims shelf space left by text that no longer belongs to the current
+    /// retained frame. Dynamic labels change their value every frame, so this
+    /// runs continuously instead of waiting for the atlas to overflow: stale
+    /// shelves go to a free list that `allocate` reuses before growing. A small
+    /// stale tail is intentionally preserved so a one-row scroll back can reuse
+    /// its glyphs.
     fn compact_stale_slots(&mut self, requests: &[(&UiTextAtlasRequest, &str)]) -> usize {
-        const MIN_STALE_SLOTS: usize = 8;
+        const KEEP_STALE_SLOTS: usize = 8;
+        const MAX_FREE_RECTS: usize = 512;
 
-        if self.slots.len() < MIN_STALE_SLOTS {
+        if self.slots.len() <= KEEP_STALE_SLOTS {
             return 0;
         }
         let active = requests
             .iter()
             .map(|(request, text)| UiTextAtlasKey::from_request(request, text))
             .collect::<HashSet<_>>();
-        let stale = self
+        let mut stale = self
             .slots
             .iter()
             .filter(|(key, _)| !active.contains(*key))
+            .map(|(key, slot)| (key.clone(), slot.last_used_frame, shelf_block(slot)))
             .collect::<Vec<_>>();
-        if stale.len() < MIN_STALE_SLOTS {
+        if stale.len() <= KEEP_STALE_SLOTS {
             return 0;
         }
-        let stale_area = stale
-            .iter()
-            .map(|(_, slot)| usize::from(slot.rect.width) * usize::from(slot.rect.height))
-            .sum::<usize>();
-        let atlas_area = usize::from(self.size[0]) * usize::from(self.size[1]);
-        let stale_dominates_slots = stale.len().saturating_mul(2) >= self.slots.len();
-        let stale_dominates_pixels = stale_area.saturating_mul(4) >= atlas_area;
-        if !stale_dominates_slots && !stale_dominates_pixels {
-            return 0;
+        stale.sort_by_key(|(_, last_used, _)| *last_used);
+        let reclaimed = stale.len() - KEEP_STALE_SLOTS;
+        for (key, _, block) in stale.into_iter().take(reclaimed) {
+            self.slots.remove(&key);
+            self.free_rects.push(block);
         }
-
-        let evicted = self.slots.len();
-        self.clear();
-        evicted
+        if self.free_rects.len() > MAX_FREE_RECTS {
+            self.free_rects
+                .sort_by_key(|rect| u32::from(rect.width) * u32::from(rect.height));
+            let excess = self.free_rects.len() - MAX_FREE_RECTS;
+            self.free_rects.drain(..excess);
+        }
+        reclaimed
     }
 
     fn sync_resolved_pass<'a>(
@@ -352,6 +364,37 @@ impl UiTextAtlas {
         if width > self.size[0] || height > self.size[1] {
             return None;
         }
+        // Reuse a shelf released by text that left the retained frame before
+        // advancing the shelf cursor. Dynamic HUD values otherwise allocate a
+        // new shelf per frame forever.
+        if let Some(index) = self
+            .free_rects
+            .iter()
+            .position(|rect| rect.width >= width && rect.height >= height)
+        {
+            let block = self.free_rects.swap_remove(index);
+            if block.width > width.saturating_add(8) {
+                self.free_rects.push(UiTextAtlasRect {
+                    x: block.x.saturating_add(width),
+                    y: block.y,
+                    width: block.width - width,
+                    height: block.height,
+                });
+            } else if block.height > height.saturating_add(8) {
+                self.free_rects.push(UiTextAtlasRect {
+                    x: block.x,
+                    y: block.y.saturating_add(height),
+                    width,
+                    height: block.height - height,
+                });
+            }
+            return Some(UiTextAtlasRect {
+                x: block.x.saturating_add(PADDING),
+                y: block.y.saturating_add(PADDING),
+                width: estimated_size[0],
+                height: estimated_size[1],
+            });
+        }
         if self.cursor[0].saturating_add(width) > self.size[0] {
             self.cursor[0] = 0;
             self.cursor[1] = self.cursor[1].saturating_add(self.row_height);
@@ -457,6 +500,16 @@ impl UiTextAtlasKey {
             overflow: request.overflow,
             single_line: request.single_line,
         }
+    }
+}
+
+/// Reconstructs the padded shelf block that `allocate` reserved for a slot.
+fn shelf_block(slot: &UiTextAtlasSlot) -> UiTextAtlasRect {
+    UiTextAtlasRect {
+        x: slot.rect.x.saturating_sub(1),
+        y: slot.rect.y.saturating_sub(1),
+        width: slot.rect.width.saturating_add(2),
+        height: slot.rect.height.saturating_add(2),
     }
 }
 
@@ -1184,6 +1237,20 @@ mod tests {
         );
     }
 
+    /// The dirty rectangle belongs to one synchronization pass. Keeping earlier
+    /// writes in it made a page that received one label report the whole atlas
+    /// as changed for the rest of the session.
+    #[test]
+    fn a_reused_sync_clears_the_dirty_region() {
+        let request = request();
+        let mut atlas = UiTextAtlas::new([256, 128]);
+        atlas.sync_resolved([(&request, "Header")]);
+        assert!(atlas.dirty_region().is_some());
+
+        atlas.sync_resolved([(&request, "Header")]);
+        assert_eq!(atlas.dirty_region(), None);
+    }
+
     #[test]
     fn resolved_language_text_gets_a_distinct_slot() {
         let request = request();
@@ -1290,11 +1357,35 @@ mod tests {
                 .map(|(request, text)| (request, text.as_str())),
         );
 
-        assert!(stats.evicted >= previous.len());
-        assert_eq!(atlas.slot_count(), current.len());
+        assert!(stats.evicted > 0);
+        assert!(!atlas.free_rects.is_empty());
         assert!(current
             .iter()
             .all(|(request, text)| atlas.slot_for(request, text).is_some()));
+    }
+
+    /// A HUD label with a changing value must recycle its shelf instead of
+    /// allocating one per value and periodically repacking the whole page.
+    #[test]
+    fn dynamic_text_reuses_freed_shelves_without_growing_the_atlas() {
+        let mut atlas = UiTextAtlas::new([512, 512]);
+        let mut request = request();
+        request.node_id = "hud.speed".to_string();
+        request.max_width = 256.0;
+        for index in 0..256 {
+            let text = format!("Speed {index} km/h");
+            atlas.sync_resolved([(&request, text.as_str())]);
+            assert!(atlas.slot_for(&request, &text).is_some());
+        }
+
+        assert_eq!(atlas.size(), [512, 512]);
+        assert!(
+            atlas.slot_count() <= 10,
+            "stale dynamic values must be reclaimed, got {} slots",
+            atlas.slot_count()
+        );
+        let dirty = atlas.dirty_region().expect("the last value was written");
+        assert!(dirty.width < 512);
     }
 
     #[test]

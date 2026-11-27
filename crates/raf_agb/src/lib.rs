@@ -18,7 +18,9 @@ pub use device::{
     AdapterInfo, Backend, Device, Error, Frame, FrameMetrics, FramePlan, Output, RasterUniforms,
     Result, ShadowFrame,
 };
-pub use workload::{Batch, DrawMode, Instance, ResourcePatch, Texture, Vertex, Workload};
+pub use workload::{
+    Batch, DrawMode, Instance, ResourcePatch, Texture, TextureUpdate, Vertex, Workload,
+};
 
 pub const SHADER: &str = include_str!("shaders/draw.wgsl");
 pub const SCENE_FILTER_SHADER: &str = include_str!("shaders/scene_filter.wgsl");

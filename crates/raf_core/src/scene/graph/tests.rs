@@ -71,6 +71,30 @@ fn render_fingerprint_tracks_visual_changes_only() {
 }
 
 #[test]
+fn hierarchy_fingerprint_ignores_animation_but_tracks_authoring_changes() {
+    let mut graph = SceneGraph::new();
+    let node = graph.add_root_with_primitive("Car", Primitive::Cube);
+    let initial = graph.hierarchy_fingerprint();
+    let render_initial = graph.node_render_fingerprint(node);
+
+    {
+        let car = graph.get_mut(node).unwrap();
+        car.position.x = 12.0;
+        car.rotation.y = 45.0;
+        car.color.r = 20;
+    }
+    assert_eq!(graph.hierarchy_fingerprint(), initial);
+    assert_ne!(graph.node_render_fingerprint(node), render_initial);
+
+    graph.get_mut(node).unwrap().name = "Race car".to_string();
+    assert_ne!(graph.hierarchy_fingerprint(), initial);
+
+    let renamed = graph.hierarchy_fingerprint();
+    graph.get_mut(node).unwrap().visible = false;
+    assert_ne!(graph.hierarchy_fingerprint(), renamed);
+}
+
+#[test]
 fn legacy_sprite_primitive_deserializes_as_plane() {
     let primitive: Primitive = ron::from_str("Sprite2D").expect("legacy primitive alias");
     assert_eq!(primitive, Primitive::Plane);

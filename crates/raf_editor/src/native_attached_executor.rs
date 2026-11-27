@@ -8,15 +8,18 @@ use raf_core::agent_context::{self, AgentObservationResult};
 use raf_core::capabilities::{CapabilityCatalog, CapabilityDefinition};
 use raf_core::config::EngineSettings;
 use raf_core::i18n::t;
-use raf_core::project::Project;
-use raf_core::project::ProjectType;
+use raf_core::performance::{
+    BenchmarkPhase, BenchmarkProject, BenchmarkStore, PerformanceEnvironment,
+    DEFAULT_WINDOW_SECONDS,
+};
+use raf_core::project::{Project, ProjectType};
 use raf_core::scene::{SceneGraph, SceneNodeId};
 use raf_core::session::ProjectSessionRegistry;
 use raf_core::{
     ArtifactRef, CommandEndpoint, CommandSource, EngineCommandRequest, EngineCommandResponse,
     Language, TransactionId, TransactionLedger, UndoToken,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 use crate::agent_artifacts::capture_viewport_artifact;
@@ -34,6 +37,7 @@ use crate::electronics_controller::NativeElectronicsEditor;
 use crate::native_editor_runtime::NativeEditorRuntime;
 use crate::native_project_controller::save_project_document;
 use crate::native_workbench::NativeGameWorkbench;
+use crate::performance_telemetry;
 
 struct NativeGameCommandExecutor<'a> {
     scene: &'a mut SceneGraph,
@@ -244,6 +248,7 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
             let mut context = crate::commands::script::ScriptCommandContext {
                 scene: self.scene,
                 assets_root: self.assets_root.as_deref(),
+                editor_view: None,
             };
             return crate::commands::script::execute(&command.name, command, &mut context);
         }
@@ -254,6 +259,7 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
             let mut context = crate::commands::script::ScriptCommandContext {
                 scene: self.scene,
                 assets_root: self.assets_root.as_deref(),
+                editor_view: None,
             };
             return crate::commands::behavior::execute(command, &mut context, false);
         }
@@ -285,6 +291,7 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
             let mut context = crate::commands::script::ScriptCommandContext {
                 scene: &mut scene,
                 assets_root: self.assets_root.as_deref(),
+                editor_view: None,
             };
             return crate::commands::script::execute(&command.name, command, &mut context);
         }
@@ -402,6 +409,7 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
             let mut context = crate::commands::script::ScriptCommandContext {
                 scene: &mut scene,
                 assets_root: self.assets_root.as_deref(),
+                editor_view: None,
             };
             return crate::commands::behavior::execute(command, &mut context, true);
         }
@@ -538,6 +546,17 @@ pub(crate) fn poll_attached_commands(
                 settings,
                 attached_ledger.revision(),
                 language,
+            );
+            attached_host.respond(command, response);
+            continue;
+        }
+        if is_performance_command(&command.request.name) {
+            let response = execute_attached_performance(
+                &command.request,
+                runtime.as_deref_mut(),
+                project,
+                scene,
+                attached_ledger.revision(),
             );
             attached_host.respond(command, response);
             continue;
@@ -790,6 +809,8 @@ fn is_metadata_command(name: &str) -> bool {
         name.trim_start_matches('/').to_ascii_lowercase().as_str(),
         "engine.status"
             | "status"
+            | "engine.doctor"
+            | "doctor"
             | "engine.context"
             | "agent.context"
             | "project.summary"
@@ -1718,6 +1739,31 @@ fn execute_attached_metadata(
                 .unwrap_or_default();
             editor_status_response(request.id, project, entity_count, &capabilities, revision)
         }
+        "engine.doctor" | "doctor" => {
+            let hardware = raf_core::hardware::report();
+            let lines = vec![
+                "Attached editor is responding.".to_string(),
+                format!(
+                    "{} {} · {} logical core(s) · {} MB RAM",
+                    hardware.os,
+                    hardware.os_version.clone().unwrap_or_default(),
+                    hardware.cpu_cores,
+                    hardware.ram_total_mb.unwrap_or(0)
+                ),
+            ];
+            metadata_response(
+                request.id,
+                "Rafi doctor",
+                lines,
+                json!({
+                    "attached": true,
+                    "hardware": hardware,
+                    "project": project.map(project_info_value),
+                    "revision": revision,
+                }),
+                revision,
+            )
+        }
         "capabilities.list" | "capabilities.search" => {
             let query = request
                 .params
@@ -2124,6 +2170,380 @@ fn observation_metadata_response(
     response.verification = observation.verification;
     response.metrics = serde_json::json!({"attached": true, "observation": true});
     response
+}
+
+fn is_performance_command(name: &str) -> bool {
+    name.starts_with("performance.")
+}
+
+/// Serves performance telemetry and benchmark lifecycles over the attached
+/// boundary. Reads are provided by the same thread-local source used by the
+/// native Agent; nothing here starts Play or the runtime.
+fn execute_attached_performance(
+    request: &EngineCommandRequest,
+    runtime: Option<&mut NativeEditorRuntime>,
+    project: Option<&Project>,
+    scene: &SceneGraph,
+    revision: u64,
+) -> EngineCommandResponse {
+    let no_viewport = || {
+        EngineCommandResponse::error(
+            request.id,
+            "Performance",
+            "Performance telemetry requires a live editor viewport. Open the project in an \
+             editor window; the Hub and headless hosts have no frame loop to sample.",
+        )
+    };
+    match request.name.as_str() {
+        "performance.stats" => {
+            let seconds = request
+                .params
+                .get("window_seconds")
+                .and_then(Value::as_f64)
+                .unwrap_or(DEFAULT_WINDOW_SECONDS as f64) as f32;
+            let Some(runtime) = runtime else {
+                return no_viewport();
+            };
+            let environment = performance_environment(runtime, scene, revision);
+            let window = performance_telemetry::window(seconds, &environment);
+            let mut lines = vec![format!(
+                "{:.1} FPS avg (p95 frame {:.2} ms) | CPU {:.2} ms | GPU {:.2} ms | {}",
+                window.fps.avg,
+                window.frame_ms.p95,
+                window.cpu_ms.avg,
+                window.gpu_ms.avg,
+                window.diagnosis.verdict
+            )];
+            lines.extend(window.diagnosis.evidence.iter().take(2).cloned());
+            metadata_response(
+                request.id,
+                "Performance stats",
+                lines,
+                json!({"window": window}),
+                revision,
+            )
+        }
+        "performance.benchmark.start" => {
+            let Some(project) = project else {
+                return EngineCommandResponse::error(
+                    request.id,
+                    "Performance benchmark",
+                    "Benchmarks require an open project.",
+                );
+            };
+            let Some(runtime) = runtime else {
+                return no_viewport();
+            };
+            let measured_seconds = request
+                .params
+                .get("seconds")
+                .and_then(Value::as_f64)
+                .unwrap_or(10.0)
+                .clamp(1.0, 600.0) as f32;
+            let warmup_seconds = request
+                .params
+                .get("warmup_seconds")
+                .and_then(Value::as_f64)
+                .unwrap_or(2.0)
+                .clamp(0.0, 60.0) as f32;
+            let label = request
+                .params
+                .get("label")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .unwrap_or("benchmark");
+            let environment = performance_environment(runtime, scene, revision);
+            let identity = BenchmarkProject {
+                id: project.id.to_string(),
+                path: project.path.display().to_string(),
+                engine_version: project.engine_version.clone(),
+            };
+            match performance_telemetry::start_benchmark(
+                label,
+                warmup_seconds,
+                measured_seconds,
+                identity,
+                environment.clone(),
+            ) {
+                Ok(id) => {
+                    runtime.set_benchmark_sampling(true);
+                    metadata_response(
+                        request.id,
+                        "Benchmark started",
+                        vec![format!(
+                            "Benchmark {id}: {warmup_seconds:.1}s warmup + {measured_seconds:.1}s \
+                             measured. Keep the viewport active, then call \
+                             performance.benchmark.status."
+                        )],
+                        json!({
+                            "id": id,
+                            "phase": "warmup",
+                            "warmup_seconds": warmup_seconds,
+                            "measured_seconds": measured_seconds,
+                            "environment": environment,
+                        }),
+                        revision,
+                    )
+                }
+                Err(error) => {
+                    EngineCommandResponse::error(request.id, "Performance benchmark", error)
+                }
+            }
+        }
+        "performance.benchmark.status" => {
+            let requested_id = request.params.get("id").and_then(Value::as_str);
+            let Some(progress) = performance_telemetry::benchmark_progress() else {
+                if let (Some(id), Some(project)) = (requested_id, project) {
+                    let store = BenchmarkStore::for_project(&project.path);
+                    if let Ok(report) = store.load(id) {
+                        return metadata_response(
+                            request.id,
+                            "Benchmark report",
+                            benchmark_report_lines(&report),
+                            json!({"report": report}),
+                            revision,
+                        );
+                    }
+                }
+                return EngineCommandResponse::error(
+                    request.id,
+                    "Performance benchmark",
+                    "No benchmark is active. Start one with performance.benchmark.start.",
+                );
+            };
+            if let Some(id) = requested_id {
+                if !id.eq_ignore_ascii_case(&progress.id) {
+                    return EngineCommandResponse::error(
+                        request.id,
+                        "Performance benchmark",
+                        format!(
+                            "Benchmark '{id}' is not active; '{}' is the current run.",
+                            progress.id
+                        ),
+                    );
+                }
+            }
+            if progress.phase == BenchmarkPhase::Completed {
+                return finalize_attached_benchmark(request.id, project, runtime, revision);
+            }
+            metadata_response(
+                request.id,
+                "Benchmark status",
+                vec![format!(
+                    "{}: {} — {:.1}s measured, {:.1}s remaining, {:.1} FPS avg.",
+                    progress.id,
+                    progress.phase.as_str(),
+                    progress.measured_seconds,
+                    progress.remaining_seconds,
+                    progress.fps_avg
+                )],
+                json!({"progress": progress}),
+                revision,
+            )
+        }
+        "performance.benchmark.stop" => {
+            finalize_attached_benchmark(request.id, project, runtime, revision)
+        }
+        "performance.benchmark.cancel" => {
+            if let Some(runtime) = runtime {
+                runtime.set_benchmark_sampling(false);
+            }
+            match performance_telemetry::cancel_benchmark() {
+                Some(id) => metadata_response(
+                    request.id,
+                    "Benchmark cancelled",
+                    vec![format!("Cancelled benchmark {id}.")],
+                    json!({"cancelled": id}),
+                    revision,
+                ),
+                None => EngineCommandResponse::error(
+                    request.id,
+                    "Performance benchmark",
+                    "No benchmark is active.",
+                ),
+            }
+        }
+        "performance.benchmark.list" => {
+            let Some(project) = project else {
+                return EngineCommandResponse::error(
+                    request.id,
+                    "Performance benchmark",
+                    "Benchmarks require an open project.",
+                );
+            };
+            match BenchmarkStore::for_project(&project.path).list() {
+                Ok(reports) => {
+                    let mut lines: Vec<String> = reports
+                        .iter()
+                        .take(6)
+                        .map(|report| {
+                            format!(
+                                "{} — {:.1} FPS avg, p95 {:.2} ms ({})",
+                                report.id, report.fps_avg, report.frame_p95, report.verdict
+                            )
+                        })
+                        .collect();
+                    if lines.is_empty() {
+                        lines.push("No saved benchmarks yet.".to_string());
+                    }
+                    metadata_response(
+                        request.id,
+                        "Benchmarks",
+                        lines,
+                        json!({"count": reports.len(), "benchmarks": reports}),
+                        revision,
+                    )
+                }
+                Err(error) => {
+                    EngineCommandResponse::error(request.id, "Performance benchmark", error)
+                }
+            }
+        }
+        "performance.benchmark.compare" => {
+            let (Some(left), Some(right)) = (
+                request.params.get("a").and_then(Value::as_str),
+                request.params.get("b").and_then(Value::as_str),
+            ) else {
+                return EngineCommandResponse::error(
+                    request.id,
+                    "Performance benchmark",
+                    "performance.benchmark.compare requires 'a' and 'b' benchmark ids.",
+                );
+            };
+            let Some(project) = project else {
+                return EngineCommandResponse::error(
+                    request.id,
+                    "Performance benchmark",
+                    "Benchmarks require an open project.",
+                );
+            };
+            match BenchmarkStore::for_project(&project.path).compare(left, right) {
+                Ok(comparison) => {
+                    let mut lines = vec![format!(
+                        "{} → {}: {} | FPS {:+.1}% | p95 frame {:+.1}%",
+                        comparison.left.id,
+                        comparison.right.id,
+                        comparison.verdict,
+                        comparison.fps.delta_percent,
+                        comparison.frame_p95.delta_percent
+                    )];
+                    lines.extend(comparison.warnings.clone());
+                    metadata_response(
+                        request.id,
+                        "Benchmark comparison",
+                        lines,
+                        json!(comparison),
+                        revision,
+                    )
+                }
+                Err(error) => {
+                    EngineCommandResponse::error(request.id, "Performance benchmark", error)
+                }
+            }
+        }
+        other => EngineCommandResponse::error(
+            request.id,
+            "Performance",
+            format!("Unknown performance command '{other}'."),
+        ),
+    }
+}
+
+fn performance_environment(
+    runtime: &NativeEditorRuntime,
+    scene: &SceneGraph,
+    revision: u64,
+) -> PerformanceEnvironment {
+    let snapshot = runtime.graphics().snapshot();
+    let scheduler = snapshot.scheduler_metrics;
+    let metrics = snapshot.last_frame_metrics;
+    let backend = snapshot
+        .capabilities
+        .map(|capabilities| format!("{:?}", capabilities.backend))
+        .unwrap_or_else(|| snapshot.status_badge());
+    let gpu_hardware = snapshot
+        .capabilities
+        .is_some_and(|capabilities| capabilities.gpu_hardware);
+    let gpu_timing_supported = snapshot
+        .capabilities
+        .is_some_and(|capabilities| capabilities.timestamp_queries)
+        || metrics.gpu_timing_supported;
+    let [width, height] = runtime.target_size();
+    PerformanceEnvironment {
+        backend,
+        gpu_hardware,
+        gpu_timing_supported,
+        target_fps: scheduler.target_fps,
+        requested_target_fps: scheduler.requested_target_fps,
+        width,
+        height,
+        revision,
+        scene_fingerprint: crate::scene_history::scene_fingerprint(scene),
+    }
+}
+
+fn finalize_attached_benchmark(
+    id: raf_core::CommandId,
+    project: Option<&Project>,
+    runtime: Option<&mut NativeEditorRuntime>,
+    revision: u64,
+) -> EngineCommandResponse {
+    let Some(project) = project else {
+        return EngineCommandResponse::error(
+            id,
+            "Performance benchmark",
+            "Benchmarks require an open project.",
+        );
+    };
+    match performance_telemetry::finish_benchmark() {
+        Ok(report) => {
+            if let Some(runtime) = runtime {
+                runtime.set_benchmark_sampling(false);
+            }
+            let store = BenchmarkStore::for_project(&project.path);
+            match store.save(&report) {
+                Ok(path) => metadata_response(
+                    id,
+                    "Benchmark report",
+                    benchmark_report_lines(&report),
+                    json!({
+                        "report": report,
+                        "saved_path": path.display().to_string(),
+                    }),
+                    revision,
+                ),
+                Err(error) => EngineCommandResponse::error(
+                    id,
+                    "Performance benchmark",
+                    format!("The benchmark finished but its report could not be saved: {error}"),
+                ),
+            }
+        }
+        Err(error) => EngineCommandResponse::error(id, "Performance benchmark", error),
+    }
+}
+
+fn benchmark_report_lines(report: &raf_core::performance::BenchmarkReport) -> Vec<String> {
+    vec![
+        format!(
+            "{:.1} FPS avg | p95 frame {:.2} ms | CPU {:.2} ms | GPU {:.2} ms | {}",
+            report.window.fps.avg,
+            report.window.frame_ms.p95,
+            report.window.cpu_ms.avg,
+            report.window.gpu_ms.avg,
+            report.window.diagnosis.verdict
+        ),
+        format!(
+            "{} sample(s) over {:.1}s in {}x{} on {}.",
+            report.sample_count,
+            report.measured_seconds,
+            report.window.environment.width,
+            report.window.environment.height,
+            report.window.environment.backend
+        ),
+        format!("Saved as {}.", report.id),
+    ]
 }
 
 fn metadata_response(

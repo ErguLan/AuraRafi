@@ -6,6 +6,7 @@ mod pipeline;
 mod shadow;
 mod target;
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use ash::vk;
@@ -13,7 +14,7 @@ use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use crate::{
     product::Layer, AdapterInfo, Backend, Batch, Error, Frame, FrameMetrics, FramePlan, Instance,
-    Output, RasterUniforms, ResourcePatch, Result, Vertex, Workload,
+    Output, RasterUniforms, ResourcePatch, Result, TextureUpdate, Vertex, Workload,
 };
 
 use context::{Gpu, Surface};
@@ -22,6 +23,118 @@ use pipeline::{Descriptors, Pipelines};
 use target::Target;
 
 const CAMERA_BYTES: usize = std::mem::size_of::<RasterUniforms>();
+const DEFAULT_TEXTURE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+
+struct PendingTexture {
+    key: TextureCacheKey,
+    image: Rc<Image>,
+    data: Vec<u8>,
+    levels: Vec<([u32; 2], u64)>,
+    mip_levels: u32,
+}
+
+struct PendingTextureRegion {
+    image: Rc<Image>,
+    origin: [u32; 2],
+    size: [u32; 2],
+    data: Vec<u8>,
+}
+
+fn mip_level_count([width, height]: [u32; 2]) -> u32 {
+    let mut levels = 1;
+    let mut width = width.max(1);
+    let mut height = height.max(1);
+    while width > 1 || height > 1 {
+        width = (width / 2).max(1);
+        height = (height / 2).max(1);
+        levels += 1;
+    }
+    levels
+}
+
+/// Builds a tightly packed mip chain with a box filter. The top level is
+/// copied verbatim; later levels are generated once when the GPU image is
+/// first admitted and then reused with the retained texture cache.
+fn build_mip_chain(rgba: &[u8], size: [u32; 2]) -> (Vec<u8>, Vec<([u32; 2], u64)>, u32) {
+    let mips = mip_level_count(size);
+    let mut data = Vec::with_capacity(rgba.len() + rgba.len() / 3 + 16);
+    let mut levels = Vec::with_capacity(mips as usize);
+    data.extend_from_slice(rgba);
+    levels.push((size, 0));
+    let mut width = size[0].max(1) as usize;
+    let mut height = size[1].max(1) as usize;
+    let mut current = rgba.to_vec();
+    for _ in 1..mips {
+        let next_width = (width / 2).max(1);
+        let next_height = (height / 2).max(1);
+        let mut next = vec![0_u8; next_width * next_height * 4];
+        for y in 0..next_height {
+            let sy0 = y * height / next_height;
+            let sy1 = (((y + 1) * height + next_height - 1) / next_height)
+                .max(sy0 + 1)
+                .min(height);
+            for x in 0..next_width {
+                let sx0 = x * width / next_width;
+                let sx1 = (((x + 1) * width + next_width - 1) / next_width)
+                    .max(sx0 + 1)
+                    .min(width);
+                let mut sums = [0_u64; 4];
+                let mut samples = 0_u64;
+                for sy in sy0..sy1 {
+                    for sx in sx0..sx1 {
+                        let index = (sy * width + sx) * 4;
+                        for channel in 0..4 {
+                            sums[channel] += u64::from(current[index + channel]);
+                        }
+                        samples += 1;
+                    }
+                }
+                let target = (y * next_width + x) * 4;
+                let samples = samples.max(1);
+                for channel in 0..4 {
+                    next[target + channel] =
+                        ((sums[channel] + samples / 2) / samples) as u8;
+                }
+            }
+        }
+        let offset = data.len() as u64;
+        data.extend_from_slice(&next);
+        levels.push(([next_width as u32, next_height as u32], offset));
+        current = next;
+        width = next_width;
+        height = next_height;
+        if width == 1 && height == 1 {
+            break;
+        }
+    }
+    let actual = levels.len() as u32;
+    (data, levels, actual)
+}
+
+/// Fast full-content identity for retained texture reuse. Word-at-a-time FNV
+/// keeps the CPU cost of a multi-megabyte UI page well below one GPU upload.
+fn hash_texture(size: [u32; 2], rgba: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    hash = (hash ^ u64::from(size[0])).wrapping_mul(0x0000_0100_0000_01b3);
+    hash = (hash ^ u64::from(size[1])).wrapping_mul(0x0000_0100_0000_01b3);
+    let mut words = rgba.chunks_exact(8);
+    for word in &mut words {
+        let value = u64::from_le_bytes(word.try_into().expect("eight byte chunk"));
+        hash = (hash ^ value).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    for byte in words.remainder() {
+        hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+type TextureCacheKey = ([u32; 2], u64);
+
+struct CachedTexture {
+    image: Rc<Image>,
+    bytes: u64,
+    last_used: u64,
+}
 
 pub struct Vulkan {
     filter: Option<filter::FilterPass>,
@@ -36,11 +149,16 @@ pub struct Vulkan {
     info: AdapterInfo,
     completed_gpu_ms: Option<f64>,
     has_timestamp_sample: bool,
+    texture_cache: HashMap<TextureCacheKey, CachedTexture>,
+    texture_cache_bytes: u64,
+    texture_cache_budget: u64,
+    texture_clock: u64,
 }
 
 pub struct Resident {
     descriptors: Descriptors,
-    textures: Vec<Image>,
+    textures: Vec<Rc<Image>>,
+    texture_keys: Vec<TextureCacheKey>,
     geometry: Buffer,
     instance_offset: u64,
     index_offset: Option<u64>,
@@ -80,7 +198,63 @@ impl Vulkan {
             last_camera: None,
             completed_gpu_ms: None,
             has_timestamp_sample: false,
+            texture_cache: HashMap::new(),
+            texture_cache_bytes: 0,
+            texture_cache_budget: DEFAULT_TEXTURE_CACHE_BYTES,
+            texture_clock: 0,
         })
+    }
+
+    /// Keeps uploaded textures alive across packet replacements. A UI text
+    /// edit or a scene packet rebuild re-appends the same icon/atlas bytes;
+    /// reusing the GPU image removes the multi-megabyte transfer that was
+    /// causing frame hitches.
+    fn cached_texture(&mut self, key: TextureCacheKey) -> Option<Rc<Image>> {
+        let clock = self.next_texture_clock();
+        let cached = self.texture_cache.get_mut(&key)?;
+        cached.last_used = clock;
+        Some(Rc::clone(&cached.image))
+    }
+
+    fn insert_texture_cache(&mut self, key: TextureCacheKey, image: Rc<Image>, bytes: u64) {
+        let clock = self.next_texture_clock();
+        if let Some(previous) = self.texture_cache.insert(
+            key,
+            CachedTexture {
+                image,
+                bytes,
+                last_used: clock,
+            },
+        ) {
+            self.texture_cache_bytes = self.texture_cache_bytes.saturating_sub(previous.bytes);
+        }
+        self.texture_cache_bytes = self.texture_cache_bytes.saturating_add(bytes);
+        while self.texture_cache_bytes > self.texture_cache_budget {
+            let Some(oldest) = self
+                .texture_cache
+                .iter()
+                .min_by_key(|(_, cached)| cached.last_used)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            if let Some(removed) = self.texture_cache.remove(&oldest) {
+                self.texture_cache_bytes = self.texture_cache_bytes.saturating_sub(removed.bytes);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn invalidate_texture_cache(&mut self, key: TextureCacheKey) {
+        if let Some(removed) = self.texture_cache.remove(&key) {
+            self.texture_cache_bytes = self.texture_cache_bytes.saturating_sub(removed.bytes);
+        }
+    }
+
+    fn next_texture_clock(&mut self) -> u64 {
+        self.texture_clock = self.texture_clock.wrapping_add(1).max(1);
+        self.texture_clock
     }
 
     fn begin(&mut self) -> Result<vk::CommandBuffer> {
@@ -185,19 +359,92 @@ impl Backend for Vulkan {
             .ok_or(Error::Invalid("configure a target before uploading"))?
             .bindings
             .clone();
-        let bytes = workload.bytes();
         let vertex = bytemuck::cast_slice(&workload.vertices);
         let instances = bytemuck::cast_slice(&workload.instances);
         let indices: &[u8] = bytemuck::cast_slice(&workload.indices);
         let instance_offset = vertex.len() as u64;
         let index_offset = instance_offset + instances.len() as u64;
         let geometry_size = index_offset + indices.len() as u64;
-        let mut staging = Buffer::host(&self.gpu, bytes, vk::BufferUsageFlags::TRANSFER_SRC)?;
+        let mut textures = Vec::with_capacity(workload.textures.len());
+        let mut texture_keys = Vec::with_capacity(workload.textures.len());
+        let mut changed: Vec<PendingTexture> = Vec::new();
+        let mut regions: Vec<PendingTextureRegion> = Vec::new();
+        let updates = workload
+            .texture_updates
+            .iter()
+            .map(|update| (update.texture, update))
+            .collect::<HashMap<u32, &TextureUpdate>>();
+        let mut texture_bytes = 0_u64;
+        let mut region_bytes = 0_u64;
+        for (index, texture) in workload.textures.iter().enumerate() {
+            let stable = workload.texture_ids.get(index).copied().unwrap_or(0);
+            let identity = if stable != 0 {
+                stable
+            } else {
+                hash_texture(texture.size, &texture.rgba)
+            };
+            let key = (texture.size, identity);
+            texture_keys.push(key);
+            if let Some(image) = self.cached_texture(key) {
+                textures.push(Rc::clone(&image));
+                // A retained image whose pixels changed receives only the
+                // rectangle that the producer refreshed.
+                if let Some(update) = updates.get(&(index as u32)) {
+                    region_bytes = region_bytes.saturating_add(update.rgba.len() as u64);
+                    regions.push(PendingTextureRegion {
+                        image,
+                        origin: update.origin,
+                        size: update.size,
+                        data: update.rgba.clone(),
+                    });
+                }
+            } else {
+                let (data, levels, mip_levels) = if texture.mipmaps {
+                    build_mip_chain(&texture.rgba, texture.size)
+                } else {
+                    (texture.rgba.to_vec(), vec![(texture.size, 0)], 1)
+                };
+                let image = Rc::new(Image::with_levels(
+                    &self.gpu,
+                    texture.size,
+                    vk::Format::R8G8B8A8_UNORM,
+                    vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+                    vk::ImageAspectFlags::COLOR,
+                    mip_levels,
+                )?);
+                textures.push(Rc::clone(&image));
+                texture_bytes = texture_bytes.saturating_add(data.len() as u64);
+                changed.push(PendingTexture {
+                    key,
+                    image,
+                    data,
+                    levels,
+                    mip_levels,
+                });
+            }
+        }
+        let staging_size = geometry_size
+            .saturating_add(texture_bytes)
+            .saturating_add(region_bytes)
+            .max(1);
+        let mut staging =
+            Buffer::host(&self.gpu, staging_size, vk::BufferUsageFlags::TRANSFER_SRC)?;
         staging.write(0, vertex);
         staging.write(instance_offset, instances);
         if !indices.is_empty() {
             staging.write(index_offset, indices);
         }
+        let mut texture_offset = geometry_size;
+        for pending in &changed {
+            staging.write(texture_offset, &pending.data);
+            texture_offset = texture_offset.saturating_add(pending.data.len() as u64);
+        }
+        for region in &regions {
+            staging.write(texture_offset, &region.data);
+            texture_offset = texture_offset.saturating_add(region.data.len() as u64);
+        }
+        // `staging_size` already covers every changed texture. Reused images
+        // keep their existing GPU allocation and layout.
         let geometry = Buffer::local(
             &self.gpu,
             geometry_size,
@@ -205,19 +452,6 @@ impl Backend for Vulkan {
                 | vk::BufferUsageFlags::INDEX_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST,
         )?;
-        let mut textures = Vec::with_capacity(workload.textures.len());
-        let mut offset = geometry_size;
-        for texture in &workload.textures {
-            staging.write(offset, &texture.rgba);
-            offset += texture.rgba.len() as u64;
-            textures.push(Image::new(
-                &self.gpu,
-                texture.size,
-                vk::Format::R8G8B8A8_UNORM,
-                vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
-                vk::ImageAspectFlags::COLOR,
-            )?);
-        }
         let descriptors = Descriptors::new(&self.gpu, layouts, &self.camera, &textures)?;
         let cmd = self.begin()?;
         let device = &self.gpu.device;
@@ -253,16 +487,44 @@ impl Backend for Vulkan {
                 &[],
             );
             let mut offset = geometry_size;
-            for (texture, source) in textures.iter().zip(&workload.textures) {
-                memory::upload_image(device, cmd, staging.raw, offset, texture.raw, source.size);
-                offset += source.rgba.len() as u64;
+            for pending in &changed {
+                memory::upload_texture(
+                    device,
+                    cmd,
+                    staging.raw,
+                    offset,
+                    pending.image.raw,
+                    &pending.levels,
+                    pending.mip_levels,
+                );
+                offset = offset.saturating_add(pending.data.len() as u64);
+            }
+            for region in &regions {
+                memory::upload_texture_region(
+                    device,
+                    cmd,
+                    staging.raw,
+                    offset,
+                    region.image.raw,
+                    region.origin,
+                    region.size,
+                );
+                offset = offset.saturating_add(region.data.len() as u64);
             }
         }
         self.submit.submit(None)?;
         self.wait_render()?;
+        for pending in changed {
+            self.insert_texture_cache(
+                pending.key,
+                pending.image,
+                pending.data.len() as u64,
+            );
+        }
         Ok(Resident {
             descriptors,
             textures,
+            texture_keys,
             geometry,
             instance_offset,
             index_offset: (!indices.is_empty()).then_some(index_offset),
@@ -280,6 +542,29 @@ impl Backend for Vulkan {
         // the single combined packet so its output stays byte-for-byte on the
         // previous path.
         self.surface.is_some()
+    }
+
+    fn supports_frame_instance_patches(&self) -> bool {
+        true
+    }
+
+    fn set_texture_cache_budget(&mut self, bytes: u64) {
+        self.texture_cache_budget = bytes.max(1);
+        while self.texture_cache_bytes > self.texture_cache_budget {
+            let Some(oldest) = self
+                .texture_cache
+                .iter()
+                .min_by_key(|(_, cached)| cached.last_used)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            if let Some(removed) = self.texture_cache.remove(&oldest) {
+                self.texture_cache_bytes = self.texture_cache_bytes.saturating_sub(removed.bytes);
+            } else {
+                break;
+            }
+        }
     }
 
     fn draw(

@@ -215,8 +215,7 @@ impl UiSurfaceCompilationCache {
         self.metrics.layout_cache_hit =
             self.layout.as_ref().is_some_and(|cached| cached.key == key);
         self.metrics.paint_cache_hit = false;
-        if self.layout.as_ref().is_some_and(|cached| cached.key == key) {
-            let paint_state_key = UiSurfacePaintStateKey::new(surface, session);
+        if self.layout.as_ref().is_some_and(|cached| cached.key == key) {            let paint_state_key = UiSurfacePaintStateKey::new(surface, session);
             let needs_paint_refresh = self.paint_snapshot_invalidated
                 || self
                     .layout

@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use raf_core::config::Language;
 use raf_core::i18n::t;
-use raf_core::project::{Project, ProjectType, RecentProjectEntry, RecentProjects};
+use raf_core::project::{EditorViewMode, Project, ProjectType, RecentProjectEntry, RecentProjects};
 use raf_core::{InputOwner, InputRegionId, InputRouter};
 use raf_render::api_graphic_basic::ui_surface::{
     DirectUiSurfaceHost, NativeGraphicsContext, NativeUiInputBridge, UiAction, UiDispatchedAction,
@@ -54,6 +54,7 @@ pub enum NativeStudioIntent {
         name: String,
         parent: PathBuf,
         project_type: ProjectType,
+        initial_view: EditorViewMode,
         with_agent: bool,
     },
 }
@@ -245,6 +246,8 @@ impl NativeStudioSurface {
         self.model.context_confirm_forget = false;
         self.model.hovered_project_path = None;
         self.model.create_type_menu_open = false;
+        self.model.create_advanced_open = false;
+        self.model.create_initial_view = EditorViewMode::View3d;
         self.model.get_in_menu_open = false;
         self.model.get_in_menu_position = None;
         self.model.pending_adopt = None;
@@ -739,6 +742,24 @@ impl NativeStudioSurface {
                     self.model.create_project_type = ProjectType::Electronics;
                     self.model.create_type_menu_open = false;
                 }
+                "hub.create.advanced-toggle" => {
+                    self.model.create_advanced_open = !self.model.create_advanced_open;
+                    self.model.create_type_menu_open = false;
+                    self.model.create_active = true;
+                    self.model.create_error = None;
+                }
+                "hub.create.advanced.view.2d" => {
+                    self.model.create_initial_view = EditorViewMode::View2d;
+                    self.model.create_type_menu_open = false;
+                    self.model.create_active = true;
+                    self.model.create_error = None;
+                }
+                "hub.create.advanced.view.3d" => {
+                    self.model.create_initial_view = EditorViewMode::View3d;
+                    self.model.create_type_menu_open = false;
+                    self.model.create_active = true;
+                    self.model.create_error = None;
+                }
                 "hub.create.choose-path" => {
                     let current = self.model.create_path.clone();
                     if let Some(path) = folder_picker::pick_folder(&current) {
@@ -769,6 +790,7 @@ impl NativeStudioSurface {
                                 name,
                                 parent,
                                 project_type: self.model.create_project_type,
+                                initial_view: self.model.create_initial_view,
                                 with_agent: self.model.create_with_agent,
                             });
                         }

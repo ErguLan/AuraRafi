@@ -153,18 +153,28 @@ pub struct ScriptEventQueue {
 /// A single audio command emitted by a script.
 #[derive(Debug, Clone)]
 pub enum AudioCommand {
-    Play { name: String },
-    Stop { name: String },
+    Play {
+        name: String,
+    },
+    Stop {
+        name: String,
+    },
     StopAll,
-    SetVolume { name: String, volume: f32 },
-    SetBusVolume { bus: raf_core::scene::AudioBus, volume: f32 },
+    SetVolume {
+        name: String,
+        volume: f32,
+    },
+    SetBusVolume {
+        bus: raf_core::scene::AudioBus,
+        volume: f32,
+    },
 }
 
 #[cfg(test)]
 mod mesh_tests {
     use super::*;
-    use crate::{AudioCommandQueue, InputSnapshot, TimeInfo};
     use crate::host_api::ScriptEventQueue;
+    use crate::{AudioCommandQueue, InputSnapshot, TimeInfo};
     use raf_core::scene::{EditableMeshData, Primitive, SceneGraph};
 
     fn context(scene: &mut SceneGraph, run: impl FnOnce(&mut ScriptContext<'_>)) {
@@ -264,7 +274,8 @@ impl AudioCommandQueue {
     }
 
     pub fn set_bus_volume(&mut self, bus: raf_core::scene::AudioBus, volume: f32) {
-        self.commands.push(AudioCommand::SetBusVolume { bus, volume });
+        self.commands
+            .push(AudioCommand::SetBusVolume { bus, volume });
     }
 
     /// Drain all queued commands (called by the audio system after scripts run).
@@ -535,11 +546,7 @@ impl<'a> ScriptContext<'a> {
             .map_or(0, |mesh| mesh.revision as i64))
     }
 
-    pub fn mesh_vertex(
-        &self,
-        handle: NodeHandle,
-        index: i64,
-    ) -> ScriptResult<ScriptValue> {
+    pub fn mesh_vertex(&self, handle: NodeHandle, index: i64) -> ScriptResult<ScriptValue> {
         let id = handle.resolve(self)?;
         let node = self
             .scene
@@ -575,14 +582,11 @@ impl<'a> ScriptContext<'a> {
         }
         let mesh = self.mesh_mut(handle)?;
         let index = index as u32;
-        let current = mesh
-            .vertex_position(index)
-            .ok_or_else(|| ScriptError::InvalidArgument("mesh vertex index is out of range".into()))?;
-        mesh.move_vertices(
-            &[index],
-            [x - current.x, y - current.y, z - current.z],
-        )
-        .map_err(|error| ScriptError::InvalidArgument(error.into()))?;
+        let current = mesh.vertex_position(index).ok_or_else(|| {
+            ScriptError::InvalidArgument("mesh vertex index is out of range".into())
+        })?;
+        mesh.move_vertices(&[index], [x - current.x, y - current.y, z - current.z])
+            .map_err(|error| ScriptError::InvalidArgument(error.into()))?;
         Ok(())
     }
 
@@ -627,12 +631,7 @@ impl<'a> ScriptContext<'a> {
             .map_or(-1, |face| face as i64))
     }
 
-    pub fn mesh_inset(
-        &mut self,
-        handle: NodeHandle,
-        face: i64,
-        amount: f32,
-    ) -> ScriptResult<i64> {
+    pub fn mesh_inset(&mut self, handle: NodeHandle, face: i64, amount: f32) -> ScriptResult<i64> {
         if face < 0 || !amount.is_finite() {
             return Err(ScriptError::InvalidArgument(
                 "mesh inset requires a non-negative face and finite amount".into(),
